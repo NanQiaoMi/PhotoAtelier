@@ -13,7 +13,7 @@ public final class PhotoEngine {
     private static let analysisDimension = 64
     private static let maximumMaskRasterDimension = 2048
 
-    private static let toneKernel = CIColorKernel(source: """
+    static let localToneKernel = CIColorKernel(source: """
     kernel vec4 toneAdjust(__sample source, float saturation, float contrast,
                            float highlights, float shadows) {
         float alpha = source.a;
@@ -223,20 +223,29 @@ public final class PhotoEngine {
             throw AtelierError.invalidConfiguration("局部蒙版数量不能超过 16 个。")
         }
 
+        guard settings.masks.reduce(0, { $0 + $1.components.count }) <= 64 else {
+            throw AtelierError.invalidConfiguration("所有蒙版的修边步骤总数不能超过 64 个。")
+        }
+        var identifiers = Set<UUID>()
+        var totalMaskPoints = 0
         for (index, mask) in settings.masks.enumerated() {
             let prefix = "第 \(index + 1) 个蒙版"
-            try validatePoint(mask.start, named: "\(prefix)起点")
-            try validatePoint(mask.end, named: "\(prefix)终点")
-            try require(mask.radius, within: 0...1, named: "\(prefix)半径")
-            try require(mask.feather, within: 0...1, named: "\(prefix)羽化")
-            try require(mask.exposureEV, within: -8...8, named: "\(prefix)曝光")
-            try require(mask.saturation, within: 0...4, named: "\(prefix)饱和度")
-            try require(mask.warmth, within: -1...1, named: "\(prefix)暖度")
-            guard mask.name.count <= 256, mask.points.count <= 4096 else {
-                throw AtelierError.invalidConfiguration("\(prefix)名称或画笔点数超过安全上限。")
+            guard identifiers.insert(mask.id).inserted else {
+                throw AtelierError.invalidConfiguration("\(prefix)标识与其他蒙版重复。")
             }
-            for point in mask.points {
-                try validatePoint(point, named: "\(prefix)画笔点")
+            do {
+                try LocalMaskValidator.validate(mask)
+            } catch {
+                throw AtelierError.invalidConfiguration("\(prefix)：\(error.localizedDescription)")
+            }
+            totalMaskPoints += mask.points.count + mask.components.reduce(0) { $0 + $1.points.count }
+            guard totalMaskPoints <= 32768 else {
+                throw AtelierError.invalidConfiguration("全部蒙版的总笔迹点数不能超过 32768。")
+            }
+            for component in mask.components {
+                guard identifiers.insert(component.id).inserted else {
+                    throw AtelierError.invalidConfiguration("\(prefix)组件标识与其他蒙版或组件重复。")
+                }
             }
         }
     }
@@ -287,7 +296,7 @@ public final class PhotoEngine {
 
         if settings.saturation != 1 || settings.contrast != 1 ||
             settings.highlights != 0 || settings.shadows != 0 {
-            guard let kernel = Self.toneKernel else {
+            guard let kernel = Self.localToneKernel else {
                 throw AtelierError.invalidConfiguration("Core Image 色调 kernel 编译失败。")
             }
             guard let adjusted = kernel.apply(extent: working.extent, arguments: [
@@ -316,6 +325,18 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
+        // The range/protection reference remains the global-only image throughout
+        // both mask stages, avoiding feedback from preceding local adjustments.
+        let localMaskReference = working
+        for mask in settings.masks where mask.enabled && mask.stage == .beforeLook {
+            try cancellation?.check()
+            if mask.kind == .brush, mask.points.isEmpty, mask.components.isEmpty {
+                report.warnings.append("画笔蒙版“\(mask.name)”没有笔迹，已跳过。")
+                continue
+            }
+            working = try applyLocalMask(mask, to: working, reference: localMaskReference)
+        }
+
         if let lut, settings.lutIntensity > 0 {
             try validate(lut)
             report.warnings.append(".cube 文件不包含输入传递函数标记，已按“\(settings.lutColorSpace.title)”解释输入和输出；Log 曲线 LUT 尚不支持自动识别。")
@@ -343,17 +364,69 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
-        for mask in settings.masks where mask.enabled {
+        for mask in settings.masks where mask.enabled && mask.stage == .afterLook {
             try cancellation?.check()
-            guard mask.kind != .brush || !mask.points.isEmpty else {
+            guard mask.kind != .brush || !mask.points.isEmpty || !mask.components.isEmpty else {
                 report.warnings.append("画笔蒙版“\(mask.name)”没有笔迹，已跳过。")
                 continue
             }
-            working = try apply(mask, to: working)
+            if LocalMaskEngine.isLegacyCompatibleAfterLook(mask) {
+                working = try apply(mask, to: working)
+            } else {
+                working = try applyLocalMask(mask, to: working, reference: localMaskReference)
+            }
         }
 
         try cancellation?.check()
         return ProcessedPhoto(image: working, report: report)
+    }
+
+    /// Returns the mask's effective coverage as a linear, single-channel CIImage.
+    /// Its extent and origin match `reference`; geometry is rasterized at no more
+    /// than 2048 pixels per longest edge before Core Image scales it back.
+    public func localMaskImage(_ mask: LocalMask, reference: CIImage) throws -> CIImage {
+        var settings = AdjustmentSettings()
+        settings.masks = [mask]
+        try Self.validate(settings)
+        let extent = try validExtent(of: reference)
+        guard mask.enabled, mask.kind != .brush || !mask.points.isEmpty || !mask.components.isEmpty else {
+            return CIImage(color: .black).cropped(to: extent)
+        }
+        if LocalMaskEngine.isLegacyCompatibleAfterLook(mask) {
+            return try renderMask(mask, extent: extent)
+        }
+        return try LocalMaskEngine.coverage(for: mask, reference: reference, context: context)
+    }
+
+    /// Builds the stable mask-selection reference using global adjustments and
+    /// geometry only. Masks and LUT processing are intentionally removed.
+    public func maskReferenceImage(_ image: CIImage, settings: AdjustmentSettings,
+                                   cancellation: CancellationToken? = nil) throws -> CIImage {
+        var base = settings
+        base.masks = []
+        return try process(image, settings: base, lut: nil, cancellation: cancellation).image
+    }
+
+    /// Samples a small neighborhood and returns its average as encoded sRGB.
+    public func sampleMaskColor(at point: MaskPoint, reference: CIImage) throws -> MaskColor {
+        try LocalMaskEngine.sampleColor(at: point, reference: reference, context: context)
+    }
+
+    /// Summarizes the actual mask-weighted region and provides conservative
+    /// suggestions. Suggestions are data only and never mutate the recipe.
+    public func inspectLocalMask(_ mask: LocalMask, reference: CIImage) throws -> MaskInspection {
+        let coverage = try localMaskImage(mask, reference: reference)
+        return try LocalMaskEngine.inspect(mask, reference: reference, context: context,
+                                           coverageImage: coverage)
+    }
+
+    private func applyLocalMask(_ mask: LocalMask, to image: CIImage,
+                                reference: CIImage) throws -> CIImage {
+        try LocalMaskEngine.apply(mask, to: image, reference: reference, context: context,
+                                  makeFilter: { try self.makeFilter($0) },
+                                  applyTemperature: { temperature, tint, source in
+                                      try self.applyTemperature(temperature, tint: tint, to: source)
+                                  })
     }
 
     private static func require(_ value: Double, within range: ClosedRange<Double>, named name: String) throws {
@@ -774,23 +847,29 @@ public final class PhotoEngine {
                 bitmap.addPath(path)
                 bitmap.strokePath()
             }
+
+        case .luminance, .color:
+            bitmap.setFillColor(gray: 1, alpha: 1)
+            bitmap.fill(CGRect(x: 0, y: 0, width: width, height: height))
         }
 
         guard let cgImage = bitmap.makeImage() else {
             throw AtelierError.invalidConfiguration("无法生成蒙版图像。")
         }
-        let raster = CIImage(cgImage: cgImage, options: [.colorSpace: workingColorSpace])
+        var raster = CIImage(cgImage: cgImage, options: [.colorSpace: workingColorSpace])
+        if mask.kind == .brush, mask.feather > 0.0001, !mask.points.isEmpty {
+            // Soften before scaling the capped raster: the blur radius then remains
+            // proportional to the normalized brush size on large source images.
+            let blurRadius = max(radius * CGFloat(mask.feather) * 0.5, 0.5)
+            raster = try apply("CIGaussianBlur", to: raster.clampedToExtent(),
+                               parameters: ["inputRadius": NSNumber(value: Double(blurRadius))])
+                .cropped(to: raster.extent)
+        }
         let imageScaleX = extent.width / CGFloat(width)
         let imageScaleY = extent.height / CGFloat(height)
         let scaled = raster.transformed(by: CGAffineTransform(scaleX: imageScaleX, y: imageScaleY))
         var output = scaled.transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
             .cropped(to: extent)
-        if mask.kind == .brush, mask.feather > 0.0001 {
-            let blurRadius = max(radius * CGFloat(mask.feather) * 0.5, 0.5)
-            output = try apply("CIGaussianBlur", to: output,
-                               parameters: ["inputRadius": NSNumber(value: Double(blurRadius))])
-                .cropped(to: extent)
-        }
         if mask.inverted {
             output = try apply("CIColorInvert", to: output, parameters: [:]).cropped(to: extent)
         }

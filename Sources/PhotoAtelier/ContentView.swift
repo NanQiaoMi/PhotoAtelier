@@ -48,6 +48,19 @@ struct ContentView: View {
         .onChange(of: model.selectedLUT) { _ in model.requestPreview() }
         .onChange(of: model.adjustments.lutColorSpace) { _ in model.rememberLUTSpace() }
         .onChange(of: model.exportSettings.recursive) { _ in model.reloadFolder() }
+        .onChange(of: model.selectedMask) { _ in model.maskSelectionChanged() }
+        .onChange(of: model.showMaskCoverage) { showing in
+            if showing { compare = false }
+            model.requestPreview()
+        }
+        .onChange(of: model.maskInteractionActive) { active in if active { compare = false } }
+        .onChange(of: model.maskDrawMode) { _ in model.drawingMask = false; model.maskEditMode = false }
+        .onChange(of: model.maskKind) { kind in
+            if kind == .luminance || kind == .color { model.drawingMask = false }
+        }
+        .onChange(of: inspectorTab) { tab in
+            if tab != 2 { model.cancelMaskInteraction(); model.showMaskCoverage = false }
+        }
         .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("知道了", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
@@ -159,7 +172,7 @@ struct ContentView: View {
             Button { compare.toggle() } label: {
                 Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
                     .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
-            }.buttonStyle(.plain).disabled(model.afterImage == nil || model.drawingMask)
+            }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
             Text("适合窗口").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
         }.padding(.horizontal, 22).frame(height: 47)
     }
@@ -219,7 +232,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if inspectorTab == 0 { AnalysisPanel(model: model, editParameters: { inspectorTab = 1 }) }
                     else if inspectorTab == 1 { basicInspector }
-                    else if inspectorTab == 2 { maskInspector }
+                    else if inspectorTab == 2 { MaskInspector(model: model) }
                     else { exportInspector }
                 }.padding(.horizontal, 20).padding(.bottom, 24)
             }.disabled(model.batchRunning)
@@ -297,54 +310,6 @@ struct ContentView: View {
                     }
                 }.padding(.top, 13)
             }
-            }
-        }
-    }
-
-    private var maskInspector: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            panelHeading("把调整留在需要的地方", icon: "circle.dotted")
-            Text("在照片上拖动绘制；蒙版按照片相对位置保存。批处理同一配方时会使用相同位置。")
-                .font(.system(size: 10)).foregroundColor(AtelierPalette.muted).lineSpacing(5)
-            Picker("类型", selection: $model.maskKind) {
-                ForEach(MaskKind.allCases, id: \.self) { Text($0.title).tag($0) }
-            }.pickerStyle(.segmented).labelsHidden()
-            Button {
-                model.drawingMask.toggle()
-                if model.drawingMask { compare = false }
-            } label: {
-                Label(model.drawingMask ? "取消绘制" : "在照片上绘制", systemImage: model.drawingMask ? "xmark" : "plus.circle")
-                    .font(.system(size: 11)).frame(maxWidth: .infinity).padding(.vertical, 10)
-                    .background(AtelierPalette.raised).clipShape(RoundedRectangle(cornerRadius: 6))
-            }.buttonStyle(.plain).disabled(model.afterImage == nil)
-            Toggle("显示蒙版轮廓", isOn: $model.showMaskOverlay).toggleStyle(.checkbox).font(.system(size: 10))
-            ForEach(model.adjustments.masks) { mask in
-                Button { model.selectedMask = mask.id } label: {
-                    HStack {
-                        Image(systemName: mask.kind == .brush ? "paintbrush.pointed" : (mask.kind == .radial ? "circle.dotted" : "line.diagonal"))
-                        Text(mask.name).lineLimit(1)
-                        Spacer()
-                        if !mask.enabled { Text("已停用").foregroundColor(AtelierPalette.muted) }
-                    }.font(.system(size: 11)).padding(10)
-                        .background(model.selectedMask == mask.id ? AtelierPalette.raised : .clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                }.buttonStyle(.plain)
-            }
-            if let index = model.activeMaskIndex {
-                Divider().padding(.vertical, 5)
-                Toggle("启用此蒙版", isOn: maskBinding(index, \.enabled)).toggleStyle(.switch).controlSize(.mini).font(.system(size: 11))
-                Toggle("反转区域", isOn: maskBinding(index, \.inverted)).toggleStyle(.checkbox).font(.system(size: 11))
-                AdjustmentSlider(title: "羽化", value: maskBinding(index, \.feather), range: 0.05...1, percent: true)
-                if model.adjustments.masks[index].kind == .brush {
-                    AdjustmentSlider(title: "笔刷半径", value: maskBinding(index, \.radius), range: 0.01...0.4, percent: true)
-                }
-                AdjustmentSlider(title: "局部曝光", value: maskBinding(index, \.exposureEV), range: -3...3, suffix: " EV")
-                AdjustmentSlider(title: "局部饱和度", value: maskBinding(index, \.saturation), range: 0...2)
-                AdjustmentSlider(title: "局部冷暖", value: maskBinding(index, \.warmth), range: -1...1)
-                Button("删除此蒙版", role: .destructive) { model.deleteSelectedMask() }.font(.system(size: 11))
-            } else {
-                Text("还没有局部蒙版。\n选择类型，点击绘制，然后在照片上拖动。")
-                    .font(.system(size: 10)).foregroundColor(AtelierPalette.muted).lineSpacing(6).padding(.vertical, 18)
             }
         }
     }
@@ -469,16 +434,6 @@ struct ContentView: View {
     }
     private func toolButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Label(title, systemImage: icon).font(.system(size: 11)).foregroundColor(.white.opacity(0.65)) }.buttonStyle(.plain)
-    }
-    private func maskBinding<T>(_ index: Int, _ keyPath: WritableKeyPath<LocalMask, T>) -> Binding<T> {
-        let id = model.adjustments.masks[index].id
-        let fallback = model.adjustments.masks[index][keyPath: keyPath]
-        return Binding(get: { model.adjustments.masks.first(where: { $0.id == id })?[keyPath: keyPath] ?? fallback },
-                       set: { value in
-                           if let current = model.adjustments.masks.firstIndex(where: { $0.id == id }) {
-                               model.adjustments.masks[current][keyPath: keyPath] = value
-                           }
-                       })
     }
     private func presetColors(_ index: Int) -> [Color] {
         let palettes: [[Color]] = [

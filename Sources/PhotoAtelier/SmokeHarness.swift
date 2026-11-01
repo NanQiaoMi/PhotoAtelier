@@ -27,6 +27,7 @@ private final class SmokeSession {
     private let started = Date()
     private var originalHashes: [String: String] = [:]
     private var assertions: [String] = []
+    private var originalMaskCoverage = 0.0
 
     init(model: AppModel, input: URL, output: URL, evidence: URL) {
         self.model = model; self.input = input; self.output = output; self.evidence = evidence
@@ -87,13 +88,75 @@ private final class SmokeSession {
                 assertions.append("Real calibrated Lensfun geometry applied through app preview")
                 try snapshot("02-analysis.png", tab: 0, compare: false)
                 model.maskKind = .radial
+                model.maskDrawMode = .new
                 model.addMask(start: .init(x: 0.52, y: 0.52), end: .init(x: 0.78, y: 0.77), points: [])
+                if let index = model.activeMaskIndex {
+                    model.adjustments.masks[index].exposureEV = 0.3
+                    model.adjustments.masks[index].highlights = -0.2
+                    model.adjustments.masks[index].sharpness = 0.2
+                }
+                model.showMaskCoverage = true
                 model.requestPreview(immediate: true)
                 phase = 2
             case 2:
-                guard !model.previewBusy, model.afterImage != nil else { return }
-                assertions.append("Local mask preview completed")
+                guard !model.previewBusy, model.afterImage != nil,
+                      let inspection = model.maskInspection, model.maskOverlayImage != nil else { return }
+                guard inspection.coverage > 0.005, inspection.coverage < 0.5,
+                      model.selectedLocalMask?.stage == .beforeLook else {
+                    throw AtelierError.invalidConfiguration("局部蒙版未生成实际覆盖或默认处理阶段错误")
+                }
+                originalMaskCoverage = inspection.coverage
+                assertions.append("Local mask coverage, regional inspection and before-look adjustment completed")
                 try snapshot("03-mask.png", tab: 2, compare: false)
+                model.maskKind = .brush; model.maskDrawMode = .subtract
+                model.brushRadius = 0.045; model.brushFeather = 0.5
+                let stroke = [MaskPoint(x: 0.52, y: 0.43), MaskPoint(x: 0.52, y: 0.63)]
+                model.addMask(start: stroke[0], end: stroke[1], points: stroke)
+                model.cancelMaskInteraction()
+                model.requestPreview(immediate: true)
+                phase = 5
+            case 5:
+                guard !model.previewBusy, model.afterImage != nil,
+                      let inspection = model.maskInspection, model.maskOverlayImage != nil else { return }
+                guard model.selectedLocalMask?.components.count == 1,
+                      inspection.coverage < originalMaskCoverage - 0.0001,
+                      let originalMask = model.selectedMask else {
+                    throw AtelierError.invalidConfiguration("减选笔迹没有减少有效蒙版覆盖")
+                }
+                assertions.append("Subtractive brush refinement reduces measured coverage with refreshed overlay")
+                try snapshot("03-mask-refined.png", tab: 2, compare: false)
+                let count = model.adjustments.masks.count
+                model.duplicateSelectedMask()
+                guard model.adjustments.masks.count == count + 1, model.selectedMask != originalMask else {
+                    throw AtelierError.invalidConfiguration("蒙版复制没有生成独立标识")
+                }
+                model.moveSelectedMask(by: -1)
+                model.moveSelectedMask(by: 1)
+                model.deleteSelectedMask()
+                model.selectedMask = originalMask
+                try PhotoEngine.validate(model.adjustments)
+                let encoded = try JSONEncoder().encode(model.recipe)
+                let restored = try JSONDecoder().decode(Recipe.self, from: encoded)
+                guard restored.adjustments.masks.count == count,
+                      restored.adjustments.masks.first?.components.count == 1 else {
+                    throw AtelierError.invalidConfiguration("配方没有保留蒙版修边数据")
+                }
+                assertions.append("Mask duplication, ordering, removal and recipe round-trip completed")
+                model.addRangeMask(kind: .color)
+                phase = 6
+            case 6:
+                guard !model.previewBusy, model.maskInspection != nil,
+                      model.selectedLocalMask?.kind == .color else { return }
+                model.pickMaskColor(at: .init(x: 0.3, y: 0.4))
+                phase = 7
+            case 7:
+                guard !model.previewBusy, model.maskInspection != nil,
+                      model.selectedLocalMask?.kind == .color,
+                      model.selectedLocalMask?.restrictColor == true else { return }
+                assertions.append("Asynchronous reference-color sampling and color-range preview completed")
+                try snapshot("03-mask-color.png", tab: 2, compare: false)
+                model.deleteSelectedMask()
+                model.showMaskCoverage = false
                 model.outputRoot = output
                 model.exportSettings.format = .tiff
                 model.exportSettings.colorSpace = .displayP3

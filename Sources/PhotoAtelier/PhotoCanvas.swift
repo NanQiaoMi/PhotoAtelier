@@ -1,11 +1,22 @@
 import SwiftUI
 import PhotoCore
 
+private enum CanvasDragAction: Equatable {
+    case draw
+    case moveStart(UUID)
+    case moveEnd(UUID)
+    case pan
+    case compare
+    case ignore
+}
+
 struct PhotoCanvas: View {
     @ObservedObject var model: AppModel
     let compare: Bool
     @Binding var split: Double
     @State private var draft: [MaskPoint] = []
+    @State private var dragAction: CanvasDragAction?
+    @State private var dragStartPoint: MaskPoint?
     @State private var zoom: CGFloat = 1
     @State private var pan = CGSize.zero
     @State private var panOrigin = CGSize.zero
@@ -19,25 +30,7 @@ struct PhotoCanvas: View {
                     photoContent(after, size: CGSize(width: fitted.width * zoom, height: fitted.height * zoom))
                         .offset(pan)
                         .frame(width: geometry.size.width, height: geometry.size.height)
-                    VStack {
-                        Spacer()
-                        HStack(spacing: 5) {
-                            Button { zoom = 1; pan = .zero; panOrigin = .zero } label: { Text("适合").font(.system(size: 9)) }
-                            Button { zoom = max(1, zoom / 1.5); if zoom == 1 { pan = .zero; panOrigin = .zero } } label: { Image(systemName: "minus") }
-                            Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 37)
-                            Button { zoom = min(6, zoom * 1.5) } label: { Image(systemName: "plus") }
-                            Spacer()
-                            if model.drawingMask {
-                                Label("拖动绘制\(model.maskKind.title)蒙版", systemImage: "pencil.tip.crop.circle")
-                                    .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
-                            } else if zoom > 1 {
-                                Text("拖动平移 · 双击复位").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                            } else if compare {
-                                Text("拖动查看前后变化").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                            }
-                        }.buttonStyle(.plain).foregroundColor(AtelierPalette.muted)
-                            .padding(.horizontal, 21).padding(.bottom, 11)
-                    }
+                    canvasControls
                 } else if model.previewBusy {
                     VStack(spacing: 15) {
                         ProgressView().controlSize(.small)
@@ -48,17 +41,69 @@ struct PhotoCanvas: View {
                 }
             }.clipped()
         }
-        .onChange(of: model.selectedID) { _ in zoom = 1; pan = .zero; panOrigin = .zero; draft = [] }
-        .onChange(of: model.drawingMask) { drawing in
-            draft = []
-            if drawing { zoom = 1; pan = .zero; panOrigin = .zero }
+        .onChange(of: model.selectedID) { _ in
+            zoom = 1
+            pan = .zero
+            panOrigin = .zero
+            cancelCanvasGesture()
+        }
+        .onChange(of: model.drawingMask) { _ in cancelCanvasGesture() }
+        .onChange(of: model.maskInteractionActive) { _ in cancelCanvasGesture() }
+        .onChange(of: model.selectedMask) { _ in cancelCanvasGesture() }
+        .onChange(of: model.maskKind) { _ in cancelCanvasGesture() }
+        .onChange(of: model.maskDrawMode) { _ in cancelCanvasGesture() }
+        .onChange(of: model.batchRunning) { running in
+            if running { cancelCanvasGesture() }
+        }
+        .onExitCommand {
+            if model.maskInteractionActive {
+                model.cancelMaskInteraction()
+                cancelCanvasGesture()
+            }
+        }
+    }
+
+    private var canvasControls: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 5) {
+                Button { zoom = 1; pan = .zero; panOrigin = .zero } label: { Text("适合").font(.system(size: 9)) }
+                Button { zoom = max(1, zoom / 1.5); if zoom == 1 { pan = .zero; panOrigin = .zero } } label: { Image(systemName: "minus") }
+                Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 37)
+                Button { zoom = min(6, zoom * 1.5) } label: { Image(systemName: "plus") }
+                Spacer()
+                if model.pickingMaskColor {
+                    Label("点击照片取样颜色", systemImage: "eyedropper")
+                        .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+                } else if model.maskEditMode {
+                    Label("拖动选中蒙版的控制点", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+                } else if model.drawingMask {
+                    Label("拖动绘制\(model.maskKind.title)蒙版", systemImage: "pencil.tip.crop.circle")
+                        .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+                } else if zoom > 1 {
+                    Text("拖动平移 · 双击复位").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                } else if compare {
+                    Text("拖动查看前后变化").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                }
+            }.buttonStyle(.plain).foregroundColor(AtelierPalette.muted)
+                .padding(.horizontal, 21).padding(.bottom, 11)
         }
     }
 
     private func photoContent(_ after: NSImage, size: CGSize) -> some View {
-        ZStack(alignment: .topLeading) {
+        let comparisonVisible = compare && !model.maskInteractionActive
+        return ZStack(alignment: .topLeading) {
             Image(nsImage: after).resizable().frame(width: size.width, height: size.height)
-            if compare && !model.drawingMask, let before = model.beforeImage {
+
+            if model.showMaskCoverage, let coverage = model.maskOverlayImage {
+                Image(nsImage: coverage).resizable().interpolation(.high)
+                    .frame(width: size.width, height: size.height)
+                    .opacity(min(1, max(0, model.maskOverlayOpacity)))
+                    .allowsHitTesting(false)
+            }
+
+            if comparisonVisible, let before = model.beforeImage {
                 Image(nsImage: before).resizable().scaledToFill()
                     .frame(width: size.width, height: size.height).clipped()
                     .mask(alignment: .leading) { Rectangle().frame(width: size.width * split) }
@@ -72,51 +117,168 @@ struct PhotoCanvas: View {
                 }.font(.system(size: 9, weight: .medium)).foregroundColor(.white)
                     .padding(11).background(LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
             }
-            if model.showMaskOverlay && (!compare || model.drawingMask) {
+
+            if model.showMaskOverlay && (!comparisonVisible || model.maskInteractionActive) {
                 maskOutlines(size)
             }
             if !draft.isEmpty { draftOutline(size) }
+            if model.maskEditMode { geometryHandles(size) }
         }
         .frame(width: size.width, height: size.height)
         .background(.black)
         .shadow(color: .black.opacity(0.3), radius: 18, x: 0, y: 8)
         .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 1)
-            .onChanged { event in
-                if model.drawingMask {
-                    let point = normalized(event.location, size: size)
-                    if draft.isEmpty { draft = [normalized(event.startLocation, size: size)] }
-                    if model.maskKind == .brush {
-                        if draft.count < 4096 { draft.append(point) }
-                    } else if draft.count == 1 { draft.append(point) }
-                    else { draft[1] = point }
-                } else if zoom > 1 {
-                    pan = CGSize(width: panOrigin.width + event.translation.width, height: panOrigin.height + event.translation.height)
-                } else if compare {
-                    split = min(0.98, max(0.02, event.location.x / size.width))
-                }
+        .gesture(DragGesture(minimumDistance: 2)
+            .onChanged { event in handleDragChanged(event, size: size) }
+            .onEnded { event in handleDragEnded(event, size: size) })
+        .simultaneousGesture(SpatialTapGesture().onEnded { event in handleTap(event.location, size: size) })
+        .onTapGesture(count: 2) {
+            if !model.maskInteractionActive {
+                zoom = 1
+                pan = .zero
+                panOrigin = .zero
             }
-            .onEnded { _ in
-                if model.drawingMask, let first = draft.first, let last = draft.last, draft.count >= 2 {
-                    let distance = hypot(first.x - last.x, first.y - last.y)
-                    if distance > 0.008 || (model.maskKind == .brush && draft.count > 2) {
-                        model.addMask(start: first, end: last, points: model.maskKind == .brush ? draft : [])
-                    }
-                    draft = []
-                } else { panOrigin = pan }
-            })
-        .onTapGesture(count: 2) { zoom = 1; pan = .zero; panOrigin = .zero }
+        }
+    }
+
+    private func handleDragChanged(_ event: DragGesture.Value, size: CGSize) {
+        guard !model.batchRunning else {
+            cancelCanvasGesture()
+            return
+        }
+        if dragAction == nil {
+            dragAction = actionForDrag(startLocation: event.startLocation, size: size)
+            dragStartPoint = normalized(event.startLocation, size: size)
+        }
+        guard let action = dragAction else { return }
+        switch action {
+        case .draw:
+            updateDraft(at: event.location, size: size)
+        case .moveStart(let id):
+            moveGeometry(id: id, handle: .start, to: event.location, size: size)
+        case .moveEnd(let id):
+            moveGeometry(id: id, handle: .end, to: event.location, size: size)
+        case .pan:
+            pan = CGSize(width: panOrigin.width + event.translation.width, height: panOrigin.height + event.translation.height)
+        case .compare:
+            split = min(0.98, max(0.02, event.location.x / max(1, size.width)))
+        case .ignore:
+            break
+        }
+    }
+
+    private func handleDragEnded(_ event: DragGesture.Value, size: CGSize) {
+        if case .draw? = dragAction, !model.batchRunning, model.drawingMask {
+            updateDraft(at: event.location, size: size)
+            finishDraft()
+        } else if case .pan? = dragAction {
+            panOrigin = pan
+        }
+        draft = []
+        dragAction = nil
+        dragStartPoint = nil
+    }
+
+    private func actionForDrag(startLocation: CGPoint, size: CGSize) -> CanvasDragAction {
+        if model.pickingMaskColor || model.batchRunning { return .ignore }
+        if model.maskEditMode {
+            return geometryHandle(at: startLocation, size: size) ?? .ignore
+        }
+        if model.drawingMask { return .draw }
+        if zoom > 1 { return .pan }
+        if compare { return .compare }
+        return .ignore
+    }
+
+    private func handleTap(_ location: CGPoint, size: CGSize) {
+        guard !model.batchRunning else { return }
+        let point = normalized(location, size: size)
+        if model.pickingMaskColor {
+            model.pickMaskColor(at: point)
+            return
+        }
+        guard model.drawingMask else { return }
+        if model.maskKind == .brush {
+            model.addMask(start: point, end: point, points: [point])
+        }
+    }
+
+    private func updateDraft(at location: CGPoint, size: CGSize) {
+        guard model.drawingMask, model.maskKind == .radial || model.maskKind == .linear || model.maskKind == .brush else { return }
+        let point = normalized(location, size: size)
+        let start = dragStartPoint ?? point
+        if draft.isEmpty { draft = [start] }
+        switch model.maskKind {
+        case .brush:
+            if let last = draft.last, pixelDistance(last, point, size: size) >= 1.5, draft.count < 4096 {
+                draft.append(point)
+            }
+        case .radial, .linear:
+            if draft.count == 1 { draft.append(point) }
+            else if draft.count > 1 { draft[1] = point }
+        case .luminance, .color:
+            break
+        }
+    }
+
+    private func finishDraft() {
+        guard let first = draft.first else { return }
+        let last = draft.last ?? first
+        switch model.maskKind {
+        case .brush:
+            model.addMask(start: first, end: last, points: Array(draft.prefix(4096)))
+        case .radial, .linear:
+            guard draft.count > 1, hypot(first.x - last.x, first.y - last.y) > 0.008 else { return }
+            model.addMask(start: first, end: last, points: [])
+        case .luminance, .color:
+            break
+        }
+    }
+
+    private func moveGeometry(id: UUID, handle: GeometryHandle, to location: CGPoint, size: CGSize) {
+        guard !model.batchRunning, let mask = model.adjustments.masks.first(where: { $0.id == id }) else { return }
+        let point = normalized(location, size: size)
+        var start = mask.start
+        var end = mask.end
+        if handle == .start, mask.kind == .radial {
+            let deltaX = point.x - mask.start.x
+            let deltaY = point.y - mask.start.y
+            let clampedDeltaX = min(1 - max(mask.start.x, mask.end.x), max(-min(mask.start.x, mask.end.x), deltaX))
+            let clampedDeltaY = min(1 - max(mask.start.y, mask.end.y), max(-min(mask.start.y, mask.end.y), deltaY))
+            start = MaskPoint(x: mask.start.x + clampedDeltaX, y: mask.start.y + clampedDeltaY)
+            end = MaskPoint(x: mask.end.x + clampedDeltaX, y: mask.end.y + clampedDeltaY)
+        } else if handle == .start {
+            start = point
+        } else {
+            end = point
+        }
+        model.moveMaskGeometry(id: id, start: start, end: end)
+    }
+
+    private func geometryHandle(at location: CGPoint, size: CGSize) -> CanvasDragAction? {
+        guard let mask = model.adjustments.masks.first(where: { $0.id == model.selectedMask }),
+              mask.kind == .radial || mask.kind == .linear else { return nil }
+        let startDistance = screenDistance(location, to: mask.start, size: size)
+        let endDistance = screenDistance(location, to: mask.end, size: size)
+        let hitRadius: CGFloat = 18
+        if startDistance <= hitRadius && startDistance <= endDistance { return .moveStart(mask.id) }
+        if endDistance <= hitRadius { return .moveEnd(mask.id) }
+        return nil
     }
 
     private func maskOutlines(_ size: CGSize) -> some View {
         Canvas { context, _ in
             for mask in model.adjustments.masks where mask.enabled {
                 let selected = mask.id == model.selectedMask
-                let path = outline(kind: mask.kind, start: mask.start, end: mask.end, points: mask.points, size: size)
-                context.stroke(path, with: .color(selected ? AtelierPalette.accent : .white.opacity(0.55)),
-                               style: StrokeStyle(lineWidth: selected ? 1.5 : 1, dash: [5, 4]))
-                let center = screen(mask.start, size: size)
-                context.fill(Path(ellipseIn: CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)), with: .color(AtelierPalette.accent))
+                if mask.kind == .radial || mask.kind == .linear || mask.kind == .brush {
+                    drawOutline(kind: mask.kind, start: mask.start, end: mask.end, points: mask.points,
+                                radius: mask.radius, color: AtelierPalette.accent, selected: selected, size: size, in: &context)
+                }
+                for component in mask.components {
+                    drawOutline(kind: component.kind, start: component.start, end: component.end, points: component.points,
+                                radius: component.radius, color: componentColor(component.operation),
+                                selected: selected, size: size, in: &context)
+                }
             }
         }.allowsHitTesting(false)
     }
@@ -124,30 +286,115 @@ struct PhotoCanvas: View {
     private func draftOutline(_ size: CGSize) -> some View {
         Canvas { context, _ in
             guard let first = draft.first, let last = draft.last else { return }
-            let path = outline(kind: model.maskKind, start: first, end: last, points: draft, size: size)
-            context.stroke(path, with: .color(AtelierPalette.accent), style: .init(lineWidth: model.maskKind == .brush ? 7 : 1.5, lineCap: .round, lineJoin: .round))
+            let color = drawColor(model.maskDrawMode)
+            let path = outline(kind: model.maskKind, start: first, end: last, points: draft,
+                               radius: model.brushRadius, size: size)
+            if model.maskKind == .brush, draft.count > 1 {
+                let width = max(1, CGFloat(model.brushRadius) * min(size.width, size.height) * 2)
+                context.stroke(path, with: .color(color.opacity(0.24)),
+                               style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+                context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            } else {
+                context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round, dash: [5, 3]))
+            }
         }.allowsHitTesting(false)
     }
 
-    private func outline(kind: MaskKind, start: MaskPoint, end: MaskPoint, points: [MaskPoint], size: CGSize) -> Path {
-        let first = screen(start, size: size), last = screen(end, size: size)
+    private func geometryHandles(_ size: CGSize) -> some View {
+        Canvas { context, _ in
+            guard let mask = model.adjustments.masks.first(where: { $0.id == model.selectedMask }),
+                  mask.kind == .radial || mask.kind == .linear else { return }
+            drawHandle(mask.start, color: AtelierPalette.accent, size: size, in: &context)
+            drawHandle(mask.end, color: .white, size: size, in: &context)
+        }.allowsHitTesting(false)
+    }
+
+    private func drawHandle(_ point: MaskPoint, color: Color, size: CGSize, in context: inout GraphicsContext) {
+        let center = screen(point, size: size)
+        let outer = CGRect(x: center.x - 7, y: center.y - 7, width: 14, height: 14)
+        let inner = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+        context.fill(Path(ellipseIn: outer), with: .color(.black.opacity(0.85)))
+        context.stroke(Path(ellipseIn: outer), with: .color(color), lineWidth: 1.5)
+        context.fill(Path(ellipseIn: inner), with: .color(color))
+    }
+
+    private func drawOutline(kind: MaskKind, start: MaskPoint, end: MaskPoint, points: [MaskPoint], radius: Double,
+                             color: Color, selected: Bool, size: CGSize, in context: inout GraphicsContext) {
+        let path = outline(kind: kind, start: start, end: end, points: points, radius: radius, size: size)
+        let lineWidth: CGFloat = selected ? 1.7 : 1.1
+        if kind == .brush, points.count > 1 {
+            let width = max(1, CGFloat(radius) * min(size.width, size.height) * 2)
+            context.stroke(path, with: .color(color.opacity(selected ? 0.24 : 0.15)),
+                           style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+            context.stroke(path, with: .color(color.opacity(selected ? 0.95 : 0.65)),
+                           style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round, dash: [4, 3]))
+        } else {
+            context.stroke(path, with: .color(color.opacity(selected ? 0.95 : 0.58)),
+                           style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round, dash: [5, 4]))
+        }
+    }
+
+    private func outline(kind: MaskKind, start: MaskPoint, end: MaskPoint, points: [MaskPoint], radius: Double, size: CGSize) -> Path {
+        let first = screen(start, size: size)
+        let last = screen(end, size: size)
         var path = Path()
         switch kind {
         case .radial:
-            let rx = max(3, abs(last.x - first.x)), ry = max(3, abs(last.y - first.y))
+            let rx = max(3, abs(last.x - first.x))
+            let ry = max(3, abs(last.y - first.y))
             path.addEllipse(in: CGRect(x: first.x - rx, y: first.y - ry, width: 2 * rx, height: 2 * ry))
         case .linear:
-            path.move(to: first); path.addLine(to: last)
-            let dx = last.x - first.x, dy = last.y - first.y, length = max(1, hypot(dx, dy))
-            let vx = -dy / length * 30, vy = dx / length * 30
-            path.move(to: .init(x: first.x - vx, y: first.y - vy)); path.addLine(to: .init(x: first.x + vx, y: first.y + vy))
-            path.move(to: .init(x: last.x - vx, y: last.y - vy)); path.addLine(to: .init(x: last.x + vx, y: last.y + vy))
+            path.move(to: first)
+            path.addLine(to: last)
+            let dx = last.x - first.x
+            let dy = last.y - first.y
+            let length = max(1, hypot(dx, dy))
+            let vx = -dy / length * 30
+            let vy = dx / length * 30
+            path.move(to: CGPoint(x: first.x - vx, y: first.y - vy))
+            path.addLine(to: CGPoint(x: first.x + vx, y: first.y + vy))
+            path.move(to: CGPoint(x: last.x - vx, y: last.y - vy))
+            path.addLine(to: CGPoint(x: last.x + vx, y: last.y + vy))
         case .brush:
-            if let point = points.first { path.move(to: screen(point, size: size)) }
-            for point in points.dropFirst() { path.addLine(to: screen(point, size: size)) }
+            if points.count == 1, let point = points.first {
+                let center = screen(point, size: size)
+                let brushRadius = max(1, CGFloat(radius) * min(size.width, size.height))
+                path.addEllipse(in: CGRect(x: center.x - brushRadius, y: center.y - brushRadius,
+                                           width: brushRadius * 2, height: brushRadius * 2))
+            } else if let point = points.first {
+                path.move(to: screen(point, size: size))
+                for point in points.dropFirst() { path.addLine(to: screen(point, size: size)) }
+            }
+        case .luminance, .color:
+            break
         }
         return path
     }
+
+    private func componentColor(_ operation: MaskCombineMode) -> Color {
+        switch operation {
+        case .add: return AtelierPalette.accent
+        case .subtract: return .red
+        case .intersect: return .purple
+        }
+    }
+
+    private func drawColor(_ mode: MaskDrawMode) -> Color {
+        switch mode {
+        case .new, .add: return AtelierPalette.accent
+        case .subtract: return .red
+        case .intersect: return .purple
+        }
+    }
+
+    private func cancelCanvasGesture() {
+        draft = []
+        dragAction = nil
+        dragStartPoint = nil
+        panOrigin = pan
+    }
+
+    private enum GeometryHandle: Equatable { case start, end }
 
     private var emptyState: some View {
         VStack(spacing: 0) {
@@ -179,12 +426,23 @@ struct PhotoCanvas: View {
         let scale = min(area.width / image.width, area.height / image.height)
         return CGSize(width: image.width * scale, height: image.height * scale)
     }
+
     private func normalized(_ point: CGPoint, size: CGSize) -> MaskPoint {
         let x = Double(point.x / max(1, size.width))
         let y = Double(point.y / max(1, size.height))
         return .init(x: min(1, max(0, x)), y: min(1, max(0, 1 - y)))
     }
+
     private func screen(_ point: MaskPoint, size: CGSize) -> CGPoint {
         .init(x: point.x * size.width, y: (1 - point.y) * size.height)
+    }
+
+    private func pixelDistance(_ first: MaskPoint, _ second: MaskPoint, size: CGSize) -> CGFloat {
+        hypot(CGFloat(first.x - second.x) * size.width, CGFloat(first.y - second.y) * size.height)
+    }
+
+    private func screenDistance(_ point: CGPoint, to maskPoint: MaskPoint, size: CGSize) -> CGFloat {
+        let target = screen(maskPoint, size: size)
+        return hypot(point.x - target.x, point.y - target.y)
     }
 }

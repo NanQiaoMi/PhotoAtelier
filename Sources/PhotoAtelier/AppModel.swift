@@ -12,6 +12,38 @@ struct LUTOption: Identifiable {
     let path: String?
 }
 
+enum MaskDrawMode: String, CaseIterable {
+    case new, add, subtract, intersect
+    var title: String {
+        switch self {
+        case .new: return "新建"
+        case .add: return "加选"
+        case .subtract: return "减选"
+        case .intersect: return "交集"
+        }
+    }
+    var operation: MaskCombineMode? {
+        switch self {
+        case .new: return nil
+        case .add: return .add
+        case .subtract: return .subtract
+        case .intersect: return .intersect
+        }
+    }
+}
+
+enum LocalMaskPreset: String, CaseIterable {
+    case shadowDetail, highlightSoftness, subjectLift, colorSelection
+    var title: String {
+        switch self {
+        case .shadowDetail: return "暗部细节"
+        case .highlightSoftness: return "高光过渡"
+        case .subjectLift: return "主体提亮"
+        case .colorSelection: return "取样颜色"
+        }
+    }
+}
+
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     @Published var inputRoot: URL?
@@ -40,6 +72,15 @@ final class AppModel: ObservableObject {
     @Published var drawingMask = false
     @Published var maskKind: MaskKind = .radial
     @Published var showMaskOverlay = true
+    @Published var maskDrawMode: MaskDrawMode = .new
+    @Published var brushRadius: Double = 0.06
+    @Published var brushFeather: Double = 0.65
+    @Published var maskEditMode = false
+    @Published var pickingMaskColor = false
+    @Published var showMaskCoverage = false
+    @Published var maskOverlayOpacity: Double = 0.55
+    @Published var maskOverlayImage: NSImage?
+    @Published var maskInspection: MaskInspection?
     @Published var thumbnails: [String: NSImage] = [:]
     @Published var lastManifest: URL?
     @Published var analysis: PhotoAnalysis?
@@ -68,11 +109,24 @@ final class AppModel: ObservableObject {
     /// Accessed only on previewQueue; retains one bounded preview, never the full RAW graph.
     private var cachedPreviewKey: String?
     private var cachedPreview: LoadedPhoto?
+    /// These graphs are bounded preview images and are accessed on previewQueue only.
+    private var cachedMaskReference: CIImage?
+    private var cachedMaskReferenceSettings: AdjustmentSettings?
+    private var cachedMaskReferenceSource: String?
+    private var cachedMaskReferencePhotoID: String?
     private var rememberedSpaces: [String: String] = UserDefaults.standard.dictionary(forKey: "lutColorSpaces") as? [String: String] ?? [:]
 
     var selectedPhoto: PhotoItem? { photos.first { $0.id == selectedID } }
     var selectedOption: LUTOption? { lutOptions.first { $0.id == selectedLUT } }
     var activeMaskIndex: Int? { adjustments.masks.firstIndex { $0.id == selectedMask } }
+    var maskInteractionActive: Bool { drawingMask || maskEditMode || pickingMaskColor }
+    var selectedLocalMask: LocalMask? { adjustments.masks.first { $0.id == selectedMask } }
+    private var maskPointCount: Int {
+        adjustments.masks.reduce(0) { count, mask in
+            count + mask.points.count + mask.components.reduce(0) { $0 + $1.points.count }
+        }
+    }
+    private var maskComponentCount: Int { adjustments.masks.reduce(0) { $0 + $1.components.count } }
     var recipe: Recipe {
         Recipe(adjustments: adjustments, export: exportSettings,
                lutPath: selectedOption?.path,
@@ -110,6 +164,8 @@ final class AppModel: ObservableObject {
 
     func loadFolder(_ url: URL) {
         guard !batchRunning else { return }
+        cancelMaskInteraction()
+        maskOverlayImage = nil; maskInspection = nil
         pendingPreview?.cancel(); previewToken?.cancel(); previewGeneration = UUID()
         previewBusy = false; previewReport = .init(); histogram = Array(repeating: 0, count: 64)
         invalidateAnalysis()
@@ -186,6 +242,8 @@ final class AppModel: ObservableObject {
 
     func selectPhoto(_ photo: PhotoItem) {
         guard selectedID != photo.id else { return }
+        cancelMaskInteraction()
+        maskOverlayImage = nil; maskInspection = nil
         selectedID = photo.id
         beforeImage = nil; afterImage = nil
         invalidateAnalysis()
@@ -211,8 +269,11 @@ final class AppModel: ObservableObject {
     func requestPreview(immediate: Bool = false) {
         pendingPreview?.cancel(); previewToken?.cancel()
         let generation = UUID(); previewGeneration = generation
+        maskOverlayImage = nil; maskInspection = nil
         guard let photo = selectedPhoto else { previewBusy = false; return }
         let settings = adjustments; let cube = selectedOption?.cube
+        let selectedMask = selectedLocalMask
+        let needsMaskOverlay = showMaskCoverage
         let token = CancellationToken(); previewToken = token
         previewBusy = true
         let item = DispatchWorkItem { [weak self] in
@@ -254,12 +315,49 @@ final class AppModel: ObservableObject {
                     throw AtelierError.imageRead("预览渲染失败")
                 }
                 let histogram = self.makeHistogram(output.image)
+                var maskOverlay: CGImage?
+                var inspection: MaskInspection?
+                if let mask = selectedMask {
+                    var referenceSettings = settings
+                    referenceSettings.masks = []
+                    let reference: CIImage
+                    if self.cachedMaskReferenceSource == cacheKey,
+                       self.cachedMaskReferenceSettings == referenceSettings,
+                       let cached = self.cachedMaskReference {
+                        reference = cached
+                    } else {
+                        reference = try self.engine.maskReferenceImage(small, settings: referenceSettings, cancellation: token)
+                        self.cachedMaskReference = reference
+                        self.cachedMaskReferenceSettings = referenceSettings
+                        self.cachedMaskReferenceSource = cacheKey
+                        self.cachedMaskReferencePhotoID = photo.id
+                    }
+                    try token.check()
+                    inspection = try self.engine.inspectLocalMask(mask, reference: reference)
+                    if needsMaskOverlay {
+                        let coverage = try self.engine.localMaskImage(mask, reference: reference)
+                        let color = CIImage(color: CIColor(red: 0.95, green: 0.18, blue: 0.4)).cropped(to: reference.extent)
+                        let clear = CIImage(color: .clear).cropped(to: reference.extent)
+                        let overlay = color.applyingFilter("CIBlendWithMask", parameters: [
+                            "inputBackgroundImage": clear, "inputMaskImage": coverage
+                        ]).cropped(to: reference.extent)
+                        guard let rendered = self.engine.context.createCGImage(overlay, from: overlay.extent,
+                                                                              format: .RGBA8, colorSpace: space) else {
+                            throw AtelierError.imageRead("无法渲染局部选区覆盖预览")
+                        }
+                        maskOverlay = rendered
+                    }
+                }
                 try token.check()
                 DispatchQueue.main.async {
                     guard self.previewGeneration == generation else { return }
                     self.beforeImage = NSImage(cgImage: before, size: .zero)
                     self.afterImage = NSImage(cgImage: after, size: .zero)
                     self.previewReport = output.report; self.histogram = histogram
+                    if self.selectedMask == selectedMask?.id {
+                        self.maskOverlayImage = maskOverlay.map { NSImage(cgImage: $0, size: .zero) }
+                        self.maskInspection = inspection
+                    }
                     self.previewBusy = false
                     self.enqueueAnalysis(loaded, photo: photo, key: cacheKey)
                 }
@@ -376,7 +474,7 @@ final class AppModel: ObservableObject {
         automaticRecipe = AutomaticBatchRecipe(styleID: id, baseline: analysisBaseline,
                                                referenceSettings: proposal.settings)
         adjustments = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: adjustments)
-        drawingMask = false
+        cancelMaskInteraction()
         status = "已采用“\(proposal.title)”。可继续微调；批量导出会逐张分析并叠加这些微调。"
         requestPreview(immediate: true)
     }
@@ -419,6 +517,7 @@ final class AppModel: ObservableObject {
         guard !batchRunning, let input = inputRoot, !photos.isEmpty else { return }
         if outputRoot == nil { chooseOutput() }
         guard let output = outputRoot else { return }
+        cancelMaskInteraction()
         // Freeze the recipe and selection before moving work off the UI thread.
         let snapshot = recipe; let items = photos; let cube = selectedOption?.cube
         let token = CancellationToken(); batchToken = token
@@ -460,20 +559,186 @@ final class AppModel: ObservableObject {
 
     func resetAdjustments() {
         automaticRecipe = nil; invalidateAnalysis()
+        cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
         adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false
         requestPreview(immediate: true)
     }
 
     func addMask(start: MaskPoint, end: MaskPoint, points: [MaskPoint]) {
-        let mask = LocalMask(name: "\(maskKind.title) \(adjustments.masks.count + 1)", kind: maskKind,
-                             start: start, end: end, points: points)
-        adjustments.masks.append(mask); selectedMask = mask.id; drawingMask = false
-        status = "已添加局部蒙版；批量导出会将它应用到每张照片的相同相对位置。"
+        guard !batchRunning, [.radial, .linear, .brush].contains(maskKind) else { return }
+        guard maskKind != .brush || !points.isEmpty, points.count <= 4096 else { return }
+        guard maskPointCount + points.count <= 32768 else {
+            status = "笔迹总点数已达到 32768 点，请移除部分笔迹后再绘制。"; return
+        }
+        if let operation = maskDrawMode.operation {
+            guard let index = activeMaskIndex else { status = "先选中一个蒙版，再添加或擦除区域。"; return }
+            let current = adjustments.masks[index]
+            let count = current.points.count + current.components.reduce(0) { $0 + $1.points.count }
+            guard current.components.count < 64, maskComponentCount < 64, count + points.count <= 32768 else {
+                status = "修边步骤或笔迹已达到上限，请移除不需要的修边后再绘制。"; return
+            }
+            adjustments.masks[index].components.append(MaskComponent(operation: operation, kind: maskKind,
+                start: start, end: end, points: points, radius: brushRadius, feather: brushFeather))
+            status = "已\(maskDrawMode.title)区域；可继续绘制，或点击完成修边。"
+        } else {
+            guard adjustments.masks.count < 16 else { status = "最多使用 16 个局部蒙版。"; return }
+            let mask = LocalMask(name: "\(maskKind.title) \(adjustments.masks.count + 1)", kind: maskKind,
+                                 start: start, end: end, points: points, radius: brushRadius,
+                                 feather: brushFeather, exposureEV: 0)
+            adjustments.masks.append(mask); selectedMask = mask.id; drawingMask = false
+            status = "已建立选区。可采用区域实测建议，再微调局部参数。"
+        }
+        maskInspection = nil; showMaskCoverage = true
+        requestPreview()
     }
 
     func deleteSelectedMask() {
+        guard !batchRunning else { return }
+        cancelMaskInteraction()
         adjustments.masks.removeAll { $0.id == selectedMask }
         selectedMask = adjustments.masks.last?.id
+        requestPreview()
+    }
+
+    func cancelMaskInteraction() {
+        drawingMask = false; maskEditMode = false; pickingMaskColor = false
+    }
+
+    func maskSelectionChanged() {
+        maskOverlayImage = nil; maskInspection = nil
+        requestPreview()
+    }
+
+    func beginMaskDrawing() {
+        guard !batchRunning, afterImage != nil else { return }
+        if drawingMask { drawingMask = false; return }
+        guard maskDrawMode == .new || activeMaskIndex != nil else {
+            status = "先选中一个蒙版，再添加或擦除区域。"; return
+        }
+        cancelMaskInteraction()
+        if maskKind == .luminance || maskKind == .color {
+            guard maskDrawMode == .new else { maskKind = .brush; drawingMask = true; return }
+            addRangeMask(kind: maskKind)
+        } else { drawingMask = true }
+        showMaskCoverage = true
+    }
+
+    func addRangeMask(kind: MaskKind) {
+        guard !batchRunning, afterImage != nil, adjustments.masks.count < 16 else { return }
+        var mask = LocalMask(name: "\(kind.title) \(adjustments.masks.count + 1)", kind: kind, exposureEV: 0)
+        if kind == .luminance { mask.luminanceMin = 0.2; mask.luminanceMax = 0.8 }
+        adjustments.masks.append(mask); selectedMask = mask.id
+        cancelMaskInteraction(); showMaskCoverage = true
+        if kind == .color { pickingMaskColor = true; status = "点击照片中的目标颜色取样；颜色按全局校正后的原色判断，不受 LUT 染色影响。" }
+        requestPreview()
+    }
+
+    func addMaskPreset(_ preset: LocalMaskPreset) {
+        guard !batchRunning, afterImage != nil, adjustments.masks.count < 16 else { return }
+        var mask = LocalMask(name: preset.title, exposureEV: 0)
+        switch preset {
+        case .shadowDetail:
+            mask.kind = .luminance; mask.luminanceMax = 0.5
+            mask.shadows = 0.3; mask.exposureEV = 0.15
+        case .highlightSoftness:
+            mask.kind = .luminance; mask.luminanceMin = 0.62
+            mask.highlights = -0.35; mask.exposureEV = -0.1
+        case .subjectLift:
+            mask.feather = 0.85; mask.exposureEV = 0.25; mask.highlightProtection = 0.75
+        case .colorSelection:
+            mask.kind = .color
+        }
+        adjustments.masks.append(mask); selectedMask = mask.id
+        cancelMaskInteraction(); maskDrawMode = .new; showMaskCoverage = true
+        if preset == .colorSelection { pickingMaskColor = true }
+        status = preset == .subjectLift
+            ? "已建立柔和径向选区，可编辑位置贴合主体；此选区不是自动主体识别。"
+            : "已添加\(preset.title)。请查看覆盖区域后调整范围与强度。"
+        requestPreview()
+    }
+
+    func duplicateSelectedMask() {
+        guard !batchRunning, var mask = selectedLocalMask, adjustments.masks.count < 16 else { return }
+        let points = mask.points.count + mask.components.reduce(0) { $0 + $1.points.count }
+        guard maskPointCount + points <= 32768 else {
+            status = "复制将超过笔迹总点数上限，请先减少修边笔迹。"; return
+        }
+        guard maskComponentCount + mask.components.count <= 64 else {
+            status = "复制将超过修边总数上限，请先移除不需要的修边。"; return
+        }
+        mask.id = UUID(); mask.name = String((mask.name + " 副本").prefix(256))
+        for index in mask.components.indices { mask.components[index].id = UUID() }
+        adjustments.masks.append(mask); selectedMask = mask.id
+        requestPreview()
+    }
+
+    func moveSelectedMask(by distance: Int) {
+        guard !batchRunning, let index = activeMaskIndex else { return }
+        let target = index + distance
+        guard adjustments.masks.indices.contains(target) else { return }
+        adjustments.masks.swapAt(index, target)
+        requestPreview()
+    }
+
+    func moveMaskGeometry(id: UUID, start: MaskPoint, end: MaskPoint) {
+        guard !batchRunning, let index = adjustments.masks.firstIndex(where: { $0.id == id }) else { return }
+        adjustments.masks[index].start = start; adjustments.masks[index].end = end
+        requestPreview()
+    }
+
+    func removeMaskComponent(_ id: UUID? = nil) {
+        guard !batchRunning, let index = activeMaskIndex, !adjustments.masks[index].components.isEmpty else { return }
+        if let id = id { adjustments.masks[index].components.removeAll { $0.id == id } }
+        else { adjustments.masks[index].components.removeLast() }
+        requestPreview()
+    }
+
+    func resetSelectedMaskAdjustments() {
+        guard !batchRunning, let index = activeMaskIndex else { return }
+        var mask = adjustments.masks[index]
+        mask.exposureEV = 0; mask.highlights = 0; mask.shadows = 0; mask.contrast = 1
+        mask.saturation = 1; mask.warmth = 0; mask.tint = 0; mask.sharpness = 0
+        adjustments.masks[index] = mask
+        requestPreview()
+    }
+
+    func applyMaskSuggestion() {
+        guard !batchRunning, !previewBusy, let index = activeMaskIndex,
+              let inspection = maskInspection, inspection.coverage > 0.005 else { return }
+        var mask = adjustments.masks[index]
+        mask.exposureEV = inspection.suggestedExposureEV
+        mask.highlights = inspection.suggestedHighlights; mask.shadows = inspection.suggestedShadows
+        adjustments.masks[index] = mask
+        status = "已采用本张照片所选区域的保守建议；可继续细调，批处理使用当前局部参数。"
+        requestPreview()
+    }
+
+    func pickMaskColor(at point: MaskPoint) {
+        guard !batchRunning, !previewBusy, let id = selectedMask, let photoID = selectedID else { return }
+        pickingMaskColor = false
+        let generation = previewGeneration
+        previewQueue.async { [weak self] in
+            guard let self = self else { return }
+            let result = Result { () throws -> MaskColor in
+                guard self.cachedMaskReferencePhotoID == photoID, let reference = self.cachedMaskReference else {
+                    throw AtelierError.invalidConfiguration("请等待本张照片预览完成后再取样。")
+                }
+                return try self.engine.sampleMaskColor(at: point, reference: reference)
+            }
+            DispatchQueue.main.async {
+                guard self.selectedID == photoID, self.selectedMask == id,
+                      self.previewGeneration == generation, !self.batchRunning,
+                      let index = self.adjustments.masks.firstIndex(where: { $0.id == id }) else { return }
+                switch result {
+                case .success(let color):
+                    self.adjustments.masks[index].color = color
+                    self.adjustments.masks[index].restrictColor = true
+                    self.status = "已取样全局校正后的原色。调节颜色容差和柔化，检查是否选中所需区域。"
+                    self.requestPreview()
+                case .failure(let error): self.status = error.localizedDescription
+                }
+            }
+        }
     }
 
     func saveRecipe() {
@@ -494,7 +759,7 @@ final class AppModel: ObservableObject {
             let data = try Data(contentsOf: url)
             guard data.count < 4_000_000 else { throw AtelierError.invalidConfiguration("配方文件过大") }
             let saved = try JSONDecoder().decode(Recipe.self, from: data)
-            guard saved.version == 1 else { throw AtelierError.invalidConfiguration("不支持此版本的配方") }
+            guard [1, 2].contains(saved.version) else { throw AtelierError.invalidConfiguration("不支持此版本的配方") }
             try PhotoEngine.validate(saved.adjustments)
             try saved.automatic?.validate()
             var target = "none"
@@ -512,7 +777,7 @@ final class AppModel: ObservableObject {
             }
             adjustments = saved.adjustments; exportSettings = saved.export; selectedLUT = target
             automaticRecipe = saved.automatic; invalidateAnalysis()
-            selectedMask = nil; drawingMask = false
+            selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
             status = "配方已载入。"; reloadFolder(); requestPreview(immediate: true)
         } catch { present(error) }
     }

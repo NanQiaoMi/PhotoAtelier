@@ -43,9 +43,15 @@ public enum OutputColorSpace: String, Codable, CaseIterable {
 }
 
 public enum MaskKind: String, Codable, CaseIterable {
-    case radial, linear, brush
+    case radial, linear, brush, luminance, color
     public var title: String {
-        switch self { case .radial: return "径向"; case .linear: return "渐变"; case .brush: return "画笔" }
+        switch self {
+        case .radial: return "径向"
+        case .linear: return "渐变"
+        case .brush: return "画笔"
+        case .luminance: return "亮度范围"
+        case .color: return "颜色范围"
+        }
     }
 }
 
@@ -70,16 +76,132 @@ public struct LocalMask: Codable, Identifiable, Equatable {
     public var exposureEV: Double
     public var saturation: Double
     public var warmth: Double
+    public var components: [MaskComponent]
+    public var opacity: Double
+    public var tint: Double
+    public var contrast: Double
+    public var highlights: Double
+    public var shadows: Double
+    public var sharpness: Double
+    public var highlightProtection: Double
+    public var colorProtection: Double
+    public var stage: MaskStage
+    public var restrictLuminance: Bool
+    public var luminanceMin: Double
+    public var luminanceMax: Double
+    public var rangeSoftness: Double
+    public var restrictColor: Bool
+    public var color: MaskColor
+    public var colorTolerance: Double
+    public var colorSoftness: Double
 
     public init(id: UUID = UUID(), name: String = "局部调整", kind: MaskKind = .radial,
                 start: MaskPoint = .init(x: 0.5, y: 0.5), end: MaskPoint = .init(x: 0.75, y: 0.75),
                 points: [MaskPoint] = [], radius: Double = 0.12, feather: Double = 0.65,
                 inverted: Bool = false, enabled: Bool = true, exposureEV: Double = 0.3,
-                saturation: Double = 1, warmth: Double = 0) {
+                saturation: Double = 1, warmth: Double = 0,
+                components: [MaskComponent] = [], opacity: Double = 1, tint: Double = 0,
+                contrast: Double = 1, highlights: Double = 0, shadows: Double = 0,
+                sharpness: Double = 0, highlightProtection: Double = 0.5,
+                colorProtection: Double = 0.5, stage: MaskStage = .beforeLook,
+                restrictLuminance: Bool = false, luminanceMin: Double = 0,
+                luminanceMax: Double = 1, rangeSoftness: Double = 0.15,
+                restrictColor: Bool = false, color: MaskColor = .init(red: 0.5, green: 0.5, blue: 0.5),
+                colorTolerance: Double = 0.2, colorSoftness: Double = 0.15) {
         self.id = id; self.name = name; self.kind = kind; self.start = start; self.end = end
         self.points = points; self.radius = radius; self.feather = feather
         self.inverted = inverted; self.enabled = enabled; self.exposureEV = exposureEV
         self.saturation = saturation; self.warmth = warmth
+        self.components = components; self.opacity = opacity; self.tint = tint
+        self.contrast = contrast; self.highlights = highlights; self.shadows = shadows
+        self.sharpness = sharpness; self.highlightProtection = highlightProtection
+        self.colorProtection = colorProtection; self.stage = stage
+        self.restrictLuminance = restrictLuminance; self.luminanceMin = luminanceMin
+        self.luminanceMax = luminanceMax; self.rangeSoftness = rangeSoftness
+        self.restrictColor = restrictColor; self.color = color
+        self.colorTolerance = colorTolerance; self.colorSoftness = colorSoftness
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, start, end, points, radius, feather, inverted, enabled
+        case exposureEV, saturation, warmth
+        case components, opacity, tint, contrast, highlights, shadows, sharpness
+        case highlightProtection, colorProtection, stage, restrictLuminance
+        case luminanceMin, luminanceMax, rangeSoftness, restrictColor, color
+        case colorTolerance, colorSoftness
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "局部调整"
+        kind = try container.decodeIfPresent(MaskKind.self, forKey: .kind) ?? .radial
+        start = try container.decodeIfPresent(MaskPoint.self, forKey: .start) ?? .init(x: 0.5, y: 0.5)
+        end = try container.decodeIfPresent(MaskPoint.self, forKey: .end) ?? .init(x: 0.75, y: 0.75)
+        points = try container.decodeIfPresent([MaskPoint].self, forKey: .points) ?? []
+        radius = try container.decodeIfPresent(Double.self, forKey: .radius) ?? 0.12
+        feather = try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0.65
+        inverted = try container.decodeIfPresent(Bool.self, forKey: .inverted) ?? false
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        exposureEV = try container.decodeIfPresent(Double.self, forKey: .exposureEV) ?? 0.3
+        saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? 1
+        warmth = try container.decodeIfPresent(Double.self, forKey: .warmth) ?? 0
+        components = try container.decodeIfPresent([MaskComponent].self, forKey: .components) ?? []
+        opacity = try container.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        tint = try container.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        contrast = try container.decodeIfPresent(Double.self, forKey: .contrast) ?? 1
+        highlights = try container.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
+        shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+        sharpness = try container.decodeIfPresent(Double.self, forKey: .sharpness) ?? 0
+        // Old recipe files get no new local protection, preserving their pixels.
+        highlightProtection = try container.decodeIfPresent(Double.self, forKey: .highlightProtection) ?? 0
+        colorProtection = try container.decodeIfPresent(Double.self, forKey: .colorProtection) ?? 0
+        stage = try container.decodeIfPresent(MaskStage.self, forKey: .stage) ?? .afterLook
+        restrictLuminance = try container.decodeIfPresent(Bool.self, forKey: .restrictLuminance) ?? false
+        luminanceMin = try container.decodeIfPresent(Double.self, forKey: .luminanceMin) ?? 0
+        luminanceMax = try container.decodeIfPresent(Double.self, forKey: .luminanceMax) ?? 1
+        rangeSoftness = try container.decodeIfPresent(Double.self, forKey: .rangeSoftness) ?? 0.15
+        restrictColor = try container.decodeIfPresent(Bool.self, forKey: .restrictColor) ?? false
+        color = try container.decodeIfPresent(MaskColor.self, forKey: .color) ?? .init(red: 0.5, green: 0.5, blue: 0.5)
+        colorTolerance = try container.decodeIfPresent(Double.self, forKey: .colorTolerance) ?? 0.2
+        colorSoftness = try container.decodeIfPresent(Double.self, forKey: .colorSoftness) ?? 0.15
+        try LocalMaskValidator.validate(self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try LocalMaskValidator.validate(self)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(points, forKey: .points)
+        try container.encode(radius, forKey: .radius)
+        try container.encode(feather, forKey: .feather)
+        try container.encode(inverted, forKey: .inverted)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(exposureEV, forKey: .exposureEV)
+        try container.encode(saturation, forKey: .saturation)
+        try container.encode(warmth, forKey: .warmth)
+        try container.encode(components, forKey: .components)
+        try container.encode(opacity, forKey: .opacity)
+        try container.encode(tint, forKey: .tint)
+        try container.encode(contrast, forKey: .contrast)
+        try container.encode(highlights, forKey: .highlights)
+        try container.encode(shadows, forKey: .shadows)
+        try container.encode(sharpness, forKey: .sharpness)
+        try container.encode(highlightProtection, forKey: .highlightProtection)
+        try container.encode(colorProtection, forKey: .colorProtection)
+        try container.encode(stage, forKey: .stage)
+        try container.encode(restrictLuminance, forKey: .restrictLuminance)
+        try container.encode(luminanceMin, forKey: .luminanceMin)
+        try container.encode(luminanceMax, forKey: .luminanceMax)
+        try container.encode(rangeSoftness, forKey: .rangeSoftness)
+        try container.encode(restrictColor, forKey: .restrictColor)
+        try container.encode(color, forKey: .color)
+        try container.encode(colorTolerance, forKey: .colorTolerance)
+        try container.encode(colorSoftness, forKey: .colorSoftness)
     }
 }
 
@@ -125,7 +247,9 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    public var version = 1
+    /// Version 2 prevents older applications from silently ignoring local mask
+    /// components, ranges and the before-LUT processing stage. Version 1 remains readable.
+    public var version = 2
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
