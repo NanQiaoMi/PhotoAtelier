@@ -76,6 +76,8 @@ public struct AutoAdjustmentProposal: Codable, Equatable, Identifiable {
     public let confidence: Double
     public let confidenceBasis: String
     public let settings: AdjustmentSettings
+    /// Optional so analyses written before automatic pixel checks still decode.
+    public let safety: AutomaticSafetyReport?
 }
 
 public struct PhotoAnalysis: Codable, Equatable {
@@ -99,6 +101,7 @@ public final class PhotoAnalyzer {
     private static let histogramBins = 64
     private let context: CIContext
     private let workingSpace: CGColorSpace
+    private let engine = PhotoEngine()
 
     public init() {
         let working = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
@@ -121,7 +124,43 @@ public final class PhotoAnalyzer {
         let pixelMetrics = measured.metrics
         let vision = inspectContent(measured.image)
         let colorScene = try ColorSceneAnalyzer.analyze(image: image, context: context)
-        let metrics = PhotoAnalysisMetrics(
+        let metrics = makeMetrics(pixelMetrics, faceCount: vision.faces.count)
+        // Report the source measurements, but make suggestions from the user's
+        // existing global result. Measuring the source and adding that correction
+        // to an already brightened baseline would correct the same need twice.
+        let globalReference = try engine.process(measured.image,
+            settings: AutomaticSafetyEvaluator.globalSettings(baseline), lut: nil).image
+        let adjustedMeasurements = try measure(globalReference).metrics
+        let proposalMetrics = makeMetrics(adjustedMeasurements, faceCount: vision.faces.count)
+        let proposalColors = try ColorSceneAnalyzer.analyze(image: globalReference, context: context)
+
+        var unsupported: [String] = []
+        var metadata = makeMetadata(image: image, properties: properties, sourceURL: sourceURL,
+                                    unsupported: &unsupported)
+        metadata.sort { $0.id < $1.id }
+        if !pixelMetrics.neutralReliable {
+            unsupported.append("未找到足量近中性候选；无法据此确定白平衡误差，保留用户的白平衡选择。")
+        }
+        unsupported.append("近中性 RGB 不能区分物体本色、现场灯光与白平衡误差；自动方案保留原有白平衡、冷暖和色调，不自行中和。")
+        if properties["PhotoAtelierRAWAnalysis"] != nil {
+            unsupported.append("RAW 高光指标基于解码后的线性 RGB 与 SDR 1.0 显示参考比较，不代表原始 sensel 饱和；未逐 sensel 读取黑白电平或噪声。")
+        }
+        unsupported.append(contentsOf: vision.failures)
+
+        let issues = makeFindings(metrics: metrics, neutralReliable: pixelMetrics.neutralReliable,
+                                  vision: vision)
+        let proposals = try makeProposals(metrics: proposalMetrics, baseline: baseline,
+                                          source: image, colorScene: proposalColors)
+        let summary = makeSummary(metrics: metrics, proposal: proposals[0],
+                                  vision: vision, colorScene: colorScene)
+        return PhotoAnalysis(summary: summary, issues: issues, metrics: metrics,
+                             colorScene: colorScene,
+                             metadata: metadata, content: vision.labels,
+                             proposals: proposals, unsupportedReadings: Array(Set(unsupported)).sorted())
+    }
+
+    private func makeMetrics(_ pixelMetrics: PixelMeasurements, faceCount: Int) -> PhotoAnalysisMetrics {
+        PhotoAnalysisMetrics(
             sampleWidth: pixelMetrics.width,
             sampleHeight: pixelMetrics.height,
             sampleCount: pixelMetrics.count,
@@ -146,33 +185,9 @@ public final class PhotoAnalyzer {
             neutralSampleFraction: pixelMetrics.neutralFraction,
             meanSaturation: pixelMetrics.meanSaturation,
             histogram: pixelMetrics.histogram,
-            faceCount: vision.faces.count,
+            faceCount: faceCount,
             analysisConfidence: pixelMetrics.confidence
         )
-
-        var unsupported: [String] = []
-        var metadata = makeMetadata(image: image, properties: properties, sourceURL: sourceURL,
-                                    unsupported: &unsupported)
-        metadata.sort { $0.id < $1.id }
-        if !pixelMetrics.neutralReliable {
-            unsupported.append("未找到足量可靠的中性像素；本次建议不会自动开启白平衡。")
-        }
-        if properties["PhotoAtelierRAWAnalysis"] != nil {
-            unsupported.append("RAW 高光指标基于解码后的线性 RGB 与 SDR 1.0 显示参考比较，不代表原始 sensel 饱和；未逐 sensel 读取黑白电平或噪声。")
-        }
-        unsupported.append(contentsOf: vision.failures)
-
-        let issues = makeFindings(metrics: metrics, neutralReliable: pixelMetrics.neutralReliable,
-                                  vision: vision)
-        let proposals = makeProposals(metrics: metrics, baseline: baseline,
-                                      neutralReliable: pixelMetrics.neutralReliable,
-                                      colorScene: colorScene)
-        let summary = makeSummary(metrics: metrics, proposal: proposals[0],
-                                  vision: vision, colorScene: colorScene)
-        return PhotoAnalysis(summary: summary, issues: issues, metrics: metrics,
-                             colorScene: colorScene,
-                             metadata: metadata, content: vision.labels,
-                             proposals: proposals, unsupportedReadings: Array(Set(unsupported)).sorted())
     }
 
     private struct PixelMeasurements {
@@ -498,7 +513,7 @@ public final class PhotoAnalyzer {
                                                  evidence: String(format: "中位亮度 %.3f（线性光），相对 18%% 灰低 %.2f EV；基于 %d 个有效样本。此为灰阶相对值，不单独证明曝光错误。", metrics.medianLuminance, correction, metrics.sampleCount),
                                                  direction: metrics.nearWhiteFraction > 0.01
                                                     ? "可小幅提升曝光并检查高光；近白像素已较多。"
-                                                    : "可先按逐张测得的中位亮度提升曝光，再复核暗部细节。",
+                                                    : "可预览有限的曝光增量；先确认暗调是否出于拍摄意图。",
                                                  severity: correction > 1.2 ? .high : .moderate))
         } else if correction < -0.3 {
             findings.append(PhotoAnalysisFinding(id: "exposure.bright", title: "中位亮度高于 18% 灰参考",
@@ -527,7 +542,7 @@ public final class PhotoAnalyzer {
             findings.append(PhotoAnalysisFinding(id: "contrast.range", title: metrics.dynamicRangeStops < 2.5 ? "像素对比范围较窄" : "亮度跨度较大",
                                                  evidence: String(format: "P05–P95 亮度范围约 %.2f EV；场景本身也会影响此指标。", metrics.dynamicRangeStops),
                                                  direction: metrics.dynamicRangeStops < 2.5
-                                                    ? "可少量增加对比度，但先确认画面本来是否就是低对比场景。"
+                                                    ? "保留雾景或柔光的低对比感；自动方案不因范围较窄而增加对比度。"
                                                     : "可降低对比度并单独收回高光、抬起阴影，避免压掉细节。",
                                                  severity: .low))
         }
@@ -535,15 +550,15 @@ public final class PhotoAnalyzer {
         if neutralReliable, let warm = metrics.neutralWarmCast, let green = metrics.neutralGreenCast {
             let cast = max(abs(warm), abs(green))
             findings.append(PhotoAnalysisFinding(id: "whiteBalance.neutralSamples",
-                                                 title: cast > 0.08 ? "中性样本存在通道偏差" : "检测到可靠中性样本",
+                                                 title: cast > 0.08 ? "近中性候选存在通道偏差" : "检测到近中性候选",
                                                  evidence: String(format: "%d 个中性候选（占 %.2f%%）；R-B 相对偏差 %+.3f，G 偏差 %+.3f。", metrics.neutralSampleCount, metrics.neutralSampleFraction * 100, warm, green),
-                                                 direction: "可尝试自动白平衡；引擎通道增益最多 ±10%，明显色偏仍可能需要用户白点，这不是拍摄 Kelvin 读数。",
+                                                 direction: "近灰像素可能来自物体本色或有意灯光，不能证明白平衡错误。默认保留拍摄白点；确认参照后可手动开启有限自动白平衡。",
                                                  severity: cast > 0.15 ? .moderate : .info))
         } else {
             findings.append(PhotoAnalysisFinding(id: "whiteBalance.noNeutralEvidence",
                                                  title: "缺少可靠中性像素，白平衡不确定",
                                                  evidence: String(format: "仅有 %d 个中性候选（占 %.3f%%）；彩色主体可能被误当作白平衡参照。", metrics.neutralSampleCount, metrics.neutralSampleFraction * 100),
-                                                 direction: "建议保留手动白平衡或由用户判断；自动白平衡保持关闭。",
+                                                 direction: "建议保留拍摄白点和现有白平衡选择，由用户确认参照；方案不自行更改白平衡开关。",
                                                  severity: .moderate))
         }
         if vision.faces.count > 0 {
@@ -557,105 +572,90 @@ public final class PhotoAnalyzer {
     }
 
     private func makeProposals(metrics: PhotoAnalysisMetrics, baseline: AdjustmentSettings,
-                               neutralReliable: Bool,
-                               colorScene: ColorSceneProfile) -> [AutoAdjustmentProposal] {
-        let measuredExposureNeed = clamp(log2(0.18 / max(metrics.medianLuminance, 0.0001)), -1.5, 1.5)
+                               source: CIImage, colorScene: ColorSceneProfile) throws -> [AutoAdjustmentProposal] {
+        // A median is not a semantic exposure target. Keep only half of its
+        // weak directional signal and cap the change, preserving low/high key
+        // and narrow-range scenes such as fog instead of normalizing them.
+        let restrictedScene = metrics.medianLuminance < 0.04 || metrics.medianLuminance > 0.60
+            || metrics.dynamicRangeStops < 3.5
+        let exposureLimit = restrictedScene ? 0.10 : 0.25
+        let measuredNeed = log2(0.18 / max(metrics.medianLuminance, 0.0001)) * 0.5
         let highlightHeadroom = max(0, log2(0.98 / max(metrics.p99Luminance, 0.001)))
-        var exposureLimit = 1.5
-        if metrics.medianLuminance < 0.025 || metrics.medianLuminance > 0.82 {
-            exposureLimit = min(exposureLimit, 0.25)
-        }
-        if metrics.dynamicRangeStops < 0.35 {
-            exposureLimit = min(exposureLimit, 0.15)
-        } else if metrics.dynamicRangeStops < 1.25 {
-            exposureLimit = min(exposureLimit, 0.35)
-        }
-        let constrainedExposureNeed = clamp(measuredExposureNeed, -exposureLimit, exposureLimit)
-        let exposureNeed = constrainedExposureNeed > 0 && metrics.nearWhiteFraction > 0.01
-            ? min(constrainedExposureNeed, highlightHeadroom) : constrainedExposureNeed
-        let darkSceneWeight = clamp((0.32 - metrics.medianLuminance) / 0.32, 0, 1)
-        let brightRoom = metrics.nearWhiteFraction > 0.01 ? 0 : highlightHeadroom
-        let safeBrightLift = min(0.32, brightRoom, 0.08 + 0.22 * darkSceneWeight,
-                                 max(0, exposureLimit - exposureNeed))
-        let softPull = min(0.18, 0.035 + max(0, metrics.p95Luminance - 0.65) * 0.25)
-        let exposureLimits = (-4.0)...4.0
-        let correctionEV = clamp(baseline.exposureEV + exposureNeed, exposureLimits.lowerBound, exposureLimits.upperBound)
-        let brightEV = clamp(correctionEV + safeBrightLift, exposureLimits.lowerBound, exposureLimits.upperBound)
+        let constrained = clamp(measuredNeed, -exposureLimit, exposureLimit)
+        // Check headroom even when only a small fraction of the frame is bright.
+        let exposureNeed = constrained > 0 ? min(constrained, highlightHeadroom) : constrained
+        let extraBright = min(restrictedScene ? 0.05 : 0.15,
+                              max(0, highlightHeadroom - max(0, exposureNeed)))
+        let softPull = min(0.08, 0.03 + max(0, metrics.p95Luminance - 0.65) * 0.10)
         let softenedNeed = clamp(exposureNeed - softPull, -exposureLimit, exposureLimit)
-        let actualSoftPull = max(0, exposureNeed - softenedNeed)
-        let softEV = clamp(baseline.exposureEV + softenedNeed, exposureLimits.lowerBound, exposureLimits.upperBound)
-
-        let shadowEvidence = clamp(metrics.nearBlackFraction * 2.0
-                                   + max(0, 0.015 - metrics.p05Luminance) * 3.0, 0, 0.28)
-        let highlightEvidence = clamp(metrics.nearWhiteFraction * 2.0
-                                      + max(0, metrics.p95Luminance - 0.82) * 0.45, 0, 0.25)
-        let contrastNeed = clamp((5.5 - metrics.dynamicRangeStops) * 0.025, -0.12, 0.12)
-        let brightContrast = clamp(contrastNeed + (metrics.dynamicRangeStops < 3.5 ? 0.035 : 0), -0.15, 0.15)
-        let softContrast = -min(0.12, max(0, (metrics.dynamicRangeStops - 4.0) * 0.025))
-        let measuredSaturationLift = min(0.08, max(0, (0.22 - metrics.meanSaturation) * 0.20))
-        // Keep the bright style from adding saturation when a substantial share
-        // of visible pixels is already strongly saturated. This is a bounded
-        // preference, not a claim that a saturated scene needs correction.
+        let shadowEvidence = clamp(metrics.nearBlackFraction * 0.35
+                                   + max(0, 0.015 - metrics.p05Luminance), 0, 0.06)
+        let highlightEvidence = clamp(metrics.nearWhiteFraction * 0.40
+                                      + max(0, metrics.p95Luminance - 0.82) * 0.10, 0, 0.08)
+        let contrastNeed = restrictedScene ? 0 : clamp((5.5 - metrics.dynamicRangeStops) * 0.01, -0.05, 0.02)
+        let softContrast = -min(0.05, max(0, (metrics.dynamicRangeStops - 4.0) * 0.01))
         let saturationHeadroom = clamp((0.45 - colorScene.saturatedFraction) / 0.35, 0, 1)
-        let saturationLift = measuredSaturationLift * saturationHeadroom
-        let saturationSoftening = -min(0.08, max(0, (metrics.meanSaturation - 0.30) * 0.08))
+        let saturationLift = min(0.025, max(0, (0.22 - metrics.meanSaturation) * 0.08)) * saturationHeadroom
+        let saturationSoftening = -min(0.03, max(0, (metrics.meanSaturation - 0.30) * 0.04))
 
-        func settings(exposure: Double, contrastDelta: Double, highlightDelta: Double,
-                      shadowDelta: Double, saturationDelta: Double, soft: Bool) -> AdjustmentSettings {
+        func settings(exposureDelta: Double, contrastDelta: Double, highlightDelta: Double,
+                      shadowDelta: Double, saturationDelta: Double) -> AdjustmentSettings {
             var value = baseline
             value.autoExposure = false
-            value.autoWhiteBalance = neutralReliable
-            value.exposureEV = exposure
+            // Gray-looking objects can be warm by nature or by deliberate
+            // lighting. Preserve the capture and any explicit user WB choice.
+            value.autoWhiteBalance = baseline.autoWhiteBalance
+            value.exposureEV = clamp(baseline.exposureEV + exposureDelta, -8, 8)
             value.contrast = clamp(baseline.contrast + contrastDelta, 0, 4)
             value.highlights = clamp(baseline.highlights + highlightDelta, -1, 1)
             value.shadows = clamp(baseline.shadows + shadowDelta, -1, 1)
             value.saturation = clamp(baseline.saturation + saturationDelta, 0, 4)
-            if soft, neutralReliable {
-                // Warmth is a small style offset only when neutral evidence gives
-                // the image a usable white-balance reference; it is not Kelvin.
-                let cast = metrics.neutralWarmCast ?? 0
-                let warmth = clamp(0.045 - cast * 0.06, -0.04, 0.07)
-                value.temperature = clamp(baseline.temperature + warmth, -1, 1)
-            }
             return value
         }
 
-        let neutralNote = neutralReliable
-            ? "检测到与处理引擎相同标准的中性样本，可尝试自动白平衡；引擎通道增益限制在 ±10%，明显色偏仍可能需要用户白点，实际拍摄 Kelvin 另按元数据报告。"
-            : "缺少可靠中性样本，自动白平衡关闭并保留现有手动色温/色调。"
-        let faceNote = metrics.faceCount > 0 ? "检测到人脸，建议复核面部曝光；不自动生成局部蒙版。" : "未用场景标签替代像素曝光测量。"
-        let commonConfidence = metrics.analysisConfidence
-        let balanced = AutoAdjustmentProposal(id: "balanced", title: "保守还原",
-                                              rationale: String(format: "按本图 P50 %.3f 相对 18%% 灰计算曝光变化 %+.2f EV；依据 P05/P95 %.2f EV 调整对比，并按近黑/近白样本收敛阴影与高光。%@ %@", metrics.medianLuminance, exposureNeed, metrics.dynamicRangeStops, neutralNote, faceNote),
-                                              confidence: commonConfidence,
-                                              confidenceBasis: "规则支持度（不是概率或曝光准确率）：依据 \(metrics.sampleCount) 个有限像素样本、场景范围限制和高光余量；仍需预览复核。",
-                                              settings: settings(exposure: correctionEV, contrastDelta: contrastNeed,
-                                                                 highlightDelta: -highlightEvidence, shadowDelta: shadowEvidence,
-                                                                 saturationDelta: 0, soft: false))
-        let bright = AutoAdjustmentProposal(id: "bright", title: "明亮通透",
-                                            rationale: String(format: "在保守曝光基础上增加 %.2f EV；提升幅度受 P99 %.3f 的高光余量限制，并根据 P05–P95 跨度微调对比/饱和度。%@ %@", safeBrightLift, metrics.p99Luminance, neutralNote, faceNote),
-                                            confidence: max(0.35, commonConfidence - 0.10),
-                                            confidenceBasis: "规则支持度（不是概率或曝光准确率）：曝光空间由本图高光余量和暗部占比决定；明亮风格属于偏好，需在预览中确认。",
-                                            settings: settings(exposure: brightEV,
-                                                               contrastDelta: brightContrast,
-                                                               highlightDelta: -highlightEvidence,
-                                                               shadowDelta: shadowEvidence * 0.85,
-                                                               saturationDelta: saturationLift, soft: false))
-        let soft = AutoAdjustmentProposal(id: "soft", title: "柔和氛围",
-                                          rationale: String(format: "按本图高光分布将曝光相对保守方案回收 %.2f EV；根据实测动态范围降低对比并柔化高光/阴影。温暖偏移仅在可靠中性样本存在时启用，不推断拍摄 Kelvin。%@", actualSoftPull, neutralNote),
-                                          confidence: max(0.30, commonConfidence - 0.18),
-                                          confidenceBasis: "规则支持度（不是概率或曝光准确率）：像素分布支持高光与对比调整；色温方向是有限的风格偏移，需用户确认。",
-                                          settings: settings(exposure: softEV, contrastDelta: softContrast,
-                                                             highlightDelta: -min(0.25, highlightEvidence + 0.04),
-                                                             shadowDelta: shadowEvidence * 0.7,
-                                                             saturationDelta: saturationSoftening, soft: true))
+        let whiteBalanceNote = baseline.autoWhiteBalance
+            ? "沿用用户已开启的有限自动白平衡（仍会调整通道），保留手动冷暖和色调参数。"
+            : "保留拍摄白点及现有冷暖/色调，不根据近灰像素自动中和。"
+        let sceneNote = restrictedScene
+            ? "低/高调或窄亮度范围仅作更小的曝光变化，不自动增加对比度。"
+            : "中位亮度仅提供弱方向线索，不作为曝光错误的判断。"
+        let basis = "规则支持度，不是审美正确率。基于原有基础调整后的像素估计增量，再实际渲染检查新增高光越界和黑位；不覆盖后续手调、LUT 或局部叠加。"
+        func proposal(id: String, title: String, rationale: String, confidence: Double,
+                      requested: AdjustmentSettings) throws -> AutoAdjustmentProposal {
+            let result = try AutomaticSafetyEvaluator.limit(source: source, baseline: baseline,
+                                                            requested: requested, engine: engine)
+            return AutoAdjustmentProposal(id: id, title: title,
+                rationale: String(format: "自动曝光增量 %+.2f EV（总补偿 %+.2f EV）。%@ %@ %@",
+                                  result.report.exposureDeltaEV, result.settings.exposureEV,
+                                  rationale, sceneNote, whiteBalanceNote),
+                confidence: confidence, confidenceBasis: basis,
+                settings: result.settings, safety: result.report)
+        }
+        let balanced = try proposal(id: "balanced", title: "保守还原",
+            rationale: "小幅平衡曝光，按近黑/近白证据微调阴影与高光。",
+            confidence: metrics.analysisConfidence,
+            requested: settings(exposureDelta: exposureNeed, contrastDelta: contrastNeed,
+                                highlightDelta: -highlightEvidence, shadowDelta: shadowEvidence,
+                                saturationDelta: 0))
+        let bright = try proposal(id: "bright", title: "明亮通透",
+            rationale: "在高光余量允许时稍提亮，额外曝光最多 0.15 EV、总增量最多 0.40 EV，仅少量增加彩度。",
+            confidence: max(0.35, metrics.analysisConfidence - 0.10),
+            requested: settings(exposureDelta: exposureNeed + extraBright, contrastDelta: contrastNeed,
+                                highlightDelta: -highlightEvidence, shadowDelta: shadowEvidence * 0.85,
+                                saturationDelta: saturationLift))
+        let soft = try proposal(id: "soft", title: "柔和氛围",
+            rationale: "轻收曝光与高光，按亮度跨度少量柔化对比，不额外增加暖色。",
+            confidence: max(0.30, metrics.analysisConfidence - 0.18),
+            requested: settings(exposureDelta: softenedNeed, contrastDelta: softContrast,
+                                highlightDelta: -min(0.10, highlightEvidence + 0.02),
+                                shadowDelta: shadowEvidence * 0.7, saturationDelta: saturationSoftening))
         return [balanced, bright, soft]
     }
 
     private func makeSummary(metrics: PhotoAnalysisMetrics, proposal: AutoAdjustmentProposal,
                              vision: VisionResult, colorScene: ColorSceneProfile) -> String {
         let contentText = vision.labels.isEmpty ? "未生成可信内容标签" : "内容标签 \(vision.labels.prefix(3).map(\.label).joined(separator: "、"))"
-        return String(format: "采样 %d×%d 像素：中位亮度 %.3f，P05–P95 跨度 %.2f EV，近黑 %.1f%%、近白 %.1f%%。%@。中性色 %.0f%%、高彩度区域 %.0f%%。建议优先预览“%@”（曝光 %+.2f EV）；曝光按 18%% 灰参考、动态范围和高光余量规则估算，不代表曝光错误，需结合主体复核。",
+        return String(format: "采样 %d×%d 像素：中位亮度 %.3f，P05–P95 跨度 %.2f EV，近黑 %.1f%%、近白 %.1f%%。%@。中性色 %.0f%%、高彩度区域 %.0f%%。可预览“%@”（总曝光补偿 %+.2f EV）；方案依据原有基础调整后的像素作有限变化并检查新增越界，保留原有白平衡，仍需结合主体和拍摄意图比较。",
                       metrics.sampleWidth, metrics.sampleHeight, metrics.medianLuminance,
                       metrics.dynamicRangeStops, metrics.nearBlackFraction * 100,
                       metrics.nearWhiteFraction * 100, contentText,

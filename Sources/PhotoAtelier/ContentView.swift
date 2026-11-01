@@ -244,7 +244,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
             panelHeading("光线与色彩", icon: "sun.max")
+            Text("新照片保留拍摄曝光和白点；可先在“分析”比较有限的自动方案，再按意图微调。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4).padding(.bottom, 12)
             Toggle("自动曝光", isOn: $model.adjustments.autoExposure).toggleStyle(.switch).controlSize(.mini).font(.system(size: 11)).padding(.bottom, 13)
+                .help("显式开启旧式中灰估计，最多 ±0.35 EV；此开关不经过三方案的渲染增量检查。")
             AdjustmentSlider(title: "曝光补偿", value: $model.adjustments.exposureEV, range: -4...4, suffix: " EV")
             AdjustmentSlider(title: "高光", value: $model.adjustments.highlights, range: -1...1)
             AdjustmentSlider(title: "阴影", value: $model.adjustments.shadows, range: -1...1)
@@ -253,6 +256,7 @@ struct ContentView: View {
             separator
             Group {
             Toggle("自动白平衡", isOn: $model.adjustments.autoWhiteBalance).toggleStyle(.switch).controlSize(.mini).font(.system(size: 11)).padding(.bottom, 13)
+                .help("仅在确认中性参照后开启；近灰物体或现场暖光不一定是白平衡错误。")
             AdjustmentSlider(title: "冷暖", value: $model.adjustments.temperature, range: -1...1)
             AdjustmentSlider(title: "色调", value: $model.adjustments.tint, range: -1...1)
             AdjustmentSlider(title: "饱和度", value: $model.adjustments.saturation, range: 0...2)

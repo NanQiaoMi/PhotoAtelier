@@ -390,14 +390,16 @@ final class AppModel: ObservableObject {
 
     private func enqueueAnalysis(_ loaded: LoadedPhoto, photo: PhotoItem, key: String) {
         guard selectedID == photo.id else { return }
-        guard analysisSourceKey != key else {
+        let baseline = automaticRecipe?.baseline ?? adjustments
+        let baselineBasicsChanged = AutomaticBatchRecipe.copyBasicAdjustments(
+            from: baseline, into: analysisBaseline) != analysisBaseline
+        guard analysisSourceKey != key || baselineBasicsChanged else {
             refreshProposalPreviews()
             return
         }
         analysisSourceKey = key
         let generation = UUID(); analysisGeneration = generation
         analysis = nil; proposalToken?.cancel(); proposalSettings = nil; proposalLUTID = nil
-        let baseline = automaticRecipe?.baseline ?? adjustments
         analysisBaseline = baseline
         analysisImage = loaded.image
         analysisBusy = true; analysisError = nil; proposalPreviews = [:]

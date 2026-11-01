@@ -21,6 +21,8 @@ public struct AutomaticBatchRecipe: Codable, Equatable {
 
     public func resolve(analysis: PhotoAnalysis, current: AdjustmentSettings) throws -> AdjustmentSettings {
         try validate()
+        // Validate before min/max can hide a NaN in a manual refinement.
+        try PhotoEngine.validate(current)
         guard let proposal = analysis.proposals.first(where: { $0.id == styleID }) else {
             throw AtelierError.invalidConfiguration("分析结果缺少所选方案，未静默回退到其他方案。")
         }
@@ -66,6 +68,8 @@ public struct AutomaticAnalysisRecord: Codable, Equatable {
     public let selectedProposal: String
     public let applied: AutomaticAppliedAdjustments
     public let colorScene: ColorSceneProfile?
+    /// The proposal's check excludes the later manual refinements in `applied`.
+    public let proposalSafety: AutomaticSafetyReport?
 
     public init(analysis: PhotoAnalysis, selectedProposal: String, applied: AdjustmentSettings) {
         summary = analysis.summary; issues = analysis.issues; metrics = analysis.metrics
@@ -73,6 +77,7 @@ public struct AutomaticAnalysisRecord: Codable, Equatable {
         unsupportedReadings = analysis.unsupportedReadings; self.selectedProposal = selectedProposal
         self.applied = AutomaticAppliedAdjustments(applied)
         colorScene = analysis.colorScene
+        proposalSafety = analysis.proposals.first { $0.id == selectedProposal }?.safety
     }
 }
 

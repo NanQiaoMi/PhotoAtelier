@@ -75,6 +75,7 @@ struct AnalysisPanel: View {
                         .font(.system(size: 11)).foregroundColor(AtelierPalette.accent)
                     Text(proposal.rationale).font(.system(size: 10)).lineSpacing(4)
                     Text(proposal.confidenceBasis).font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                    if let safety = proposal.safety { safetyDetails(safety) }
                     Button("继续微调参数", action: editParameters).font(.system(size: 11))
                     Text("批处理按每张照片重新分析，再叠加当前手动微调。LUT、几何与蒙版按当前配方应用。")
                         .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
@@ -84,6 +85,8 @@ struct AnalysisPanel: View {
                 Text("点击照片下方的方案卡片采用结果，再到“基础”和“局部”细调。")
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.accent).lineSpacing(5)
             }
+            Text("方案沿用用户选择的白平衡模式与手动冷暖，已开启的自动白平衡仍会调整颜色。依据评分不表示照片一定更好。阈值检查仅覆盖自动基础增量，后续手调、LUT 和局部叠加请继续前后对比。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             DisclosureGroup("拍摄与文件信息") {
                 VStack(alignment: .leading, spacing: 9) {
                     ForEach(analysis.metadata) { item in
@@ -101,6 +104,18 @@ struct AnalysisPanel: View {
             }.lineSpacing(4)
             Button("保存详细分析 JSON") { model.saveAnalysis() }.font(.system(size: 10))
         }
+    }
+
+    private func safetyDetails(_ value: AutomaticSafetyReport) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            heading("自动基础增量检查")
+            metric("自动曝光增量", String(format: "%+.2f EV", value.exposureDeltaEV))
+            metric("保留建议强度", String(format: "%.0f%%", value.retainedFraction * 100))
+            metric("新增高光越界 / 黑位", String(format: "%.2f%% / %.2f%%",
+                value.introducedHighlightFraction * 100, value.introducedShadowFraction * 100))
+            Text(value.summary).font(.system(size: 9)).lineSpacing(3)
+            Text(value.scope).font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(3)
+        }.padding(10).background(AtelierPalette.raised.opacity(0.5)).cornerRadius(5)
     }
 
     private func metrics(_ value: PhotoAnalysisMetrics) -> some View {
@@ -274,8 +289,12 @@ struct AnalysisProposalShelf: View {
                 }.frame(height: 94).clipped().cornerRadius(5)
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(model.automaticRecipe?.styleID == proposal.id ? AtelierPalette.accent : .clear, lineWidth: 1.5))
                 Text(proposal.title).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                Text(String(format: "%+.2f EV · 依据评分 %.0f", proposal.settings.exposureEV, proposal.confidence * 100))
+                Text(String(format: "总补偿 %+.2f EV · 依据 %.0f", proposal.settings.exposureEV, proposal.confidence * 100))
                     .font(.system(size: 8)).foregroundColor(AtelierPalette.muted).lineLimit(1)
+                if let safety = proposal.safety {
+                    Text(String(format: "自动 %+.2f EV · 强度 %.0f%%", safety.exposureDeltaEV, safety.retainedFraction * 100))
+                        .font(.system(size: 8)).foregroundColor(AtelierPalette.muted).lineLimit(1)
+                }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.buttonStyle(.plain).help(proposal.rationale).disabled(model.batchRunning || model.analysisBusy)
     }

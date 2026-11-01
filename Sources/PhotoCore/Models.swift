@@ -208,7 +208,8 @@ public struct LocalMask: Codable, Identifiable, Equatable {
 }
 
 public struct AdjustmentSettings: Codable, Equatable {
-    public var autoExposure = true
+    /// New photographs preserve the decoded capture until the user chooses a proposal.
+    public var autoExposure = false
     public var autoWhiteBalance = false
     public var exposureEV: Double = 0
     public var temperature: Double = 0

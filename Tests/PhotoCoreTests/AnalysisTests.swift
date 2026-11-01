@@ -19,7 +19,37 @@ final class AnalysisTests: XCTestCase {
         XCTAssertGreaterThan(dark.metrics.sampleCount, 0)
         XCTAssertEqual(dark.metrics.histogram.count, 64)
         let encoded = try JSONEncoder().encode(dark)
-        XCTAssertEqual(try JSONDecoder().decode(PhotoAnalysis.self, from: encoded), dark)
+        let decoded = try JSONDecoder().decode(PhotoAnalysis.self, from: encoded)
+        XCTAssertEqual(decoded.summary, dark.summary)
+        XCTAssertEqual(decoded.metrics, dark.metrics)
+        XCTAssertEqual(decoded.colorScene, dark.colorScene)
+        XCTAssertEqual(decoded.issues, dark.issues)
+        XCTAssertEqual(decoded.metadata, dark.metadata)
+        XCTAssertEqual(decoded.content, dark.content)
+        XCTAssertEqual(decoded.unsupportedReadings, dark.unsupportedReadings)
+        XCTAssertEqual(decoded.proposals.count, dark.proposals.count)
+        for (actual, expected) in zip(decoded.proposals, dark.proposals) {
+            XCTAssertEqual(actual.id, expected.id)
+            XCTAssertEqual(actual.title, expected.title)
+            XCTAssertEqual(actual.rationale, expected.rationale)
+            XCTAssertEqual(actual.confidence, expected.confidence, accuracy: 1e-12)
+            XCTAssertEqual(actual.confidenceBasis, expected.confidenceBasis)
+            // macOS 13 Foundation shifts the JSON encoding of 0.07 by about 3e-17.
+            // Check numerical meaning, while keeping all other fields exact.
+            var settings = actual.settings
+            XCTAssertEqual(settings.exposureEV, expected.settings.exposureEV, accuracy: 1e-12)
+            settings.exposureEV = expected.settings.exposureEV
+            XCTAssertEqual(settings, expected.settings)
+            let a = try XCTUnwrap(actual.safety), e = try XCTUnwrap(expected.safety)
+            XCTAssertEqual(a.exposureDeltaEV, e.exposureDeltaEV, accuracy: 1e-12)
+            XCTAssertEqual(a.retainedFraction, e.retainedFraction)
+            XCTAssertEqual(a.requestedHighlightFraction, e.requestedHighlightFraction)
+            XCTAssertEqual(a.introducedHighlightFraction, e.introducedHighlightFraction)
+            XCTAssertEqual(a.requestedShadowFraction, e.requestedShadowFraction)
+            XCTAssertEqual(a.introducedShadowFraction, e.introducedShadowFraction)
+            XCTAssertEqual(a.summary, e.summary)
+            XCTAssertEqual(a.scope, e.scope)
+        }
     }
 
     func testHighKeyUniformSceneIsNotForcedTowardMiddleGray() throws {
@@ -32,17 +62,22 @@ final class AnalysisTests: XCTestCase {
         XCTAssertTrue(analysis.issues.first(where: { $0.id == "exposure.highKeyScene" })?.evidence.contains("不能单凭此值断言曝光错误") == true)
     }
 
-    func testNeutralEvidenceEnablesWhiteBalanceButColoredPixelsDoNot() throws {
+    func testNeutralEvidenceDoesNotOverrideTheUsersWhiteBalanceChoice() throws {
         let warmNeutral = try analyzer.analyze(image: solidImage(red: 0.21, green: 0.20, blue: 0.19),
                                                properties: [:], sourceURL: URL(fileURLWithPath: "/tmp/neutral.jpg"))
         let saturated = try analyzer.analyze(image: solidImage(red: 0.75, green: 0.12, blue: 0.025),
                                              properties: [:], sourceURL: URL(fileURLWithPath: "/tmp/color.jpg"))
 
         XCTAssertGreaterThan(warmNeutral.metrics.neutralSampleCount, 0)
-        XCTAssertTrue(warmNeutral.proposals[0].settings.autoWhiteBalance)
+        XCTAssertTrue(warmNeutral.proposals.allSatisfy { !$0.settings.autoWhiteBalance })
         XCTAssertLessThanOrEqual(saturated.metrics.neutralSampleCount, warmNeutral.metrics.neutralSampleCount)
         XCTAssertFalse(saturated.proposals[0].settings.autoWhiteBalance)
         XCTAssertTrue(saturated.unsupportedReadings.contains { $0.contains("中性") })
+        var explicit = AdjustmentSettings()
+        explicit.autoWhiteBalance = true
+        let optedIn = try analyzer.analyze(image: solidImage(red: 0.21, green: 0.20, blue: 0.19),
+                                          properties: [:], baseline: explicit)
+        XCTAssertTrue(optedIn.proposals.allSatisfy { $0.settings.autoWhiteBalance })
     }
 
     func testJPEGWithoutCaptureKelvinIsReportedUnknownNotEstimatedFromRGB() throws {

@@ -56,7 +56,7 @@ private final class SmokeSession {
             case 0:
                 guard !model.scanning, !model.previewBusy, !model.analysisBusy,
                       model.afterImage != nil, model.proposalPreviews.count == 3 else { return }
-                guard model.photos.count >= 2, let preset = LUTCube.builtIns.first else {
+                guard model.photos.count >= 2, !LUTCube.builtIns.isEmpty else {
                     throw AtelierError.invalidConfiguration("测试需要至少两张合成照片和一个内置 LUT")
                 }
                 assertions.append("Folder scan and managed preview completed")
@@ -67,7 +67,41 @@ private final class SmokeSession {
                 }
                 assertions.append("Pixel/metadata analysis and three rendered automatic proposals completed")
                 assertions.append("Measured scene palette and nine positional regions completed")
+                guard !model.adjustments.autoExposure, !model.adjustments.autoWhiteBalance,
+                      analysis.proposals.allSatisfy({ proposal in
+                          guard let safety = proposal.safety else { return false }
+                          return !proposal.settings.autoExposure && !proposal.settings.autoWhiteBalance
+                              && proposal.settings.temperature == 0 && proposal.settings.tint == 0
+                              && abs(safety.exposureDeltaEV) <= 0.400001
+                              && (0...1).contains(safety.retainedFraction)
+                              && safety.introducedHighlightFraction <= 0.005001
+                              && safety.introducedShadowFraction <= 0.005001
+                      }) else { throw AtelierError.invalidConfiguration("新照片默认状态或三方案自动增量检查不符合保守约束") }
+                assertions.append("Capture exposure/WB defaults preserved and three automatic increments checked at preview input resolution")
+                try JSONEncoder().encode(analysis).write(to: evidence.appendingPathComponent("initial-analysis.json"), options: .atomic)
                 try snapshot("02-library.png", tab: 0)
+                model.adjustments.exposureEV = 0.5
+                model.requestPreview(immediate: true)
+                phase = 9
+            case 9:
+                guard !model.previewBusy, !model.analysisBusy, model.proposalPreviews.count == 3,
+                      let analysis = model.analysis else { return }
+                guard analysis.proposals.allSatisfy({ proposal in
+                    guard let safety = proposal.safety else { return false }
+                    return abs(proposal.settings.exposureEV - safety.exposureDeltaEV - 0.5) < 1e-8
+                }) else { throw AtelierError.invalidConfiguration("手动基础参数变化后，方案仍使用过时的分析基线") }
+                assertions.append("Editing manual base exposure refreshes proposal analysis without double correction")
+                try JSONEncoder().encode(analysis).write(to: evidence.appendingPathComponent("manual-baseline-analysis.json"), options: .atomic)
+                model.adjustments.exposureEV = 0
+                model.requestPreview(immediate: true)
+                phase = 10
+            case 10:
+                guard !model.previewBusy, !model.analysisBusy, model.proposalPreviews.count == 3,
+                      let analysis = model.analysis, let preset = LUTCube.builtIns.first else { return }
+                guard analysis.proposals.allSatisfy({ proposal in
+                    guard let safety = proposal.safety else { return false }
+                    return abs(proposal.settings.exposureEV - safety.exposureDeltaEV) < 1e-8
+                }) else { throw AtelierError.invalidConfiguration("恢复基础参数后方案基线未同步恢复") }
                 model.applyProposal("balanced")
                 model.selectLUT(preset.id)
                 model.adjustments.exposureEV += 0.2
@@ -95,6 +129,10 @@ private final class SmokeSession {
                 assertions.append("LUT compatibility and final color-quality measurements completed")
                 assertions.append("Real calibrated Lensfun geometry applied through app preview")
                 try snapshot("02-analysis.png", tab: 0, compare: false)
+                try snapshotView("02-automatic-safety.png", width: 420, height: 2400,
+                                 content: AnalysisPanel(model: model, editParameters: {}).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
                 model.maskKind = .radial
                 model.maskDrawMode = .new
                 model.addMask(start: .init(x: 0.52, y: 0.52), end: .init(x: 0.78, y: 0.77), points: [])
@@ -214,6 +252,21 @@ private final class SmokeSession {
                               && report?["lutCompatibility"] is [String: Any]
                       }) else { throw AtelierError.invalidConfiguration("配方版本或逐张色彩保护报告未记录") }
                 assertions.append("Recipe v3 and per-photo output gamut / color-protection reports retained")
+                guard completed.allSatisfy({ entry in
+                    let record = (entry["report"] as? [String: Any])?["analysis"] as? [String: Any]
+                    guard let safety = record?["proposalSafety"] as? [String: Any],
+                          let highlights = safety["introducedHighlightFraction"] as? Double,
+                          let shadows = safety["introducedShadowFraction"] as? Double,
+                          let delta = safety["exposureDeltaEV"] as? Double,
+                          let scope = safety["scope"] as? String, scope.contains("alpha"),
+                          scope.contains("后续手调"), scope.contains("192"),
+                          let requestedHighlights = safety["requestedHighlightFraction"] as? Double,
+                          let requestedShadows = safety["requestedShadowFraction"] as? Double else { return false }
+                    return highlights.isFinite && shadows.isFinite && delta.isFinite
+                        && (0...1).contains(requestedHighlights) && (0...1).contains(requestedShadows)
+                        && highlights <= 0.005001 && shadows <= 0.005001 && abs(delta) <= 0.400001
+                }) else { throw AtelierError.invalidConfiguration("自动方案检查证据未逐张保存") }
+                assertions.append("Per-photo proposal safety scope and finite introduced clipping measurements saved")
                 let rawExtensions: Set<String> = ["dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "rw2", "orf", "pef", "srw"]
                 let rawItems = model.photos.filter { rawExtensions.contains($0.url.pathExtension.lowercased()) }
                 for raw in rawItems {
