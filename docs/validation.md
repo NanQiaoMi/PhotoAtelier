@@ -24,7 +24,8 @@
 - 稳定分支 `main`；当前功能分支 `feature/photo-atelier`，沿用前阶段创建的分支，没有在 `main` 直接开发。
 - 建分支时 HEAD 与基线均为 `837ec592c5428e4e4cd360e91f2592d69321f92d`，`chore: baseline`。初始基线只有 README 与 `.gitignore`，没有既有构建/测试入口，未发现可复跑的基线失败。
 - 当前工作均为本任务实现；开始时没有用户未提交文件、没有 stash、没有远程。已再次检查 `git status --porcelain -uall`、`git diff --cached --name-only`、`git stash list`、`git remote -v` 与 `git rev-parse main`。
-- 不推送、不创建 PR、不发布。依赖、测试照片、缓存与应用产物都被忽略，不纳入 Git。最终提交哈希及是否合并由最终交付消息记录。
+- 实现提交：`959038d1dfbdd75c710171d428b84482bb6659d1`，`feat(atelier): add analyzed RAW batch photo grading`。最终检查、打包与下述 `output-final` 流程均在该实现提交后执行；后续提交只补充本验证文档。
+- 不推送、不创建 PR、不发布，只有本地仓库。目前未合并 `main`，功能分支保留。依赖、测试照片、缓存与应用产物都被忽略，不纳入 Git。
 - 未获得人工交互验收或风险接受前，不执行本地合并。源代码回滚用 `git revert <commit>`，不重写历史；打包会保留旧 `.app` 的带时间戳副本。
 
 ## 实际验证命令与结果
@@ -44,10 +45,14 @@
 | `make check`（RAW 颜色转换修复后） | 0 | 51 tests / 0 failures，4.73 秒；构建 11.20 秒。仍保留系统 kernel 弃用警告。 |
 | `bash Scripts/build_app.sh`（修复后） | 0 | Release 编译 51.38 秒；签前源 SHA 匹配、4 个库自身 ID 正规化、签后 SHA / 签名 / 架构 / 加载路径 / 55 XML 与许可精确集合全部通过。旧应用保留为 `build/PhotoAtelier.previous-20261101-103105.app`。 |
 | `env -u PROJECT_ROOT /usr/bin/time -l '/Users/mimi/project/ai调色/build/PhotoAtelier.app/Contents/MacOS/PhotoAtelier' --self-test '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/input' '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/output-release' '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/evidence-release'`（工作目录 `/tmp`） | 0 | `APP_SMOKE PASS · 13 checks · 3 exported · 1 isolated`；进程 real 28.99 秒、最大 RSS 916,324,352 bytes、peak footprint 1,239,134,208 bytes、0 swaps。清除开发目录环境变量，使用包内库与数据库。 |
+| `make check`（提交 `959038d` 后） | 0 | 最终实现快照：构建 3.20 秒；51 tests / 0 failures，3.816 秒。日志：`artifacts/acceptance-20261101/evidence-release/final-check.log`。 |
+| `bash Scripts/build_app.sh`（提交 `959038d` 后） | 0 | Release 增量编译 12.29 秒；4 个签名 x86_64 动态库、55 XML、许可精确集合、portable paths 全通过。旧包保留为 `build/PhotoAtelier.previous-20261101-103533.app`。日志：`artifacts/acceptance-20261101/evidence-release/final-build.log`。 |
+| `env -u PROJECT_ROOT /usr/bin/time -l '/Users/mimi/project/ai调色/build/PhotoAtelier.app/Contents/MacOS/PhotoAtelier' --self-test '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/input' '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/output-final' '/Users/mimi/project/ai调色/artifacts/acceptance-20261101/evidence-final'`（工作目录 `/tmp`） | 0 | 对刚重建的最终应用重新验收：`APP_SMOKE PASS · 13 checks · 3 exported · 1 isolated`。harness 9.94 秒、进程 real 11.51 秒；最大 RSS 938,774,528 bytes、peak footprint 1,248,780,288 bytes、0 swaps。完整日志：`artifacts/acceptance-20261101/evidence-final/final-smoke.log`。 |
 | `PYTHONOPTIMIZE=1 python3 Scripts/verify_app.py build/PhotoAtelier.app` | 0 | 4 signed x86_64 dylibs / 55 XML / exact licenses / portable paths；优化模式仍执行门禁。 |
 | `codesign --verify --deep --strict build/PhotoAtelier.app` | 0 | 最终包严格签名校验通过。 |
 | `du -sh build/PhotoAtelier.app` | 0 | 应用约 14 MB；测试照片、导出 TIFF 不在应用包中。 |
 | `cua.getApp("PhotoAtelier")` | 工具错误 | `Sky Computer Use service startup request failed`；未使用其他技术绕过原生 UI 自动化。 |
+| `cua.rewriteDocumentation()` 后 `cua.getApp('/Users/mimi/project/ai调色/build/PhotoAtelier.app')`（最终包复验） | 工具错误 | 文档恢复成功，原生服务仍返回 `Sky Computer Use service startup request failed`。鼠标键盘、系统文件对话框及退出确认仍为未执行，没有将自动 smoke 视为人工验收。 |
 
 `make check` 是项目完整检查入口（build + test），没有独立的 lint/typecheck 入口；Swift 编译覆盖类型检查。`make app` 等价调用 `bash Scripts/build_app.sh`，由最终打包记录覆盖；`make run` 的真实 Finder/启动交互未执行。没有使用 `--no-verify`、禁用用例或跳过失败测试。
 
@@ -65,19 +70,21 @@
 
 最终实际 CR2 分析中位亮度为 **0.07319**，与独立原生线性解码参考 **0.07309** 一致；逐张批处理实际曝光分别为 +1.390、+0.828、+1.498 EV，证明没有把第一张的 EV 固定套给整批。真实 RAW 自动命中其 EF-S 18–55mm IS II 镜头配置。图像复核确认晨雾与主体可见，没有前一轮的异常黑图，三方案预览存在可见差异。
 
-使用 ImageIO 对最终三个导出文件重新读取，命令入口 `swift - artifacts/acceptance-20261101/output-release`（标准输入程序见下）；退出 0。两张合成图为 1600×1067，Canon 为 4272×2848；全部 16-bit、Display P3、orientation 1。完整流程的源文件 SHA-256 一致。
+使用 ImageIO 对最终包的三个导出文件重新读取，命令入口 `swift - artifacts/acceptance-20261101/output-final`（标准输入程序见下）；退出 0。两张合成图为 1600×1067，Canon 为 4272×2848；全部 16-bit、Display P3、orientation 1。完整流程的源文件 SHA-256 一致。再次执行 `codesign --verify --deep --strict build/PhotoAtelier.app` 与 `PYTHONOPTIMIZE=1 python3 Scripts/verify_app.py build/PhotoAtelier.app` 均退出 0。
 
 ```swift
 import Foundation
 import ImageIO
 let root = URL(fileURLWithPath: CommandLine.arguments[1])
-for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "tiff" }).sorted(by: { $0.path < $1.path }) {
+let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter { $0.pathExtension == "tiff" }.sorted { $0.path < $1.path }
+guard files.count == 3 else { fatalError("Expected three exports") }
+for url in files {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
           let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else { fatalError("Unreadable export") }
     let width = p["PixelWidth"] as? Int ?? 0, height = p["PixelHeight"] as? Int ?? 0
     let depth = p["Depth"] as? Int ?? 0, orientation = p["Orientation"] as? Int ?? 0
     let profile = p["ProfileName"] as? String ?? "missing"
-    guard depth == 16, orientation == 1, profile.contains("P3") else { fatalError("Export contract failed: \(p)") }
+    guard depth == 16, orientation == 1, profile.contains("P3") else { fatalError("Export contract failed") }
     if url.lastPathComponent.contains("Canon") { guard width == 4272 && height == 2848 else { fatalError("RAW was not full resolution") } }
     print("\(url.lastPathComponent): \(width)x\(height), \(depth)-bit, \(profile), orientation \(orientation)")
 }
@@ -101,7 +108,17 @@ with tempfile.TemporaryDirectory(prefix='photo-atelier-verifier-') as folder:
     print(result.stdout.strip())
 ```
 
-本地证据（不入库）：`artifacts/acceptance-20261101/evidence-release/01-empty.png`、`02-library.png`、`02-analysis.png`、`03-mask.png`、`04-export.png`、`05-raw-analysis.png`、`app-smoke.json`；对应逐张 JSON 清单位于 `output-release/`。自动命令及本应用自己的 SwiftUI 视图渲染，不能替代真实鼠标/键盘与系统文件对话框操作。
+最终本地证据（不入库）：`artifacts/acceptance-20261101/evidence-final/01-empty.png`、`02-library.png`、`02-analysis.png`、`03-mask.png`、`04-export.png`、`05-raw-analysis.png`、`app-smoke.json`、`final-smoke.log`；对应逐张 JSON 清单位于 `output-final/`。已再次查看最终 `05-raw-analysis.png`：RAW 晨雾、树木与道路正常可见，三种方案可比较，分析面板显示真实像素指标与 Vision 标签。旧 `evidence-release/` 证据保留。自动命令及本应用自己的 SwiftUI 视图渲染，不能替代真实鼠标/键盘与系统文件对话框操作。
+
+### 待执行的原生交互清单
+
+下列项目均未执行，不计入已通过验收。没有收到风险接受答复，因此继续保留已提交功能分支，不合并 `main`。
+
+- [ ] 从 Finder 打开 `build/PhotoAtelier.app`，通过系统文件选择器打开文件夹，取消一次后再正常选择。
+- [ ] 鼠标切换 JPEG / RAW，采用三个方案中的任一个，并在“基础”修改参数；切换照片后显示本张分析与候选结果。
+- [ ] 拖动前后对比分隔线、缩放/平移，并绘制和修改局部画笔/渐变/径向蒙版。
+- [ ] 通过系统对话框导入 `.cube`、保存/载入配方及保存分析 JSON，检查取消不破坏当前状态。
+- [ ] 选择独立输出文件夹并批处理；运行中取消，以及运行中退出后分别选择继续工作/确认退出，确保状态明确且原图保留。
 
 ## 真实 RAW 夹具
 
