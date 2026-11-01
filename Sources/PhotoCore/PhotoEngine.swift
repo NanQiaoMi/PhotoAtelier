@@ -1,0 +1,821 @@
+import CoreGraphics
+import CoreImage
+import Foundation
+import Vision
+
+/// Applies non-destructive color and local adjustments to a CIImage graph.
+/// The context works in extended linear sRGB; display/file encoding belongs to
+/// the export boundary and must be selected there explicitly.
+public final class PhotoEngine {
+    public let context: CIContext
+
+    private let workingColorSpace: CGColorSpace
+    private static let analysisDimension = 64
+    private static let maximumMaskRasterDimension = 2048
+
+    private static let toneKernel = CIColorKernel(source: """
+    kernel vec4 toneAdjust(__sample source, float saturation, float contrast,
+                           float highlights, float shadows) {
+        float alpha = source.a;
+        vec3 color = alpha > 0.000001 ? source.rgb / alpha : vec3(0.0);
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        color = mix(vec3(luminance), color, saturation);
+        color = (color - vec3(0.18)) * contrast + vec3(0.18);
+        float shadowWeight = 1.0 - smoothstep(0.0, 0.45, luminance);
+        float highlightWeight = smoothstep(0.45, 1.0, luminance);
+        color += color * (shadows * 0.15 * shadowWeight);
+        color += color * (highlights * 0.15 * highlightWeight);
+        return vec4(color * alpha, alpha);
+    }
+    """)
+
+    private static let lutEncodeKernel = CIColorKernel(source: """
+    float encodeSRGB(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        float magnitude = abs(value);
+        float encoded = magnitude <= 0.0031308
+            ? 12.92 * magnitude
+            : 1.055 * pow(magnitude, 1.0 / 2.4) - 0.055;
+        return signValue * encoded;
+    }
+    float encodeRec709Gamma24(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        return signValue * pow(abs(value), 1.0 / 2.4);
+    }
+    float encodeForLUT(float value, float mode) {
+        if (mode < 0.5) { return encodeSRGB(value); }
+        if (mode < 1.5) { return encodeRec709Gamma24(value); }
+        return value;
+    }
+    kernel vec4 encodeLUTInput(__sample source, vec3 domainMin,
+                               vec3 domainRange, float mode) {
+        float alpha = source.a;
+        vec3 linear = alpha > 0.000001 ? source.rgb / alpha : vec3(0.0);
+        linear = clamp(linear, vec3(-16.0), vec3(16.0));
+        vec3 encoded = vec3(encodeForLUT(linear.r, mode),
+                            encodeForLUT(linear.g, mode),
+                            encodeForLUT(linear.b, mode));
+        vec3 normalized = clamp((encoded - domainMin) / domainRange,
+                                vec3(0.0), vec3(1.0));
+        return vec4(normalized, 1.0);
+    }
+    """)
+
+    private static let lutDecodeKernel = CIColorKernel(source: """
+    float decodeSRGB(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        float magnitude = abs(value);
+        float decoded = magnitude <= 0.04045
+            ? magnitude / 12.92
+            : pow((magnitude + 0.055) / 1.055, 2.4);
+        return signValue * decoded;
+    }
+    float decodeRec709Gamma24(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        return signValue * pow(abs(value), 2.4);
+    }
+    float decodeFromLUT(float value, float mode) {
+        if (mode < 0.5) { return decodeSRGB(value); }
+        if (mode < 1.5) { return decodeRec709Gamma24(value); }
+        return value;
+    }
+    kernel vec4 decodeLUTOutput(__sample source, float mode) {
+        vec3 decoded = vec3(decodeFromLUT(source.r, mode),
+                            decodeFromLUT(source.g, mode),
+                            decodeFromLUT(source.b, mode));
+        return vec4(decoded, 1.0);
+    }
+    """)
+
+    private static let lutCoverageKernel = CIColorKernel(source: """
+    float coverageSRGB(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        float magnitude = abs(value);
+        float encoded = magnitude <= 0.0031308
+            ? 12.92 * magnitude
+            : 1.055 * pow(magnitude, 1.0 / 2.4) - 0.055;
+        return signValue * encoded;
+    }
+    float coverageRec709(float value) {
+        float signValue = value < 0.0 ? -1.0 : 1.0;
+        return signValue * pow(abs(value), 1.0 / 2.4);
+    }
+    float coverageEncode(float value, float mode) {
+        if (mode < 0.5) { return coverageSRGB(value); }
+        if (mode < 1.5) { return coverageRec709(value); }
+        return value;
+    }
+    kernel vec4 lutInputCoverage(__sample source, vec3 domainMin,
+                                 vec3 domainRange, float mode) {
+        float alpha = source.a;
+        vec3 linear = alpha > 0.000001 ? source.rgb / alpha : vec3(0.0);
+        linear = clamp(linear, vec3(-16.0), vec3(16.0));
+        vec3 encoded = vec3(coverageEncode(linear.r, mode),
+                            coverageEncode(linear.g, mode),
+                            coverageEncode(linear.b, mode));
+        vec3 normalized = (encoded - domainMin) / domainRange;
+        vec3 overflow = max(max(vec3(0.0) - normalized, normalized - vec3(1.0)),
+                            vec3(0.0));
+        float maximumOverflow = max(max(overflow.r, overflow.g), overflow.b);
+        float coverage = 1.0 - smoothstep(0.0, 0.1, maximumOverflow);
+        return vec4(coverage, coverage, coverage, 1.0);
+    }
+    """)
+
+    private static let lookKernel = CIColorKernel(source: """
+    kernel vec4 protectLook(__sample originalSample, __sample gradedSample,
+                            __sample coverageSample,
+                            float intensity, float preserveLuminance,
+                            float protectSkin, float protectNeutrals,
+                            float gamutCompression) {
+        float alpha = originalSample.a;
+        vec3 original = alpha > 0.000001
+            ? originalSample.rgb / alpha
+            : vec3(0.0);
+        vec3 graded = gradedSample.rgb;
+        float originalLuma = max(dot(original, vec3(0.2126, 0.7152, 0.0722)), 0.0);
+        float gradedLuma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+        float maxChannel = max(max(original.r, original.g), original.b);
+        float minChannel = min(min(original.r, original.g), original.b);
+        float neutralMask = 1.0 - smoothstep(0.008, 0.08, maxChannel - minChannel);
+        float skinWarmth = smoothstep(0.015, 0.10, original.r - original.g)
+                         * smoothstep(0.004, 0.065, original.g - original.b);
+        float skinLuma = smoothstep(0.035, 0.18, originalLuma)
+                       * (1.0 - smoothstep(0.82, 1.35, originalLuma));
+        float skinMask = skinWarmth * skinLuma;
+        float protection = max(protectNeutrals * neutralMask,
+                               protectSkin * skinMask);
+        float lookWeight = intensity * coverageSample.r * (1.0 - protection);
+
+        if (gradedLuma > 0.00001) {
+            float lumaRatio = clamp(originalLuma / gradedLuma, 0.0625, 16.0);
+            vec3 lumaMatched = graded * lumaRatio;
+            graded = mix(graded, lumaMatched, preserveLuminance);
+        }
+
+        float gradedLumaForGamut = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+        if (gradedLumaForGamut >= 0.0 && gradedLumaForGamut <= 1.0) {
+            float chromaScale = 1.0;
+            if (graded.r > 1.0) {
+                chromaScale = min(chromaScale, (1.0 - gradedLumaForGamut) / (graded.r - gradedLumaForGamut));
+            }
+            if (graded.g > 1.0) {
+                chromaScale = min(chromaScale, (1.0 - gradedLumaForGamut) / (graded.g - gradedLumaForGamut));
+            }
+            if (graded.b > 1.0) {
+                chromaScale = min(chromaScale, (1.0 - gradedLumaForGamut) / (graded.b - gradedLumaForGamut));
+            }
+            if (graded.r < 0.0) {
+                chromaScale = min(chromaScale, (0.0 - gradedLumaForGamut) / (graded.r - gradedLumaForGamut));
+            }
+            if (graded.g < 0.0) {
+                chromaScale = min(chromaScale, (0.0 - gradedLumaForGamut) / (graded.g - gradedLumaForGamut));
+            }
+            if (graded.b < 0.0) {
+                chromaScale = min(chromaScale, (0.0 - gradedLumaForGamut) / (graded.b - gradedLumaForGamut));
+            }
+            chromaScale = clamp(chromaScale, 0.0, 1.0);
+            vec3 compressed = vec3(gradedLumaForGamut)
+                            + (graded - vec3(gradedLumaForGamut)) * chromaScale;
+            graded = mix(graded, compressed, gamutCompression);
+        }
+        vec3 outputColor = mix(original, graded, lookWeight);
+        return vec4(outputColor * alpha, alpha);
+    }
+    """)
+
+    public init() {
+        let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        self.workingColorSpace = colorSpace
+        self.context = CIContext(options: [
+            .workingColorSpace: colorSpace,
+            .outputColorSpace: colorSpace,
+            .workingFormat: CIFormat.RGBAh,
+            .outputPremultiplied: false,
+            .cacheIntermediates: false
+        ])
+    }
+
+    /// Shared recipe/configuration validation used by both processing and UI
+    /// recipe loading. Ranges match the normalized controls in AdjustmentSettings.
+    public static func validate(_ settings: AdjustmentSettings) throws {
+        try require(settings.exposureEV, within: -8...8, named: "曝光")
+        try require(settings.temperature, within: -1...1, named: "色温")
+        try require(settings.tint, within: -1...1, named: "色调")
+        try require(settings.contrast, within: 0...4, named: "对比度")
+        try require(settings.saturation, within: 0...4, named: "饱和度")
+        try require(settings.highlights, within: -1...1, named: "高光")
+        try require(settings.shadows, within: -1...1, named: "阴影")
+        try require(settings.lutIntensity, within: 0...1, named: "LUT 强度")
+        try require(settings.preserveLuminance, within: 0...1, named: "亮度保护")
+        try require(settings.protectSkin, within: 0...1, named: "肤色保护")
+        try require(settings.protectNeutrals, within: 0...1, named: "中性色保护")
+        try require(settings.gamutCompression, within: 0...1, named: "色域压缩")
+        try require(settings.rotationDegrees, within: -45...45, named: "旋转")
+        try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
+        try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
+        try require(settings.lensCropFactor, within: 0...10, named: "镜头裁切系数")
+        try require(settings.lensFocalLength, within: 0...2000, named: "镜头实际焦距")
+        guard (settings.lensProfileID?.count ?? 0) <= 1024 else {
+            throw AtelierError.invalidConfiguration("镜头配置标识过长。")
+        }
+        guard settings.masks.count <= 16 else {
+            throw AtelierError.invalidConfiguration("局部蒙版数量不能超过 16 个。")
+        }
+
+        for (index, mask) in settings.masks.enumerated() {
+            let prefix = "第 \(index + 1) 个蒙版"
+            try validatePoint(mask.start, named: "\(prefix)起点")
+            try validatePoint(mask.end, named: "\(prefix)终点")
+            try require(mask.radius, within: 0...1, named: "\(prefix)半径")
+            try require(mask.feather, within: 0...1, named: "\(prefix)羽化")
+            try require(mask.exposureEV, within: -8...8, named: "\(prefix)曝光")
+            try require(mask.saturation, within: 0...4, named: "\(prefix)饱和度")
+            try require(mask.warmth, within: -1...1, named: "\(prefix)暖度")
+            guard mask.name.count <= 256, mask.points.count <= 4096 else {
+                throw AtelierError.invalidConfiguration("\(prefix)名称或画笔点数超过安全上限。")
+            }
+            for point in mask.points {
+                try validatePoint(point, named: "\(prefix)画笔点")
+            }
+        }
+    }
+
+    public func process(_ image: CIImage,
+                        settings: AdjustmentSettings,
+                        lut: LUTCube?,
+                        initialReport: ProcessingReport = .init(),
+                        cancellation: CancellationToken? = nil) throws -> ProcessedPhoto {
+        try Self.validate(settings)
+        try cancellation?.check()
+
+        let originalExtent = try validExtent(of: image)
+        var report = initialReport
+        var working = image
+
+        if settings.lensCorrection && !report.lensCorrectionApplied {
+            report.warnings.append("本图未应用镜头配置校正（详见输入报告）。")
+        }
+
+        let stats: ImageStatistics?
+        if settings.autoExposure || settings.autoWhiteBalance {
+            stats = try analyze(working, extent: originalExtent)
+        } else {
+            stats = nil
+        }
+        try cancellation?.check()
+
+        let automaticEV = settings.autoExposure ? (stats?.conservativeExposureEV ?? 0) : 0
+        let totalEV = automaticEV + settings.exposureEV
+        if abs(totalEV) > 0.0001 {
+            working = try apply("CIExposureAdjust", to: working,
+                                parameters: ["inputEV": NSNumber(value: totalEV)])
+        }
+        report.appliedExposureEV = totalEV
+
+        if settings.autoWhiteBalance {
+            if let gains = stats?.neutralBalanceGains {
+                working = try applyWhiteBalanceGains(gains, to: working)
+            } else {
+                report.warnings.append("自动白平衡未找到足够可靠的中性像素，本图跳过自动白平衡。")
+            }
+        }
+        if abs(settings.temperature) > 0.0001 || abs(settings.tint) > 0.0001 {
+            working = try applyTemperature(settings.temperature, tint: settings.tint, to: working)
+        }
+        try cancellation?.check()
+
+        if settings.saturation != 1 || settings.contrast != 1 ||
+            settings.highlights != 0 || settings.shadows != 0 {
+            guard let kernel = Self.toneKernel else {
+                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 编译失败。")
+            }
+            guard let adjusted = kernel.apply(extent: working.extent, arguments: [
+                working,
+                NSNumber(value: settings.saturation),
+                NSNumber(value: settings.contrast),
+                NSNumber(value: settings.highlights),
+                NSNumber(value: settings.shadows)
+            ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 无法生成输出。")
+            }
+            working = adjusted
+        }
+
+        if settings.autoStraighten {
+            working = try autoStraighten(working, report: &report, cancellation: cancellation)
+        }
+        if abs(settings.rotationDegrees) > 0.0001 {
+            working = try rotate(working, degrees: settings.rotationDegrees)
+            report.straighteningDegrees += settings.rotationDegrees
+        }
+        if settings.verticalPerspective != 0 || settings.horizontalPerspective != 0 {
+            working = try applyPerspective(working,
+                                           vertical: settings.verticalPerspective,
+                                           horizontal: settings.horizontalPerspective)
+        }
+        try cancellation?.check()
+
+        if let lut, settings.lutIntensity > 0 {
+            try validate(lut)
+            report.warnings.append(".cube 文件不包含输入传递函数标记，已按“\(settings.lutColorSpace.title)”解释输入和输出；Log 曲线 LUT 尚不支持自动识别。")
+            let lutResult = try applyLUT(lut, to: working, colorSpace: settings.lutColorSpace)
+            let outsideFraction = try fractionOutsideLUTDomain(lutResult.coverage, extent: working.extent)
+            if outsideFraction > 0.01 {
+                report.warnings.append(String(format: "约 %.1f%% 的取样像素超出 LUT DOMAIN，已平滑降低 LUT 强度以保留域外高光与负值。", outsideFraction * 100))
+            }
+            guard let kernel = Self.lookKernel else {
+                throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 编译失败。")
+            }
+            guard let protected = kernel.apply(extent: working.extent, arguments: [
+                working,
+                lutResult.graded,
+                lutResult.coverage,
+                NSNumber(value: settings.lutIntensity),
+                NSNumber(value: settings.preserveLuminance),
+                NSNumber(value: settings.protectSkin),
+                NSNumber(value: settings.protectNeutrals),
+                NSNumber(value: settings.gamutCompression)
+            ]) else {
+                throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 无法生成输出。")
+            }
+            working = protected
+        }
+        try cancellation?.check()
+
+        for mask in settings.masks where mask.enabled {
+            try cancellation?.check()
+            guard mask.kind != .brush || !mask.points.isEmpty else {
+                report.warnings.append("画笔蒙版“\(mask.name)”没有笔迹，已跳过。")
+                continue
+            }
+            working = try apply(mask, to: working)
+        }
+
+        try cancellation?.check()
+        return ProcessedPhoto(image: working, report: report)
+    }
+
+    private static func require(_ value: Double, within range: ClosedRange<Double>, named name: String) throws {
+        guard value.isFinite, range.contains(value) else {
+            throw AtelierError.invalidConfiguration("\(name) 超出允许范围 \(range.lowerBound)...\(range.upperBound)。")
+        }
+    }
+
+    private static func validatePoint(_ point: MaskPoint, named name: String) throws {
+        try require(point.x, within: 0...1, named: "\(name) X")
+        try require(point.y, within: 0...1, named: "\(name) Y")
+    }
+
+    private func validExtent(of image: CIImage) throws -> CGRect {
+        let extent = image.extent
+        guard !extent.isNull, !extent.isInfinite,
+              extent.width.isFinite, extent.height.isFinite,
+              extent.width > 0, extent.height > 0 else {
+            throw AtelierError.invalidConfiguration("照片必须有有限且非空的图像范围。")
+        }
+        return extent
+    }
+
+    private struct ImageStatistics {
+        let medianLuminance: Double
+        let neutralBalanceGains: SIMD3<Double>?
+
+        var conservativeExposureEV: Double {
+            guard medianLuminance >= 0.025, medianLuminance <= 0.82 else { return 0 }
+            let wanted = log2(0.18 / medianLuminance)
+            return min(max(wanted, -0.35), 0.35)
+        }
+    }
+
+    private func analyze(_ image: CIImage, extent: CGRect) throws -> ImageStatistics? {
+        let dimension = Self.analysisDimension
+        let width = CGFloat(dimension)
+        let height = CGFloat(dimension)
+        let translated = image.transformed(by: CGAffineTransform(translationX: -extent.minX,
+                                                                  y: -extent.minY))
+        let scaled = translated.transformed(by: CGAffineTransform(scaleX: width / extent.width,
+                                                                   y: height / extent.height))
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let thumbnail = scaled.cropped(to: bounds)
+        var pixels = [Float](repeating: 0, count: dimension * dimension * 4)
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            context.render(thumbnail, toBitmap: baseAddress,
+                           rowBytes: dimension * 4 * MemoryLayout<Float>.size,
+                           bounds: bounds, format: .RGBAf, colorSpace: workingColorSpace)
+        }
+
+        var luminances: [Double] = []
+        luminances.reserveCapacity(dimension * dimension)
+        var neutralR = 0.0
+        var neutralG = 0.0
+        var neutralB = 0.0
+        var neutralCount = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let alpha = Double(pixels[offset + 3])
+            guard alpha > 0.001 else { continue }
+            let r = Double(pixels[offset]) / alpha
+            let g = Double(pixels[offset + 1]) / alpha
+            let b = Double(pixels[offset + 2]) / alpha
+            guard r.isFinite, g.isFinite, b.isFinite else { continue }
+            let luminance = max(0, 0.2126 * r + 0.7152 * g + 0.0722 * b)
+            luminances.append(luminance)
+
+            let high = max(r, max(g, b))
+            let low = min(r, min(g, b))
+            if luminance >= 0.04, luminance <= 0.85,
+               high > 0.0001, high - low <= max(0.025, high * 0.075) {
+                neutralR += r
+                neutralG += g
+                neutralB += b
+                neutralCount += 1
+            }
+        }
+        guard !luminances.isEmpty else { return nil }
+        luminances.sort()
+        let median = luminances[luminances.count / 2]
+
+        var gains: SIMD3<Double>?
+        if neutralCount >= 8 {
+            let r = neutralR / Double(neutralCount)
+            let g = neutralG / Double(neutralCount)
+            let b = neutralB / Double(neutralCount)
+            let gray = (r + g + b) / 3
+            if min(r, min(g, b)) > 0.0001 {
+                gains = SIMD3(min(max(gray / r, 0.9), 1.1),
+                             min(max(gray / g, 0.9), 1.1),
+                             min(max(gray / b, 0.9), 1.1))
+            }
+        }
+        return ImageStatistics(medianLuminance: median, neutralBalanceGains: gains)
+    }
+
+    private func applyWhiteBalanceGains(_ gains: SIMD3<Double>, to image: CIImage) throws -> CIImage {
+        let filter = try makeFilter("CIColorMatrix")
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(x: gains.x, y: 0, z: 0, w: 0), forKey: "inputRVector")
+        filter.setValue(CIVector(x: 0, y: gains.y, z: 0, w: 0), forKey: "inputGVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: gains.z, w: 0), forKey: "inputBVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("自动白平衡矩阵无法生成输出。")
+        }
+        return output
+    }
+
+    private func applyTemperature(_ normalizedTemperature: Double, tint: Double,
+                                  to image: CIImage) throws -> CIImage {
+        let filter = try makeFilter("CITemperatureAndTint")
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(x: 6500, y: 0), forKey: "inputNeutral")
+        // Lower destination white point warms the image; the UI's positive
+        // normalized temperature must therefore lower, not raise, kelvin.
+        let targetTemperature = min(max(6500 - normalizedTemperature * 1800, 2000), 50000)
+        filter.setValue(CIVector(x: targetTemperature, y: tint * 60), forKey: "inputTargetNeutral")
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("色温/色调滤镜无法生成输出。")
+        }
+        return output
+    }
+
+    private func applyLUT(_ lut: LUTCube, to image: CIImage,
+                          colorSpace: LUTColorSpace) throws -> (graded: CIImage, coverage: CIImage) {
+        guard let encodeKernel = Self.lutEncodeKernel,
+              let decodeKernel = Self.lutDecodeKernel,
+              let coverageKernel = Self.lutCoverageKernel else {
+            throw AtelierError.invalidConfiguration("Core Image LUT 编码/解码 kernel 编译失败。")
+        }
+        let mode: Float
+        switch colorSpace {
+        case .sRGB: mode = 0
+        case .rec709: mode = 1
+        case .linearSRGB: mode = 2
+        }
+        let domainMin = CIVector(x: CGFloat(lut.domainMin.x), y: CGFloat(lut.domainMin.y),
+                                 z: CGFloat(lut.domainMin.z))
+        let domainRange = CIVector(x: CGFloat(lut.domainMax.x - lut.domainMin.x),
+                                   y: CGFloat(lut.domainMax.y - lut.domainMin.y),
+                                   z: CGFloat(lut.domainMax.z - lut.domainMin.z))
+        guard let encoded = encodeKernel.apply(extent: image.extent, arguments: [
+            image, domainMin, domainRange, NSNumber(value: mode)
+        ]) else {
+            throw AtelierError.invalidConfiguration("LUT 输入编码或 DOMAIN 映射失败。")
+        }
+        guard let coverage = coverageKernel.apply(extent: image.extent, arguments: [
+            image, domainMin, domainRange, NSNumber(value: mode)
+        ]) else {
+            throw AtelierError.invalidConfiguration("LUT DOMAIN 覆盖范围计算失败。")
+        }
+
+        var cubeComponents = lut.rgba
+        guard cubeComponents.count == lut.size * lut.size * lut.size * 4 else {
+            throw AtelierError.invalidLUT("LUT RGBA 数据长度不正确。")
+        }
+        for offset in stride(from: 3, to: cubeComponents.count, by: 4) {
+            cubeComponents[offset] = 1
+        }
+        let cubeData = cubeComponents.withUnsafeBufferPointer { Data(buffer: $0) }
+        let filter = try makeFilter("CIColorCube")
+        filter.setValue(encoded, forKey: kCIInputImageKey)
+        filter.setValue(lut.size, forKey: "inputCubeDimension")
+        filter.setValue(cubeData, forKey: "inputCubeData")
+        if filter.inputKeys.contains("inputExtrapolate") {
+            filter.setValue(false, forKey: "inputExtrapolate")
+        }
+        guard let cubeOutput = filter.outputImage else {
+            throw AtelierError.invalidLUT("Core Image 无法接受此 LUT 尺寸或数据。")
+        }
+        guard let decoded = decodeKernel.apply(extent: image.extent, arguments: [
+            cubeOutput, NSNumber(value: mode)
+        ]) else {
+            throw AtelierError.invalidConfiguration("LUT 输出反解码失败。")
+        }
+        return (decoded, coverage)
+    }
+
+    private func fractionOutsideLUTDomain(_ coverage: CIImage, extent: CGRect) throws -> Double {
+        let dimension = 32
+        let bounds = CGRect(x: 0, y: 0, width: dimension, height: dimension)
+        let translated = coverage.transformed(by: CGAffineTransform(translationX: -extent.minX,
+                                                                     y: -extent.minY))
+        let scaled = translated.transformed(by: CGAffineTransform(scaleX: CGFloat(dimension) / extent.width,
+                                                                   y: CGFloat(dimension) / extent.height))
+        let thumbnail = scaled.cropped(to: bounds)
+        var pixels = [Float](repeating: 0, count: dimension * dimension * 4)
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            context.render(thumbnail, toBitmap: baseAddress,
+                           rowBytes: dimension * 4 * MemoryLayout<Float>.size,
+                           bounds: bounds, format: .RGBAf, colorSpace: workingColorSpace)
+        }
+        let outsideCount = stride(from: 0, to: pixels.count, by: 4)
+            .filter { pixels[$0] < 0.999 }.count
+        return Double(outsideCount) / Double(dimension * dimension)
+    }
+
+    private func validate(_ lut: LUTCube) throws {
+        let ranges = [lut.domainMax.x - lut.domainMin.x,
+                      lut.domainMax.y - lut.domainMin.y,
+                      lut.domainMax.z - lut.domainMin.z]
+        let domainValues = [lut.domainMin.x, lut.domainMin.y, lut.domainMin.z,
+                            lut.domainMax.x, lut.domainMax.y, lut.domainMax.z]
+        guard (2...128).contains(lut.size),
+              lut.rgba.count == lut.size * lut.size * lut.size * 4,
+              domainValues.allSatisfy({ $0.isFinite && (-16...16).contains($0) }),
+              ranges.allSatisfy({ $0.isFinite && $0 >= 0.000001 }),
+              lut.rgba.allSatisfy({ $0.isFinite && (-16...16).contains($0) }) else {
+            throw AtelierError.invalidLUT("LUT 尺寸、DOMAIN 或数据分量无效。")
+        }
+    }
+
+    private func autoStraighten(_ image: CIImage, report: inout ProcessingReport,
+                                cancellation: CancellationToken?) throws -> CIImage {
+        try cancellation?.check()
+        var detectedAngle: Double?
+        do {
+            let request = VNDetectHorizonRequest()
+            let handler = VNImageRequestHandler(ciImage: image, options: [:])
+            try handler.perform([request])
+            try cancellation?.check()
+            if let observation = request.results?.first,
+               observation.confidence >= 0.6, observation.angle.isFinite,
+               abs(observation.angle) <= .pi / 12 {
+                detectedAngle = observation.angle
+            }
+        } catch let error as AtelierError {
+            throw error
+        } catch {
+            report.warnings.append("地平线识别不可用，尝试可靠直线估计。")
+        }
+        if detectedAngle == nil {
+            detectedAngle = HorizonEstimator.angle(in: image, context: context)
+            if detectedAngle != nil { report.warnings.append("自动水平采用显著直线估计，请复核构图。") }
+        }
+        guard let angle = detectedAngle else {
+            report.warnings.append("未找到可靠地平线或显著水平线，自动水平已跳过。")
+            return image
+        }
+        try cancellation?.check()
+        report.straighteningDegrees += angle * 180 / .pi
+        return try straighten(image, radians: angle)
+    }
+
+    private func rotate(_ image: CIImage, degrees: Double) throws -> CIImage {
+        try straighten(image, radians: degrees * .pi / 180)
+    }
+
+    private func straighten(_ image: CIImage, radians: Double) throws -> CIImage {
+        let filter = try makeFilter("CIStraightenFilter")
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(NSNumber(value: radians), forKey: "inputAngle")
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("水平旋转无法生成裁切后的输出。")
+        }
+        return output
+    }
+
+    private func applyPerspective(_ image: CIImage, vertical: Double,
+                                  horizontal: Double) throws -> CIImage {
+        let extent = try validExtent(of: image)
+        let verticalShift = CGFloat(vertical) * extent.width * 0.22
+        let horizontalShift = CGFloat(horizontal) * extent.height * 0.22
+        let topLeft = CIVector(x: extent.minX + verticalShift,
+                               y: extent.maxY + horizontalShift)
+        let topRight = CIVector(x: extent.maxX - verticalShift,
+                                y: extent.maxY - horizontalShift)
+        let bottomLeft = CIVector(x: extent.minX - verticalShift,
+                                  y: extent.minY - horizontalShift)
+        let bottomRight = CIVector(x: extent.maxX + verticalShift,
+                                   y: extent.minY + horizontalShift)
+        let filter = try makeFilter("CIPerspectiveTransformWithExtent")
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(cgRect: extent), forKey: "inputExtent")
+        filter.setValue(topLeft, forKey: "inputTopLeft")
+        filter.setValue(topRight, forKey: "inputTopRight")
+        filter.setValue(bottomLeft, forKey: "inputBottomLeft")
+        filter.setValue(bottomRight, forKey: "inputBottomRight")
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("透视变换无法生成输出。")
+        }
+        let cropInsetX = max(0, max(topLeft.x - extent.minX,
+                                   max(extent.maxX - topRight.x,
+                                       max(bottomLeft.x - extent.minX, extent.maxX - bottomRight.x))))
+        let cropInsetY = max(0, max(extent.maxY - topLeft.y,
+                                   max(extent.maxY - topRight.y,
+                                       max(bottomLeft.y - extent.minY, bottomRight.y - extent.minY))))
+        let candidate = extent.insetBy(dx: cropInsetX + 2, dy: cropInsetY + 2)
+        let safeRect = CGRect(x: ceil(candidate.minX), y: ceil(candidate.minY),
+                              width: floor(candidate.maxX) - ceil(candidate.minX),
+                              height: floor(candidate.maxY) - ceil(candidate.minY))
+        guard safeRect.width > 1, safeRect.height > 1 else {
+            throw AtelierError.invalidConfiguration("透视强度过大，无法保留有效的不透明裁切区域。")
+        }
+        // Clamp the already-valid interior before resampling so interpolation
+        // cannot mix the crop boundary with transparent pixels.
+        let cropped = output.cropped(to: safeRect).clampedToExtent()
+        let shifted = cropped.transformed(by: CGAffineTransform(translationX: -safeRect.minX,
+                                                                y: -safeRect.minY))
+        let scaled = shifted.transformed(by: CGAffineTransform(scaleX: extent.width / safeRect.width,
+                                                                y: extent.height / safeRect.height))
+        return scaled.transformed(by: CGAffineTransform(translationX: extent.minX,
+                                                        y: extent.minY)).cropped(to: extent)
+    }
+
+    private func apply(_ mask: LocalMask, to image: CIImage) throws -> CIImage {
+        let extent = try validExtent(of: image)
+        let maskImage = try renderMask(mask, extent: extent)
+        var adjusted = image
+        if abs(mask.exposureEV) > 0.0001 {
+            adjusted = try apply("CIExposureAdjust", to: adjusted,
+                                 parameters: ["inputEV": NSNumber(value: mask.exposureEV)])
+        }
+        if abs(mask.warmth) > 0.0001 {
+            adjusted = try applyTemperature(mask.warmth, tint: 0, to: adjusted)
+        }
+        if abs(mask.saturation - 1) > 0.0001 {
+            adjusted = try apply("CIColorControls", to: adjusted,
+                                 parameters: ["inputSaturation": NSNumber(value: mask.saturation),
+                                              "inputContrast": 1.0,
+                                              "inputBrightness": 0.0])
+        }
+        let filter = try makeFilter("CIBlendWithMask")
+        filter.setValue(adjusted, forKey: kCIInputImageKey)
+        filter.setValue(image, forKey: "inputBackgroundImage")
+        filter.setValue(maskImage, forKey: "inputMaskImage")
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("蒙版合成无法生成输出。")
+        }
+        return output.cropped(to: extent)
+    }
+
+    private func renderMask(_ mask: LocalMask, extent: CGRect) throws -> CIImage {
+        let scale = min(1, CGFloat(Self.maximumMaskRasterDimension) / max(extent.width, extent.height))
+        let width = max(1, Int((extent.width * scale).rounded()))
+        let height = max(1, Int((extent.height * scale).rounded()))
+        guard let graySpace = CGColorSpaceCreateDeviceGray() as CGColorSpace? else {
+            throw AtelierError.invalidConfiguration("无法创建蒙版灰度色彩空间。")
+        }
+        guard let bitmap = CGContext(data: nil, width: width, height: height,
+                                     bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: graySpace,
+                                     bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+            throw AtelierError.invalidConfiguration("无法分配蒙版位图。")
+        }
+        bitmap.setFillColor(gray: 0, alpha: 1)
+        bitmap.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        bitmap.setStrokeColor(gray: 1, alpha: 1)
+        bitmap.setFillColor(gray: 1, alpha: 1)
+        bitmap.setShouldAntialias(true)
+
+        let minDimension = CGFloat(min(width, height))
+        let radius = CGFloat(mask.radius) * minDimension
+        switch mask.kind {
+        case .radial:
+            let center = pixelPoint(mask.start, width: width, height: height)
+            let radiusX = max(abs(mask.end.x - mask.start.x) * Double(width), 0.5)
+            let radiusY = max(abs(mask.end.y - mask.start.y) * Double(height), 0.5)
+            bitmap.saveGState()
+            bitmap.translateBy(x: center.x, y: center.y)
+            bitmap.scaleBy(x: radiusX, y: radiusY)
+            if mask.feather <= 0.0001 {
+                bitmap.fillEllipse(in: CGRect(x: -1, y: -1, width: 2, height: 2))
+            } else {
+                let white = CGColor(gray: 1, alpha: 1)
+                let black = CGColor(gray: 0, alpha: 1)
+                let transitionStart = CGFloat(1 - mask.feather)
+                guard let gradient = CGGradient(colorsSpace: graySpace,
+                                                colors: [white, white, black] as CFArray,
+                                                locations: [0, transitionStart, 1]) else {
+                    bitmap.restoreGState()
+                    throw AtelierError.invalidConfiguration("径向蒙版渐变创建失败。")
+                }
+                bitmap.drawRadialGradient(gradient, startCenter: .zero, startRadius: 0,
+                                          endCenter: .zero, endRadius: 1,
+                                          options: [])
+            }
+            bitmap.restoreGState()
+
+        case .linear:
+            let start = pixelPoint(mask.start, width: width, height: height)
+            let end = pixelPoint(mask.end, width: width, height: height)
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let length = max(hypot(dx, dy), 1)
+            let direction = CGPoint(x: dx / length, y: dy / length)
+            let transitionLength = max(length * CGFloat(mask.feather), 1 / max(scale, 0.0001))
+            let center = CGPoint(x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5)
+            let point0 = CGPoint(x: center.x - direction.x * transitionLength * 0.5,
+                                 y: center.y - direction.y * transitionLength * 0.5)
+            let point1 = CGPoint(x: center.x + direction.x * transitionLength * 0.5,
+                                 y: center.y + direction.y * transitionLength * 0.5)
+            guard let gradient = CGGradient(colorsSpace: graySpace,
+                                            colors: [CGColor(gray: 1, alpha: 1),
+                                                     CGColor(gray: 0, alpha: 1)] as CFArray,
+                                            locations: [0, 1]) else {
+                throw AtelierError.invalidConfiguration("线性蒙版渐变创建失败。")
+            }
+            bitmap.drawLinearGradient(gradient, start: point0, end: point1,
+                                      options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+
+        case .brush:
+            let points = mask.points.map { pixelPoint($0, width: width, height: height) }
+            bitmap.setLineWidth(max(radius * 2, 1))
+            bitmap.setLineCap(.round)
+            bitmap.setLineJoin(.round)
+            if points.count == 1, let point = points.first {
+                bitmap.fillEllipse(in: CGRect(x: point.x - radius, y: point.y - radius,
+                                              width: radius * 2, height: radius * 2))
+            } else if let first = points.first {
+                let path = CGMutablePath()
+                path.move(to: first)
+                for point in points.dropFirst() { path.addLine(to: point) }
+                bitmap.addPath(path)
+                bitmap.strokePath()
+            }
+        }
+
+        guard let cgImage = bitmap.makeImage() else {
+            throw AtelierError.invalidConfiguration("无法生成蒙版图像。")
+        }
+        let raster = CIImage(cgImage: cgImage, options: [.colorSpace: workingColorSpace])
+        let imageScaleX = extent.width / CGFloat(width)
+        let imageScaleY = extent.height / CGFloat(height)
+        let scaled = raster.transformed(by: CGAffineTransform(scaleX: imageScaleX, y: imageScaleY))
+        var output = scaled.transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+            .cropped(to: extent)
+        if mask.kind == .brush, mask.feather > 0.0001 {
+            let blurRadius = max(radius * CGFloat(mask.feather) * 0.5, 0.5)
+            output = try apply("CIGaussianBlur", to: output,
+                               parameters: ["inputRadius": NSNumber(value: Double(blurRadius))])
+                .cropped(to: extent)
+        }
+        if mask.inverted {
+            output = try apply("CIColorInvert", to: output, parameters: [:]).cropped(to: extent)
+        }
+        return output
+    }
+
+    private func pixelPoint(_ point: MaskPoint, width: Int, height: Int) -> CGPoint {
+        CGPoint(x: point.x * Double(width), y: point.y * Double(height))
+    }
+
+    private func apply(_ name: String, to image: CIImage,
+                       parameters: [String: Any]) throws -> CIImage {
+        let filter = try makeFilter(name)
+        filter.setValue(image, forKey: kCIInputImageKey)
+        for (key, value) in parameters { filter.setValue(value, forKey: key) }
+        guard let output = filter.outputImage else {
+            throw AtelierError.invalidConfiguration("\(name) 无法生成输出。")
+        }
+        return output
+    }
+
+    private func makeFilter(_ name: String) throws -> CIFilter {
+        guard let filter = CIFilter(name: name) else {
+            throw AtelierError.invalidConfiguration("当前 macOS 不支持 Core Image 滤镜 \(name)。")
+        }
+        return filter
+    }
+}
