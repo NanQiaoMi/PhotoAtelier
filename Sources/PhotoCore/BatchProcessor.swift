@@ -101,6 +101,7 @@ public final class BatchProcessor {
                         settings: settings,
                         lut: lut,
                         initialReport: report,
+                        outputColorSpace: recipe.export.colorSpace,
                         cancellation: cancellation
                     )
                     try cancellation.check()
@@ -212,7 +213,7 @@ private struct BatchManifestEntry: Codable {
 }
 
 private func validateRecipe(_ recipe: Recipe) throws {
-    guard [1, 2].contains(recipe.version) else { throw AtelierError.invalidConfiguration("不支持的配方版本：\(recipe.version)") }
+    guard [1, 2, 3].contains(recipe.version) else { throw AtelierError.invalidConfiguration("不支持的配方版本：\(recipe.version)") }
     guard recipe.export.jpegQuality.isFinite, (0...1).contains(recipe.export.jpegQuality) else {
         throw AtelierError.invalidConfiguration("JPEG 品质必须在 0 到 1 之间")
     }

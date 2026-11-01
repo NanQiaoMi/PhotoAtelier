@@ -91,7 +91,7 @@ final class LocalMaskTests: XCTestCase {
         let decoded = try JSONDecoder().decode(Recipe.self, from: data)
 
         XCTAssertEqual(decoded, recipe)
-        XCTAssertEqual(recipe.version, 2)
+        XCTAssertEqual(recipe.version, 3)
         XCTAssertEqual(LocalMask().stage, .beforeLook)
         XCTAssertEqual(MaskComponent().kind, .brush)
     }
@@ -116,14 +116,14 @@ final class LocalMaskTests: XCTestCase {
         let input = root.appendingPathComponent("input")
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             var recipe = legacy; recipe.version = version
             let summary = try BatchProcessor().run(items: [], inputRoot: input,
                 outputRoot: root.appendingPathComponent("output-\(version)"), recipe: recipe,
                 lut: nil, cancellation: CancellationToken(), onEvent: { _ in })
             XCTAssertNotNil(summary.manifestURL)
         }
-        var future = legacy; future.version = 3
+        var future = legacy; future.version = 4
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))
@@ -612,6 +612,8 @@ final class LocalMaskTests: XCTestCase {
         settings.protectSkin = 0
         settings.protectNeutrals = 0
         settings.gamutCompression = 0
+        // Keep these mask pixel assertions independent of the final color guard.
+        settings.colorHarmony = nil
         return settings
     }
 

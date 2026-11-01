@@ -286,6 +286,8 @@ final class EngineTests: XCTestCase {
         settings.protectSkin = 0
         settings.protectNeutrals = 0
         settings.gamutCompression = 0
+        // These tests isolate LUT interpolation/transfer math from look protection.
+        settings.colorHarmony = nil
         settings.lutIntensity = 1
         return settings
     }

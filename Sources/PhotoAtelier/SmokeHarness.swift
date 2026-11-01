@@ -61,10 +61,12 @@ private final class SmokeSession {
                 }
                 assertions.append("Folder scan and managed preview completed")
                 guard let analysis = model.analysis, analysis.proposals.count == 3,
-                      analysis.metrics.sampleCount > 100 else {
+                      analysis.metrics.sampleCount > 100,
+                      analysis.colorScene?.regions.count == 9 else {
                     throw AtelierError.invalidConfiguration("未生成基于真实像素的三种分析方案")
                 }
                 assertions.append("Pixel/metadata analysis and three rendered automatic proposals completed")
+                assertions.append("Measured scene palette and nine positional regions completed")
                 try snapshot("02-library.png", tab: 0)
                 model.applyProposal("balanced")
                 model.selectLUT(preset.id)
@@ -85,6 +87,12 @@ private final class SmokeSession {
                     throw AtelierError.invalidConfiguration("镜头配置未实际应用于预览：\(model.previewReport.warnings.joined(separator: "；"))")
                 }
                 assertions.append("Built-in LUT and exposure preview completed")
+                guard let quality = model.previewReport.colorQuality,
+                      quality.sampleCount > 0, quality.outputColorSpace == model.exportSettings.colorSpace,
+                      model.previewReport.lutCompatibility != nil else {
+                    throw AtelierError.invalidConfiguration("滤镜兼容或叠加颜色实测未生成")
+                }
+                assertions.append("LUT compatibility and final color-quality measurements completed")
                 assertions.append("Real calibrated Lensfun geometry applied through app preview")
                 try snapshot("02-analysis.png", tab: 0, compare: false)
                 model.maskKind = .radial
@@ -157,9 +165,21 @@ private final class SmokeSession {
                 try snapshot("03-mask-color.png", tab: 2, compare: false)
                 model.deleteSelectedMask()
                 model.showMaskCoverage = false
+                model.showMaskOverlay = false
                 model.outputRoot = output
                 model.exportSettings.format = .tiff
                 model.exportSettings.colorSpace = .displayP3
+                model.requestPreview(immediate: true)
+                phase = 8
+            case 8:
+                guard !model.previewBusy,
+                      model.previewReport.colorQuality?.outputColorSpace == .displayP3 else { return }
+                assertions.append("Changing export space refreshes the preview to the same Display P3 target")
+                try snapshot("03-color-harmony.png", tab: 1, compare: false)
+                try snapshotView("03-color-harmony-controls.png", width: 420, height: 760,
+                                 content: ColorHarmonyPanel(model: model).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
                 // The manual Canon profile above is a synthetic warp fixture.
                 // Real camera files in a mixed batch must use their own EXIF match.
                 if model.photos.contains(where: { ["cr2", "dng", "nef", "arw"].contains($0.url.pathExtension.lowercased()) }) {
@@ -186,6 +206,14 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 3,
+                      completed.allSatisfy({ entry in
+                          let report = entry["report"] as? [String: Any]
+                          let quality = report?["colorQuality"] as? [String: Any]
+                          return quality?["outputColorSpace"] as? String == "displayP3"
+                              && report?["lutCompatibility"] is [String: Any]
+                      }) else { throw AtelierError.invalidConfiguration("配方版本或逐张色彩保护报告未记录") }
+                assertions.append("Recipe v3 and per-photo output gamut / color-protection reports retained")
                 let rawExtensions: Set<String> = ["dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "rw2", "orf", "pef", "srw"]
                 let rawItems = model.photos.filter { rawExtensions.contains($0.url.pathExtension.lowercased()) }
                 for raw in rawItems {
@@ -237,9 +265,14 @@ private final class SmokeSession {
 
     private func snapshot(_ filename: String, tab: Int, compare: Bool = true) throws {
         let content = ContentView(model: model, initialTab: tab, initialCompare: compare)
-            .preferredColorScheme(.dark).frame(width: 1400, height: 900)
-        let host = NSHostingView(rootView: content)
-        host.frame = NSRect(x: 0, y: 0, width: 1400, height: 900)
+        try snapshotView(filename, width: 1400, height: 900, content: content)
+    }
+
+    private func snapshotView<Content: View>(_ filename: String, width: CGFloat, height: CGFloat,
+                                            content: Content) throws {
+        let host = NSHostingView(rootView: content.preferredColorScheme(.dark)
+            .tint(AtelierPalette.accent).frame(width: width, height: height))
+        host.frame = NSRect(x: 0, y: 0, width: width, height: height)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded(); window.displayIfNeeded()

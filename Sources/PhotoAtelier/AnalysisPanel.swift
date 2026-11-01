@@ -37,6 +37,9 @@ struct AnalysisPanel: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(analysis.summary).font(.system(size: 11)).lineSpacing(5)
             metrics(analysis.metrics)
+            if let colorScene = analysis.colorScene {
+                colorSceneDetails(colorScene, content: analysis.content)
+            }
             if !analysis.content.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     heading("本机内容识别")
@@ -108,6 +111,113 @@ struct AnalysisPanel: View {
             metric("可用近中性样本", String(format: "%.1f%%", value.neutralSampleFraction * 100))
             metric("亮度跨度估计", String(format: "%.1f EV", value.dynamicRangeStops))
         }.padding(12).background(AtelierPalette.raised.opacity(0.6)).cornerRadius(6)
+    }
+
+    private func colorSceneDetails(_ value: ColorSceneProfile,
+                                  content: [PhotoContentLabel]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            heading("整体色彩感觉")
+            Text(value.summary).font(.system(size: 10)).lineSpacing(4)
+            VStack(spacing: 7) {
+                metric("暖色 / 冷色", String(format: "%.0f%% / %.0f%%",
+                                               value.warmFraction * 100,
+                                               value.coolFraction * 100))
+                metric("中性色 / 高彩度", String(format: "%.0f%% / %.0f%%",
+                                                   value.neutralFraction * 100,
+                                                   value.saturatedFraction * 100))
+                metric("暗部 / 亮部", String(format: "%.0f%% / %.0f%%",
+                                               value.darkFraction * 100,
+                                               value.brightFraction * 100))
+                let spread = value.colorDiversity < 0.30 ? "较集中"
+                    : (value.colorDiversity < 0.68 ? "适中" : "覆盖较广")
+                metric("色相分布", spread)
+            }
+            let representative = representativeRegions(from: value.regions)
+            let representativeIDs = Set(representative.map(\.id))
+            let remaining = value.regions.filter {
+                $0.coverage > 0 && !representativeIDs.contains($0.id)
+            }
+            if !representative.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    heading("重点观察位置")
+                    ForEach(representative) { region in regionDetails(region) }
+                }
+            }
+            if !remaining.isEmpty {
+                DisclosureGroup("查看其他 \(remaining.count) 个区域") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(remaining) { region in regionDetails(region) }
+                    }.padding(.top, 8)
+                }.font(.system(size: 10))
+            }
+            let sceneLabels = content.prefix(3).map(\.label)
+            let sceneContext = sceneLabels.isEmpty
+                ? "位置提示概括画面不同位置的色彩与明暗。"
+                : "画面线索：\(sceneLabels.joined(separator: "、"))。"
+            Text("\(sceneContext)区域提示不代表主体或物体的边界。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(3)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AtelierPalette.raised.opacity(0.38)).cornerRadius(6)
+    }
+
+    private func representativeRegions(from regions: [ColorSceneRegion]) -> [ColorSceneRegion] {
+        let visible = regions.filter { $0.coverage > 0 }
+        guard !visible.isEmpty else { return [] }
+
+        let darkest = visible.sorted {
+            if $0.luminance != $1.luminance { return $0.luminance < $1.luminance }
+            return $0.id < $1.id
+        }.first
+        let mostSaturated = visible.sorted {
+            if $0.saturation != $1.saturation { return $0.saturation > $1.saturation }
+            return $0.id < $1.id
+        }.first
+        let brightest = visible.sorted {
+            if $0.luminance != $1.luminance { return $0.luminance > $1.luminance }
+            return $0.id < $1.id
+        }.first
+
+        var chosen: [ColorSceneRegion] = []
+        func appendIfNew(_ region: ColorSceneRegion?) {
+            guard let region, !chosen.contains(where: { $0.id == region.id }) else { return }
+            chosen.append(region)
+        }
+        appendIfNew(darkest)
+        appendIfNew(mostSaturated)
+        appendIfNew(brightest)
+
+        let targetCount = min(3, visible.count)
+        if chosen.count < targetCount {
+            appendIfNew(visible.first { $0.id == "region.1.1" })
+        }
+        if chosen.count < targetCount {
+            let byCoverage = visible.sorted {
+                if $0.coverage != $1.coverage { return $0.coverage > $1.coverage }
+                return $0.id < $1.id
+            }
+            for region in byCoverage where chosen.count < targetCount {
+                appendIfNew(region)
+            }
+        }
+        return chosen
+    }
+
+    private func regionDetails(_ region: ColorSceneRegion) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(region.title).font(.system(size: 10, weight: .medium))
+                Spacer()
+                Text(String(format: "画面 %.0f%%", region.coverage * 100))
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+            }
+            Text(region.summary).font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+            Text(region.direction).font(.system(size: 9)).lineSpacing(3)
+        }.fixedSize(horizontal: false, vertical: true)
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AtelierPalette.raised.opacity(0.45)).cornerRadius(5)
     }
 
     private func metric(_ title: String, _ value: String) -> some View {

@@ -21,12 +21,14 @@ public enum AtelierError: LocalizedError {
 }
 
 public enum LUTColorSpace: String, Codable, CaseIterable {
-    case sRGB, rec709, linearSRGB
+    case sRGB, rec709, linearSRGB, displayP3, rec709OETF
     public var title: String {
         switch self {
         case .sRGB: return "sRGB · 显示参照"
         case .rec709: return "Rec.709 · Gamma 2.4"
         case .linearSRGB: return "Linear sRGB"
+        case .displayP3: return "Display P3 · sRGB 曲线"
+        case .rec709OETF: return "Rec.709 · 摄像机 OETF"
         }
     }
 }
@@ -231,6 +233,8 @@ public struct AdjustmentSettings: Codable, Equatable {
     public var protectSkin: Double = 0.65
     public var protectNeutrals: Double = 0.5
     public var gamutCompression: Double = 0.8
+    /// Absent in v1/v2 recipes: keeps their original rendering until explicitly enabled.
+    public var colorHarmony: ColorHarmonySettings? = .init()
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -247,9 +251,9 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 2 prevents older applications from silently ignoring local mask
-    /// components, ranges and the before-LUT processing stage. Version 1 remains readable.
-    public var version = 2
+    /// Version 3 adds perceptual color protection and output gamut mapping.
+    /// Versions 1 and 2 remain readable; older apps must reject this version.
+    public var version = 3
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -280,6 +284,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var sourceColorSpace = ""
     public var inputWasRAW = false
     public var analysis: AutomaticAnalysisRecord?
+    public var colorQuality: ColorQualityReport?
+    public var lutCompatibility: LUTCompatibilityReport?
     public init() {}
 }
 

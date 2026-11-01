@@ -65,12 +65,14 @@ public struct AutomaticAnalysisRecord: Codable, Equatable {
     public let unsupportedReadings: [String]
     public let selectedProposal: String
     public let applied: AutomaticAppliedAdjustments
+    public let colorScene: ColorSceneProfile?
 
     public init(analysis: PhotoAnalysis, selectedProposal: String, applied: AdjustmentSettings) {
         summary = analysis.summary; issues = analysis.issues; metrics = analysis.metrics
         metadata = analysis.metadata; content = analysis.content
         unsupportedReadings = analysis.unsupportedReadings; self.selectedProposal = selectedProposal
         self.applied = AutomaticAppliedAdjustments(applied)
+        colorScene = analysis.colorScene
     }
 }
 

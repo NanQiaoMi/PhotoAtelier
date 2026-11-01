@@ -48,6 +48,7 @@ struct ContentView: View {
         .onChange(of: model.selectedLUT) { _ in model.requestPreview() }
         .onChange(of: model.adjustments.lutColorSpace) { _ in model.rememberLUTSpace() }
         .onChange(of: model.exportSettings.recursive) { _ in model.reloadFolder() }
+        .onChange(of: model.exportSettings.colorSpace) { _ in model.requestPreview() }
         .onChange(of: model.selectedMask) { _ in model.maskSelectionChanged() }
         .onChange(of: model.showMaskCoverage) { showing in
             if showing { compare = false }
@@ -265,16 +266,20 @@ struct ContentView: View {
                 Picker("LUT 色彩空间", selection: $model.adjustments.lutColorSpace) {
                     ForEach(LUTColorSpace.allCases, id: \.self) { Text($0.title).tag($0) }
                 }.font(.system(size: 10)).padding(.bottom, 12).disabled(model.selectedOption?.path == nil)
-                Text("仅适用输入与输出使用同一空间的风格 LUT。内置风格为 sRGB；Rec.709 选项指纯 Gamma 2.4。Log / HDR / ACES LUT 需先转换。")
+                Text("按作者说明选择输入／输出相同的空间与曲线。P3 与 sRGB 原色不同；Rec.709 Gamma 2.4 与摄像机 OETF 分开选择。Log / HDR / ACES 需先转换。")
                     .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4).padding(.bottom, 16)
                 AdjustmentSlider(title: "保留原始亮度", value: $model.adjustments.preserveLuminance, range: 0...1, percent: true)
                 AdjustmentSlider(title: "肤色保护", value: $model.adjustments.protectSkin, range: 0...1, percent: true)
                 AdjustmentSlider(title: "中性色保护", value: $model.adjustments.protectNeutrals, range: 0...1, percent: true)
-                AdjustmentSlider(title: "柔化色域边界", value: $model.adjustments.gamutCompression, range: 0...1, percent: true)
+                if model.adjustments.colorHarmony == nil && model.adjustments.lutColorSpace != .displayP3 {
+                    AdjustmentSlider(title: "旧版 sRGB 色域保护", value: $model.adjustments.gamutCompression, range: 0...1, percent: true)
+                }
             }.disabled(model.selectedLUT == "none").opacity(model.selectedLUT == "none" ? 0.45 : 1)
             Text("保护是可调的色彩约束，无法判断所有风格是否适合每张照片。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             }
+            separator
+            ColorHarmonyPanel(model: model)
             separator
             Group {
             panelHeading("镜头与几何", icon: "viewfinder")

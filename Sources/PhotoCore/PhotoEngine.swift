@@ -43,8 +43,12 @@ public final class PhotoEngine {
         return signValue * pow(abs(value), 1.0 / 2.4);
     }
     float encodeForLUT(float value, float mode) {
-        if (mode < 0.5) { return encodeSRGB(value); }
+        if (mode < 0.5 || (mode > 2.5 && mode < 3.5)) { return encodeSRGB(value); }
         if (mode < 1.5) { return encodeRec709Gamma24(value); }
+        if (mode > 3.5) {
+            float v = abs(value);
+            return sign(value) * (v < 0.018 ? 4.5 * v : 1.099 * pow(v, 0.45) - 0.099);
+        }
         return value;
     }
     kernel vec4 encodeLUTInput(__sample source, vec3 domainMin,
@@ -52,6 +56,11 @@ public final class PhotoEngine {
         float alpha = source.a;
         vec3 linear = alpha > 0.000001 ? source.rgb / alpha : vec3(0.0);
         linear = clamp(linear, vec3(-16.0), vec3(16.0));
+        if (mode > 2.5 && mode < 3.5) {
+            linear = vec3(0.8224619687 * linear.r + 0.1775380313 * linear.g,
+                          0.0331941989 * linear.r + 0.9668058011 * linear.g,
+                          0.0170826307 * linear.r + 0.0723974407 * linear.g + 0.9105199286 * linear.b);
+        }
         vec3 encoded = vec3(encodeForLUT(linear.r, mode),
                             encodeForLUT(linear.g, mode),
                             encodeForLUT(linear.b, mode));
@@ -75,14 +84,23 @@ public final class PhotoEngine {
         return signValue * pow(abs(value), 2.4);
     }
     float decodeFromLUT(float value, float mode) {
-        if (mode < 0.5) { return decodeSRGB(value); }
+        if (mode < 0.5 || (mode > 2.5 && mode < 3.5)) { return decodeSRGB(value); }
         if (mode < 1.5) { return decodeRec709Gamma24(value); }
+        if (mode > 3.5) {
+            float v = abs(value);
+            return sign(value) * (v < 0.081 ? v / 4.5 : pow((v + 0.099) / 1.099, 1.0 / 0.45));
+        }
         return value;
     }
     kernel vec4 decodeLUTOutput(__sample source, float mode) {
         vec3 decoded = vec3(decodeFromLUT(source.r, mode),
                             decodeFromLUT(source.g, mode),
                             decodeFromLUT(source.b, mode));
+        if (mode > 2.5 && mode < 3.5) {
+            decoded = vec3(1.2249401763 * decoded.r - 0.2249401763 * decoded.g,
+                          -0.0420569547 * decoded.r + 1.0420569547 * decoded.g,
+                          -0.0196375546 * decoded.r - 0.0786360456 * decoded.g + 1.0982736001 * decoded.b);
+        }
         return vec4(decoded, 1.0);
     }
     """)
@@ -101,8 +119,12 @@ public final class PhotoEngine {
         return signValue * pow(abs(value), 1.0 / 2.4);
     }
     float coverageEncode(float value, float mode) {
-        if (mode < 0.5) { return coverageSRGB(value); }
+        if (mode < 0.5 || (mode > 2.5 && mode < 3.5)) { return coverageSRGB(value); }
         if (mode < 1.5) { return coverageRec709(value); }
+        if (mode > 3.5) {
+            float v = abs(value);
+            return sign(value) * (v < 0.018 ? 4.5 * v : 1.099 * pow(v, 0.45) - 0.099);
+        }
         return value;
     }
     kernel vec4 lutInputCoverage(__sample source, vec3 domainMin,
@@ -110,6 +132,11 @@ public final class PhotoEngine {
         float alpha = source.a;
         vec3 linear = alpha > 0.000001 ? source.rgb / alpha : vec3(0.0);
         linear = clamp(linear, vec3(-16.0), vec3(16.0));
+        if (mode > 2.5 && mode < 3.5) {
+            linear = vec3(0.8224619687 * linear.r + 0.1775380313 * linear.g,
+                          0.0331941989 * linear.r + 0.9668058011 * linear.g,
+                          0.0170826307 * linear.r + 0.0723974407 * linear.g + 0.9105199286 * linear.b);
+        }
         vec3 encoded = vec3(coverageEncode(linear.r, mode),
                             coverageEncode(linear.g, mode),
                             coverageEncode(linear.b, mode));
@@ -119,6 +146,41 @@ public final class PhotoEngine {
         float maximumOverflow = max(max(overflow.r, overflow.g), overflow.b);
         float coverage = 1.0 - smoothstep(0.0, 0.1, maximumOverflow);
         return vec4(coverage, coverage, coverage, 1.0);
+    }
+    """)
+
+    // Treat LUT entries as numeric code values. Explicit nearest-node reads
+    // avoid CIColorCube's backend-dependent interpolation/precision for sparse
+    // tables and keep the declared trilinear function at every source knot.
+    private static let lutSampleKernel = CIKernel(source: """
+    vec4 cubeNode(sampler table, vec3 p, float size, float columns, float rows) {
+        // p.b is an integer node index. Bias division away from exact integer
+        // boundaries: some kernel backends approximate e.g. 3/3 below 1.
+        float tileY = floor((p.b + 0.25) / columns);
+        float tileX = p.b - tileY * columns;
+        // Blue slices are tiled; bitmap rows are addressed from the top.
+        vec2 position = vec2(tileX * size + p.r + 0.5,
+                              rows * size - tileY * size - p.g - 0.5);
+        return sample(table, samplerTransform(table, position));
+    }
+    kernel vec4 sampleTrilinearCube(sampler encoded, sampler table, float size,
+                                     float columns, float rows) {
+        vec3 p = clamp(sample(encoded, samplerCoord(encoded)).rgb,
+                       vec3(0.0), vec3(1.0)) * (size - 1.0);
+        vec3 lo = floor(p);
+        vec3 hi = min(lo + vec3(1.0), vec3(size - 1.0));
+        vec3 f = p - lo;
+        vec4 c000 = cubeNode(table, vec3(lo.r, lo.g, lo.b), size, columns, rows);
+        vec4 c100 = cubeNode(table, vec3(hi.r, lo.g, lo.b), size, columns, rows);
+        vec4 c010 = cubeNode(table, vec3(lo.r, hi.g, lo.b), size, columns, rows);
+        vec4 c110 = cubeNode(table, vec3(hi.r, hi.g, lo.b), size, columns, rows);
+        vec4 c001 = cubeNode(table, vec3(lo.r, lo.g, hi.b), size, columns, rows);
+        vec4 c101 = cubeNode(table, vec3(hi.r, lo.g, hi.b), size, columns, rows);
+        vec4 c011 = cubeNode(table, vec3(lo.r, hi.g, hi.b), size, columns, rows);
+        vec4 c111 = cubeNode(table, vec3(hi.r, hi.g, hi.b), size, columns, rows);
+        vec4 z0 = mix(mix(c000, c100, f.r), mix(c010, c110, f.r), f.g);
+        vec4 z1 = mix(mix(c001, c101, f.r), mix(c011, c111, f.r), f.g);
+        return mix(z0, z1, f.b);
     }
     """)
 
@@ -211,6 +273,7 @@ public final class PhotoEngine {
         try require(settings.protectSkin, within: 0...1, named: "肤色保护")
         try require(settings.protectNeutrals, within: 0...1, named: "中性色保护")
         try require(settings.gamutCompression, within: 0...1, named: "色域压缩")
+        if let harmony = settings.colorHarmony { try ColorHarmonyEngine.validate(harmony) }
         try require(settings.rotationDegrees, within: -45...45, named: "旋转")
         try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
         try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
@@ -254,6 +317,7 @@ public final class PhotoEngine {
                         settings: AdjustmentSettings,
                         lut: LUTCube?,
                         initialReport: ProcessingReport = .init(),
+                        outputColorSpace: OutputColorSpace? = nil,
                         cancellation: CancellationToken? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
@@ -296,6 +360,7 @@ public final class PhotoEngine {
 
         if settings.saturation != 1 || settings.contrast != 1 ||
             settings.highlights != 0 || settings.shadows != 0 {
+            let toneInput = working
             guard let kernel = Self.localToneKernel else {
                 throw AtelierError.invalidConfiguration("Core Image 色调 kernel 编译失败。")
             }
@@ -309,6 +374,14 @@ public final class PhotoEngine {
                 throw AtelierError.invalidConfiguration("Core Image 色调 kernel 无法生成输出。")
             }
             working = adjusted
+            if settings.saturation > 1, let harmony = settings.colorHarmony, harmony.enabled {
+                guard let lightOnly = kernel.apply(extent: toneInput.extent, arguments: [
+                    toneInput, NSNumber(value: 1), NSNumber(value: settings.contrast),
+                    NSNumber(value: settings.highlights), NSNumber(value: settings.shadows)
+                ]) else { throw AtelierError.invalidConfiguration("无法建立光线调整后的色彩参考。") }
+                working = try ColorHarmonyEngine.protect(reference: lightOnly, candidate: working,
+                                                        settings: harmony, scene: nil, context: context)
+            }
         }
 
         if settings.autoStraighten {
@@ -339,8 +412,12 @@ public final class PhotoEngine {
 
         if let lut, settings.lutIntensity > 0 {
             try validate(lut)
+            report.lutCompatibility = LUTCompatibilityInspector.inspect(lut, colorSpace: settings.lutColorSpace)
             report.warnings.append(".cube 文件不包含输入传递函数标记，已按“\(settings.lutColorSpace.title)”解释输入和输出；Log 曲线 LUT 尚不支持自动识别。")
-            let lutResult = try applyLUT(lut, to: working, colorSpace: settings.lutColorSpace)
+            let lutResult = try applyLUT(lut, to: working, colorSpace: settings.lutColorSpace,
+                                         preciseSampling: settings.colorHarmony != nil
+                                            || settings.lutColorSpace == .displayP3
+                                            || settings.lutColorSpace == .rec709OETF)
             let outsideFraction = try fractionOutsideLUTDomain(lutResult.coverage, extent: working.extent)
             if outsideFraction > 0.01 {
                 report.warnings.append(String(format: "约 %.1f%% 的取样像素超出 LUT DOMAIN，已平滑降低 LUT 强度以保留域外高光与负值。", outsideFraction * 100))
@@ -356,7 +433,9 @@ public final class PhotoEngine {
                 NSNumber(value: settings.preserveLuminance),
                 NSNumber(value: settings.protectSkin),
                 NSNumber(value: settings.protectNeutrals),
-                NSNumber(value: settings.gamutCompression)
+                // A P3 or target-aware pipeline must not first squeeze into sRGB.
+                NSNumber(value: settings.colorHarmony != nil || settings.lutColorSpace == .displayP3
+                         ? 0 : settings.gamutCompression)
             ]) else {
                 throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 无法生成输出。")
             }
@@ -377,6 +456,23 @@ public final class PhotoEngine {
             }
         }
 
+        try cancellation?.check()
+        let hasColorTreatment = (lut != nil && settings.lutIntensity > 0) || settings.masks.contains { $0.enabled }
+        if hasColorTreatment || (outputColorSpace != nil && settings.colorHarmony != nil) {
+            let candidate = working
+            let scene = try ColorSceneAnalyzer.analyze(image: localMaskReference, context: context)
+            if let harmony = settings.colorHarmony, harmony.enabled, hasColorTreatment {
+                working = try ColorHarmonyEngine.protect(reference: localMaskReference, candidate: working,
+                                                        settings: harmony, scene: scene, context: context)
+            }
+            try cancellation?.check()
+            if let target = outputColorSpace, settings.colorHarmony != nil {
+                working = try OutputGamutMapper.map(working, to: target, context: context)
+            }
+            report.colorQuality = try ColorQualityInspector.inspect(reference: localMaskReference,
+                candidate: candidate, final: working, scene: scene, settings: settings.colorHarmony,
+                outputColorSpace: outputColorSpace, context: context)
+        }
         try cancellation?.check()
         return ProcessedPhoto(image: working, report: report)
     }
@@ -488,9 +584,9 @@ public final class PhotoEngine {
         for offset in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = Double(pixels[offset + 3])
             guard alpha > 0.001 else { continue }
-            let r = Double(pixels[offset]) / alpha
-            let g = Double(pixels[offset + 1]) / alpha
-            let b = Double(pixels[offset + 2]) / alpha
+            let r = Double(pixels[offset])
+            let g = Double(pixels[offset + 1])
+            let b = Double(pixels[offset + 2])
             guard r.isFinite, g.isFinite, b.isFinite else { continue }
             let luminance = max(0, 0.2126 * r + 0.7152 * g + 0.0722 * b)
             luminances.append(luminance)
@@ -554,7 +650,8 @@ public final class PhotoEngine {
     }
 
     private func applyLUT(_ lut: LUTCube, to image: CIImage,
-                          colorSpace: LUTColorSpace) throws -> (graded: CIImage, coverage: CIImage) {
+                          colorSpace: LUTColorSpace,
+                          preciseSampling: Bool) throws -> (graded: CIImage, coverage: CIImage) {
         guard let encodeKernel = Self.lutEncodeKernel,
               let decodeKernel = Self.lutDecodeKernel,
               let coverageKernel = Self.lutCoverageKernel else {
@@ -565,6 +662,8 @@ public final class PhotoEngine {
         case .sRGB: mode = 0
         case .rec709: mode = 1
         case .linearSRGB: mode = 2
+        case .displayP3: mode = 3
+        case .rec709OETF: mode = 4
         }
         let domainMin = CIVector(x: CGFloat(lut.domainMin.x), y: CGFloat(lut.domainMin.y),
                                  z: CGFloat(lut.domainMin.z))
@@ -589,16 +688,55 @@ public final class PhotoEngine {
         for offset in stride(from: 3, to: cubeComponents.count, by: 4) {
             cubeComponents[offset] = 1
         }
-        let cubeData = cubeComponents.withUnsafeBufferPointer { Data(buffer: $0) }
-        let filter = try makeFilter("CIColorCube")
-        filter.setValue(encoded, forKey: kCIInputImageKey)
-        filter.setValue(lut.size, forKey: "inputCubeDimension")
-        filter.setValue(cubeData, forKey: "inputCubeData")
-        if filter.inputKeys.contains("inputExtrapolate") {
-            filter.setValue(false, forKey: "inputExtrapolate")
-        }
-        guard let cubeOutput = filter.outputImage else {
-            throw AtelierError.invalidLUT("Core Image 无法接受此 LUT 尺寸或数据。")
+        let cubeOutput: CIImage
+        if preciseSampling {
+            let columns = Int(ceil(sqrt(Double(lut.size))))
+            let rows = (lut.size + columns - 1) / columns
+            let width = columns * lut.size, height = rows * lut.size
+            // Keep the longest side <=1536 even for 128³, and preserve every
+            // source node. A single N²-wide strip exceeds older GPU limits.
+            var atlas = [Float](repeating: 0, count: width * height * 4)
+            for blue in 0..<lut.size {
+                for green in 0..<lut.size {
+                    let source = (blue * lut.size * lut.size + green * lut.size) * 4
+                    let targetX = (blue % columns) * lut.size
+                    let targetY = (blue / columns) * lut.size + green
+                    let target = (targetY * width + targetX) * 4
+                    atlas.replaceSubrange(target..<(target + lut.size * 4),
+                                          with: cubeComponents[source..<(source + lut.size * 4)])
+                }
+            }
+            let cubeData = atlas.withUnsafeBufferPointer { Data(buffer: $0) }
+            let table = CIImage(bitmapData: cubeData,
+                                bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                                size: CGSize(width: width, height: height),
+                                format: .RGBAf, colorSpace: nil)
+            let tableSampler = CISampler(image: table, options: [
+                kCISamplerFilterMode: kCISamplerFilterNearest,
+                kCISamplerWrapMode: kCISamplerWrapClamp
+            ])
+            guard let sampler = Self.lutSampleKernel,
+                  let sampled = sampler.apply(extent: image.extent, roiCallback: { index, rect in
+                      index == 1 ? table.extent : rect
+                  }, arguments: [CISampler(image: encoded), tableSampler, NSNumber(value: lut.size),
+                                   NSNumber(value: columns), NSNumber(value: rows)]) else {
+                throw AtelierError.invalidLUT("Core Image 三线性 LUT 查表失败。")
+            }
+            cubeOutput = sampled
+        } else {
+            // Recipes without the v3 settings keep the existing backend.
+            let cubeData = cubeComponents.withUnsafeBufferPointer { Data(buffer: $0) }
+            let filter = try makeFilter("CIColorCube")
+            filter.setValue(encoded, forKey: kCIInputImageKey)
+            filter.setValue(lut.size, forKey: "inputCubeDimension")
+            filter.setValue(cubeData, forKey: "inputCubeData")
+            if filter.inputKeys.contains("inputExtrapolate") {
+                filter.setValue(false, forKey: "inputExtrapolate")
+            }
+            guard let output = filter.outputImage else {
+                throw AtelierError.invalidLUT("Core Image 无法接受此 LUT 尺寸或数据。")
+            }
+            cubeOutput = output
         }
         guard let decoded = decodeKernel.apply(extent: image.extent, arguments: [
             cubeOutput, NSNumber(value: mode)

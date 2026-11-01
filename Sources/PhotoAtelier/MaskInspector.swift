@@ -257,6 +257,10 @@ struct MaskInspector: View {
                 AdjustmentSlider(title: "色彩保护", value: binding(mask, \.colorProtection), range: 0...1, percent: true)
                 Text("保护用于减轻局部提亮造成的高光溢出和过强色度。多个蒙版在各自作用阶段内按列表顺序叠加，可用强度和启用开关比较。")
                     .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+                Text(model.adjustments.colorHarmony?.enabled == true
+                     ? "已启用整体协调：所有局部与滤镜叠加后，再限制突兀色彩；可到“基础”比较和调整保护强度。"
+                     : "整体协调保护未启用；如叠加后颜色过强，可在“基础”开启。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.accent).lineSpacing(4)
             }.padding(.top, 11)
         }.font(.system(size: 11, weight: .medium))
     }

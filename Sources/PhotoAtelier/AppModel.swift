@@ -98,6 +98,7 @@ final class AppModel: ObservableObject {
     private var analysisImage: CIImage?
     private var proposalSettings: AdjustmentSettings?
     private var proposalLUTID: String?
+    private var proposalOutputSpace: OutputColorSpace?
     private var proposalToken: CancellationToken?
     private var pendingPreview: DispatchWorkItem?
     private var previewToken: CancellationToken?
@@ -272,6 +273,7 @@ final class AppModel: ObservableObject {
         maskOverlayImage = nil; maskInspection = nil
         guard let photo = selectedPhoto else { previewBusy = false; return }
         let settings = adjustments; let cube = selectedOption?.cube
+        let outputSpace = exportSettings.colorSpace
         let selectedMask = selectedLocalMask
         let needsMaskOverlay = showMaskCoverage
         let token = CancellationToken(); previewToken = token
@@ -308,8 +310,9 @@ final class AppModel: ObservableObject {
                 }
                 try token.check()
                 let small = loaded.image
-                let output = try self.engine.process(small, settings: settings, lut: cube, initialReport: loaded.report, cancellation: token)
-                let space = CGColorSpace(name: CGColorSpace.sRGB)!
+                let output = try self.engine.process(small, settings: settings, lut: cube, initialReport: loaded.report,
+                                                     outputColorSpace: outputSpace, cancellation: token)
+                let space = outputSpace.cgColorSpace
                 guard let before = self.engine.context.createCGImage(small, from: small.extent, format: .RGBA8, colorSpace: space),
                       let after = self.engine.context.createCGImage(output.image, from: output.image.extent, format: .RGBA8, colorSpace: space) else {
                     throw AtelierError.imageRead("预览渲染失败")
@@ -430,11 +433,13 @@ final class AppModel: ObservableObject {
 
     private func refreshProposalPreviews() {
         guard let analysis = analysis, let image = analysisImage,
-              proposalSettings != adjustments || proposalLUTID != selectedLUT else { return }
+              proposalSettings != adjustments || proposalLUTID != selectedLUT || proposalOutputSpace != exportSettings.colorSpace else { return }
         proposalToken?.cancel()
         let token = CancellationToken(); proposalToken = token
         let current = adjustments; let cube = selectedOption?.cube
+        let outputSpace = exportSettings.colorSpace
         proposalSettings = current; proposalLUTID = selectedLUT
+        proposalOutputSpace = outputSpace
         proposalPreviews = [:]
         let generation = analysisGeneration
         analysisQueue.async { [weak self] in
@@ -447,9 +452,10 @@ final class AppModel: ObservableObject {
                     for proposal in analysis.proposals {
                         try token.check()
                         let settings = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: current)
-                        let processed = try engine.process(small, settings: settings, lut: cube, cancellation: token)
+                        let processed = try engine.process(small, settings: settings, lut: cube,
+                                                           outputColorSpace: outputSpace, cancellation: token)
                         guard let cg = engine.context.createCGImage(processed.image, from: processed.image.extent,
-                                                                   format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else {
+                                                                   format: .RGBA8, colorSpace: outputSpace.cgColorSpace) else {
                             throw AtelierError.imageRead("无法渲染自动方案预览")
                         }
                         result[proposal.id] = cg
@@ -759,7 +765,7 @@ final class AppModel: ObservableObject {
             let data = try Data(contentsOf: url)
             guard data.count < 4_000_000 else { throw AtelierError.invalidConfiguration("配方文件过大") }
             let saved = try JSONDecoder().decode(Recipe.self, from: data)
-            guard [1, 2].contains(saved.version) else { throw AtelierError.invalidConfiguration("不支持此版本的配方") }
+            guard [1, 2, 3].contains(saved.version) else { throw AtelierError.invalidConfiguration("不支持此版本的配方") }
             try PhotoEngine.validate(saved.adjustments)
             try saved.automatic?.validate()
             var target = "none"

@@ -82,6 +82,9 @@ public struct PhotoAnalysis: Codable, Equatable {
     public let summary: String
     public let issues: [PhotoAnalysisFinding]
     public let metrics: PhotoAnalysisMetrics
+    /// Visible-pixel color distribution and positional guidance. Optional so
+    /// analysis files created before scene analysis continue to decode.
+    public let colorScene: ColorSceneProfile?
     public let metadata: [PhotoAnalysisMetadataItem]
     public let content: [PhotoContentLabel]
     public let proposals: [AutoAdjustmentProposal]
@@ -117,6 +120,7 @@ public final class PhotoAnalyzer {
         let measured = try measure(image)
         let pixelMetrics = measured.metrics
         let vision = inspectContent(measured.image)
+        let colorScene = try ColorSceneAnalyzer.analyze(image: image, context: context)
         let metrics = PhotoAnalysisMetrics(
             sampleWidth: pixelMetrics.width,
             sampleHeight: pixelMetrics.height,
@@ -161,9 +165,12 @@ public final class PhotoAnalyzer {
         let issues = makeFindings(metrics: metrics, neutralReliable: pixelMetrics.neutralReliable,
                                   vision: vision)
         let proposals = makeProposals(metrics: metrics, baseline: baseline,
-                                      neutralReliable: pixelMetrics.neutralReliable)
-        let summary = makeSummary(metrics: metrics, proposal: proposals[0], vision: vision)
+                                      neutralReliable: pixelMetrics.neutralReliable,
+                                      colorScene: colorScene)
+        let summary = makeSummary(metrics: metrics, proposal: proposals[0],
+                                  vision: vision, colorScene: colorScene)
         return PhotoAnalysis(summary: summary, issues: issues, metrics: metrics,
+                             colorScene: colorScene,
                              metadata: metadata, content: vision.labels,
                              proposals: proposals, unsupportedReadings: Array(Set(unsupported)).sorted())
     }
@@ -245,9 +252,12 @@ public final class PhotoAnalyzer {
         for offset in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = Double(pixels[offset + 3])
             guard alpha.isFinite, alpha > 0.001 else { continue }
-            let red = Double(pixels[offset]) / alpha
-            let green = Double(pixels[offset + 1]) / alpha
-            let blue = Double(pixels[offset + 2]) / alpha
+            // This context renders unpremultiplied RGBA. Dividing these channels
+            // by alpha again brightened translucent pixels and corrupted every
+            // downstream color/luminance measurement.
+            let red = Double(pixels[offset])
+            let green = Double(pixels[offset + 1])
+            let blue = Double(pixels[offset + 2])
             guard red.isFinite, green.isFinite, blue.isFinite else { continue }
 
             let luminance = max(0, 0.2126 * red + 0.7152 * green + 0.0722 * blue)
@@ -547,7 +557,8 @@ public final class PhotoAnalyzer {
     }
 
     private func makeProposals(metrics: PhotoAnalysisMetrics, baseline: AdjustmentSettings,
-                               neutralReliable: Bool) -> [AutoAdjustmentProposal] {
+                               neutralReliable: Bool,
+                               colorScene: ColorSceneProfile) -> [AutoAdjustmentProposal] {
         let measuredExposureNeed = clamp(log2(0.18 / max(metrics.medianLuminance, 0.0001)), -1.5, 1.5)
         let highlightHeadroom = max(0, log2(0.98 / max(metrics.p99Luminance, 0.001)))
         var exposureLimit = 1.5
@@ -581,7 +592,12 @@ public final class PhotoAnalyzer {
         let contrastNeed = clamp((5.5 - metrics.dynamicRangeStops) * 0.025, -0.12, 0.12)
         let brightContrast = clamp(contrastNeed + (metrics.dynamicRangeStops < 3.5 ? 0.035 : 0), -0.15, 0.15)
         let softContrast = -min(0.12, max(0, (metrics.dynamicRangeStops - 4.0) * 0.025))
-        let saturationLift = min(0.08, max(0, (0.22 - metrics.meanSaturation) * 0.20))
+        let measuredSaturationLift = min(0.08, max(0, (0.22 - metrics.meanSaturation) * 0.20))
+        // Keep the bright style from adding saturation when a substantial share
+        // of visible pixels is already strongly saturated. This is a bounded
+        // preference, not a claim that a saturated scene needs correction.
+        let saturationHeadroom = clamp((0.45 - colorScene.saturatedFraction) / 0.35, 0, 1)
+        let saturationLift = measuredSaturationLift * saturationHeadroom
         let saturationSoftening = -min(0.08, max(0, (metrics.meanSaturation - 0.30) * 0.08))
 
         func settings(exposure: Double, contrastDelta: Double, highlightDelta: Double,
@@ -637,12 +653,14 @@ public final class PhotoAnalyzer {
     }
 
     private func makeSummary(metrics: PhotoAnalysisMetrics, proposal: AutoAdjustmentProposal,
-                             vision: VisionResult) -> String {
+                             vision: VisionResult, colorScene: ColorSceneProfile) -> String {
         let contentText = vision.labels.isEmpty ? "未生成可信内容标签" : "内容标签 \(vision.labels.prefix(3).map(\.label).joined(separator: "、"))"
-        return String(format: "采样 %d×%d 像素：中位亮度 %.3f，P05–P95 跨度 %.2f EV，近黑 %.1f%%、近白 %.1f%%。%@。建议优先预览“%@”（曝光 %+.2f EV）；曝光按 18%% 灰参考、动态范围和高光余量规则估算，不代表曝光错误，需结合主体复核。",
+        return String(format: "采样 %d×%d 像素：中位亮度 %.3f，P05–P95 跨度 %.2f EV，近黑 %.1f%%、近白 %.1f%%。%@。中性色 %.0f%%、高彩度区域 %.0f%%。建议优先预览“%@”（曝光 %+.2f EV）；曝光按 18%% 灰参考、动态范围和高光余量规则估算，不代表曝光错误，需结合主体复核。",
                       metrics.sampleWidth, metrics.sampleHeight, metrics.medianLuminance,
                       metrics.dynamicRangeStops, metrics.nearBlackFraction * 100,
-                      metrics.nearWhiteFraction * 100, contentText, proposal.title,
+                      metrics.nearWhiteFraction * 100, contentText,
+                      colorScene.neutralFraction * 100, colorScene.saturatedFraction * 100,
+                      proposal.title,
                       proposal.settings.exposureEV)
     }
 

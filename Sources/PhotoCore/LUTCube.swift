@@ -70,6 +70,7 @@ public struct LUTCube {
         var domainMax = SIMD3<Float>(repeating: 1)
         var sawDomainMin = false
         var sawDomainMax = false
+        var sawInputRange = false
         var rows: [Float] = []
         var rowCount = 0
         var hasStartedData = false
@@ -112,7 +113,7 @@ public struct LUTCube {
                 rows.reserveCapacity(expectedRows * 4)
 
             case "DOMAIN_MIN", "DOMAIN_MAX":
-                guard !hasStartedData, tokens.count == 4 else {
+                guard !hasStartedData, tokens.count == 4, !sawInputRange else {
                     throw invalid(lineNumber, "\(directive) 需要三个数值，且必须位于 LUT 数据之前。")
                 }
                 let values = try parseFiniteVector(tokens.dropFirst(), line: lineNumber)
@@ -126,7 +127,18 @@ public struct LUTCube {
                     sawDomainMax = true
                 }
 
-            case "LUT_1D_SIZE", "LUT_1D_INPUT_RANGE", "LUT_3D_INPUT_RANGE":
+            case "LUT_3D_INPUT_RANGE":
+                guard !hasStartedData, tokens.count == 3, !sawInputRange,
+                      !sawDomainMin, !sawDomainMax,
+                      let minimum = Float(tokens[1]), let maximum = Float(tokens[2]),
+                      minimum.isFinite, maximum.isFinite else {
+                    throw invalid(lineNumber, "LUT_3D_INPUT_RANGE 需要两个有限数值，且不能与 DOMAIN_MIN/MAX 混用或重复。")
+                }
+                domainMin = SIMD3<Float>(repeating: minimum)
+                domainMax = SIMD3<Float>(repeating: maximum)
+                sawInputRange = true
+
+            case "LUT_1D_SIZE", "LUT_1D_INPUT_RANGE":
                 throw invalid(lineNumber, "只支持带 DOMAIN_MIN/MAX 的 3D LUT；不支持 \(directive)。")
 
             default:
