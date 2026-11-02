@@ -81,6 +81,7 @@ final class AppModel: ObservableObject {
     @Published var maskOverlayOpacity: Double = 0.55
     @Published var maskOverlayImage: NSImage?
     @Published var maskInspection: MaskInspection?
+    @Published private(set) var regionalSuggestions: [RegionalAdjustmentSuggestion] = []
     @Published var thumbnails: [String: NSImage] = [:]
     @Published var lastManifest: URL?
     @Published var analysis: PhotoAnalysis?
@@ -169,6 +170,7 @@ final class AppModel: ObservableObject {
         guard !batchRunning else { return }
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
+        regionalSuggestions = []
         pendingPreview?.cancel(); previewToken?.cancel(); previewGeneration = UUID()
         previewBusy = false; previewReport = .init(); histogram = Array(repeating: 0, count: 64)
         invalidateAnalysis()
@@ -179,6 +181,7 @@ final class AppModel: ObservableObject {
 
     func reloadFolder() {
         guard let root = inputRoot, !batchRunning else { return }
+        regionalSuggestions = []
         let generation = UUID(); scanGeneration = generation
         let recursive = exportSettings.recursive
         scanning = true; status = "正在扫描照片…"
@@ -249,6 +252,7 @@ final class AppModel: ObservableObject {
         maskOverlayImage = nil; maskInspection = nil
         selectedID = photo.id
         beforeImage = nil; afterImage = nil
+        regionalSuggestions = []
         invalidateAnalysis()
         requestPreview(immediate: true)
     }
@@ -273,7 +277,10 @@ final class AppModel: ObservableObject {
         pendingPreview?.cancel(); previewToken?.cancel()
         let generation = UUID(); previewGeneration = generation
         maskOverlayImage = nil; maskInspection = nil
-        guard let photo = selectedPhoto else { previewBusy = false; return }
+        guard let photo = selectedPhoto else {
+            regionalSuggestions = []; previewBusy = false
+            return
+        }
         let settings = adjustments; let cube = selectedOption?.cube
         let outputSpace = exportSettings.colorSpace
         let selectedMask = selectedLocalMask
@@ -322,21 +329,24 @@ final class AppModel: ObservableObject {
                 let histogram = self.makeHistogram(output.image)
                 var maskOverlay: CGImage?
                 var inspection: MaskInspection?
+                var referenceSettings = settings
+                referenceSettings.masks = []
+                let reference: CIImage
+                if self.cachedMaskReferenceSource == cacheKey,
+                   self.cachedMaskReferenceSettings == referenceSettings,
+                   let cached = self.cachedMaskReference {
+                    reference = cached
+                } else {
+                    reference = try self.engine.maskReferenceImage(small, settings: referenceSettings, cancellation: token)
+                    self.cachedMaskReference = reference
+                    self.cachedMaskReferenceSettings = referenceSettings
+                    self.cachedMaskReferenceSource = cacheKey
+                    self.cachedMaskReferencePhotoID = photo.id
+                }
+                try token.check()
+                let regionalSuggestions = try RegionalAdjustmentAnalyzer.suggestions(reference: reference,
+                                                                                      context: self.engine.context)
                 if let mask = selectedMask {
-                    var referenceSettings = settings
-                    referenceSettings.masks = []
-                    let reference: CIImage
-                    if self.cachedMaskReferenceSource == cacheKey,
-                       self.cachedMaskReferenceSettings == referenceSettings,
-                       let cached = self.cachedMaskReference {
-                        reference = cached
-                    } else {
-                        reference = try self.engine.maskReferenceImage(small, settings: referenceSettings, cancellation: token)
-                        self.cachedMaskReference = reference
-                        self.cachedMaskReferenceSettings = referenceSettings
-                        self.cachedMaskReferenceSource = cacheKey
-                        self.cachedMaskReferencePhotoID = photo.id
-                    }
                     try token.check()
                     inspection = try self.engine.inspectLocalMask(mask, reference: reference)
                     if needsMaskOverlay {
@@ -359,6 +369,7 @@ final class AppModel: ObservableObject {
                     self.beforeImage = NSImage(cgImage: before, size: .zero)
                     self.afterImage = NSImage(cgImage: after, size: .zero)
                     self.previewReport = output.report; self.histogram = histogram
+                    self.regionalSuggestions = regionalSuggestions
                     if self.selectedMask == selectedMask?.id {
                         self.maskOverlayImage = maskOverlay.map { NSImage(cgImage: $0, size: .zero) }
                         self.maskInspection = inspection
@@ -513,6 +524,28 @@ final class AppModel: ObservableObject {
         status = "已改为统一手动配方，保留当前参数。"
     }
 
+    @discardableResult
+    func applyRegionalSuggestion(_ id: String) -> Bool {
+        guard !batchRunning, !previewBusy, !scanning, selectedPhoto != nil,
+              let suggestion = regionalSuggestions.first(where: { $0.id == id }) else { return false }
+        cancelMaskInteraction()
+        if let index = adjustments.masks.firstIndex(where: { $0.id == suggestion.mask.id }) {
+            adjustments.masks[index] = suggestion.mask
+        } else {
+            guard adjustments.masks.count < 16 else {
+                present(AtelierError.invalidConfiguration("蒙版数量已达上限，请先移除不需要的蒙版。"))
+                return false
+            }
+            adjustments.masks.append(suggestion.mask)
+        }
+        selectedMask = suggestion.mask.id
+        showMaskOverlay = true
+        showMaskCoverage = true
+        status = "已建立“\(suggestion.title)”可编辑蒙版；请检查覆盖，整批使用前复核其他构图。"
+        requestPreview(immediate: true)
+        return true
+    }
+
     func saveAnalysis() {
         guard let analysis = analysis else { return }
         let panel = NSSavePanel(); panel.title = "保存照片分析"
@@ -588,6 +621,7 @@ final class AppModel: ObservableObject {
 
     func resetAdjustments() {
         sceneIntent = .automatic
+        regionalSuggestions = []
         automaticRecipe = nil; invalidateAnalysis()
         cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
         adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false

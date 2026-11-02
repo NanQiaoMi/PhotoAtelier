@@ -39,6 +39,9 @@ public struct AutomaticBatchRecipe: Codable, Equatable {
         result.saturation = bound(result.saturation + current.saturation - reference.saturation, 0, 4)
         result.highlights = bound(result.highlights + current.highlights - reference.highlights, -1, 1)
         result.shadows = bound(result.shadows + current.shadows - reference.shadows, -1, 1)
+        result.tonalCurve = TonalAdjustmentMath.resolve(proposal: result.tonalCurve,
+                                                       current: current.tonalCurve,
+                                                       reference: reference.tonalCurve)
         if current.autoExposure != reference.autoExposure { result.autoExposure = current.autoExposure }
         if current.autoWhiteBalance != reference.autoWhiteBalance { result.autoWhiteBalance = current.autoWhiteBalance }
         try PhotoEngine.validate(result)
@@ -53,6 +56,7 @@ public struct AutomaticBatchRecipe: Codable, Equatable {
         result.exposureEV = source.exposureEV; result.temperature = source.temperature; result.tint = source.tint
         result.contrast = source.contrast; result.saturation = source.saturation
         result.highlights = source.highlights; result.shadows = source.shadows
+        result.tonalCurve = source.tonalCurve
         return result
     }
 
@@ -95,6 +99,7 @@ public struct AutomaticAppliedAdjustments: Codable, Equatable {
     public let saturation: Double
     public let highlights: Double
     public let shadows: Double
+    public let tonalCurve: TonalCurveSettings?
     public let autoWhiteBalance: Bool
     public let autoExposure: Bool
 
@@ -102,6 +107,7 @@ public struct AutomaticAppliedAdjustments: Codable, Equatable {
         exposureEV = settings.exposureEV; temperature = settings.temperature; tint = settings.tint
         contrast = settings.contrast; saturation = settings.saturation
         highlights = settings.highlights; shadows = settings.shadows
+        tonalCurve = settings.tonalCurve
         autoWhiteBalance = settings.autoWhiteBalance; autoExposure = settings.autoExposure
     }
 }

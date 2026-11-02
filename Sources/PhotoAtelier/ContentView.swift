@@ -231,7 +231,10 @@ struct ContentView: View {
             }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 17).padding(.vertical, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if inspectorTab == 0 { AnalysisPanel(model: model, editParameters: { inspectorTab = 1 }) }
+                    if inspectorTab == 0 {
+                        AnalysisPanel(model: model, editParameters: { inspectorTab = 1 })
+                        RegionalSuggestionsPanel(model: model, editLocals: { inspectorTab = 2 }).padding(.top, 20)
+                    }
                     else if inspectorTab == 1 { basicInspector }
                     else if inspectorTab == 2 { MaskInspector(model: model) }
                     else { exportInspector }
@@ -249,8 +252,13 @@ struct ContentView: View {
             Toggle("自动曝光", isOn: $model.adjustments.autoExposure).toggleStyle(.switch).controlSize(.mini).font(.system(size: 11)).padding(.bottom, 13)
                 .help("显式开启旧式中灰估计，最多 ±0.35 EV；此开关不经过三方案的渲染增量检查。")
             AdjustmentSlider(title: "曝光补偿", value: $model.adjustments.exposureEV, range: -4...4, suffix: " EV")
-            AdjustmentSlider(title: "高光", value: $model.adjustments.highlights, range: -1...1)
-            AdjustmentSlider(title: "阴影", value: $model.adjustments.shadows, range: -1...1)
+            TonalCurvePanel(model: model).padding(.bottom, 14)
+            if model.adjustments.tonalCurve == nil || model.adjustments.highlights != 0 || model.adjustments.shadows != 0 {
+                DisclosureGroup("高光与阴影微调") {
+                    AdjustmentSlider(title: "高光微调", value: $model.adjustments.highlights, range: -1...1)
+                    AdjustmentSlider(title: "阴影微调", value: $model.adjustments.shadows, range: -1...1)
+                }.font(.system(size: 10)).padding(.bottom, 12)
+            }
             AdjustmentSlider(title: "对比度", value: $model.adjustments.contrast, range: 0.5...1.5)
             }
             separator

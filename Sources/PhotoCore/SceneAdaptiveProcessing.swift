@@ -59,6 +59,8 @@ public struct SceneAdjustmentDelta: Codable, Equatable {
     public var saturation: Double = 0
     public var highlights: Double = 0
     public var shadows: Double = 0
+    /// EV changes of luminance-zone anchors, independent of legacy percentages.
+    public var tonalCurve: TonalCurveSettings? = nil
 }
 
 public struct PhotoSceneAssessment: Codable, Equatable {
@@ -87,7 +89,9 @@ enum SceneAdaptivePlanner {
                                m.medianLuminance, m.dynamicRangeStops, m.nearWhiteFraction * 100)]
         var uncertainties = ["题材与拍摄意图不能仅由 RGB 唯一确定；可手动指定，依据不是审美正确率。"]
         let low = m.medianLuminance < 0.04 && c.darkFraction > 0.70
-        let high = m.medianLuminance > 0.60 && m.p05Luminance > 0.12
+        let high = (m.medianLuminance > 0.60 && m.p05Luminance > 0.12)
+            || (m.medianLuminance > 0.50 && c.brightFraction > 0.12 && c.darkFraction < 0.15)
+            || (m.medianLuminance > 0.70 && c.brightFraction > 0.65)
         let narrow = m.dynamicRangeStops < 2.5
         let broad = m.dynamicRangeStops > 6
         let chromatic = c.saturatedFraction > 0.35
@@ -162,9 +166,9 @@ enum SceneAdaptivePlanner {
         let headroom = max(0, log2(0.98 / max(m.p99Luminance, 0.001)))
         let weakEV = (0.10...0.35).contains(m.medianLuminance) ? 0
             : clamp(log2(0.18 / max(m.medianLuminance, 0.0001)) * 0.25, -0.12, 0.12)
-        var a = SceneAdjustmentDelta(title: "保守还原", direction: "题材不确定时保留宽亮度区间，仅在区间外小幅调整。", exposureEV: weakEV)
-        var b = SceneAdjustmentDelta(title: "层次优先", direction: "在高光余量内少量提亮，保留颜色。", exposureEV: weakEV + 0.06)
-        var d = SceneAdjustmentDelta(title: "柔和层次", direction: "亮度跨度较大时轻收对比和高光。", exposureEV: weakEV,
+        var a = SceneAdjustmentDelta(title: "保留基调", direction: "题材不确定时保留现有整体亮度，不按灰参考压暗或提亮。")
+        var b = SceneAdjustmentDelta(title: "暗亮分区", direction: "有明暗分离证据时分别处理阴影与亮部，不把整张照片一起提亮。")
+        var d = SceneAdjustmentDelta(title: "亮部柔和", direction: "仅有亮部证据时柔化亮部，保留主体中间调。",
                                      contrast: broad ? -0.025 : 0, highlights: m.p95Luminance > 0.65 ? -0.03 : 0)
         switch category {
         case .preserveStyle:
@@ -210,6 +214,59 @@ enum SceneAdaptivePlanner {
             evidence.append("高 ISO 元数据提示慎重提暗部；ISO 本身不等于实测噪声，未执行降噪。")
             b.exposureEV = min(b.exposureEV, 0.02); b.shadows = min(b.shadows, 0.005)
         }
+        // Use actual EV-sized zone changes rather than tiny legacy coefficients.
+        // Scene intent determines which parts may change; source evidence sets
+        // the magnitude. These are luminance regions, not semantic object masks.
+        let shadowNeed = clamp(log2(0.08 / max(m.p05Luminance, 0.003)) * 0.18, 0, 0.65)
+        let highlightNeed = clamp(log2(max(m.p95Luminance, 0.55) / 0.55) * 0.40, 0, 0.45)
+        let whiteNeed = m.nearWhiteFraction > 0.01 ? -0.10 : 0.0
+        switch category {
+        case .preserveStyle: break
+        case .night, .lowKey:
+            b.tonalCurve = .init(shadowsEV: min(highISO ? 0.12 : 0.40, shadowNeed),
+                                midtonesEV: highISO ? 0.03 : 0.08)
+            d.tonalCurve = .init(highlightsEV: -highlightNeed, whitesEV: whiteNeed)
+        case .highKey:
+            b.tonalCurve = .init(highlightsEV: -min(0.20, highlightNeed), whitesEV: whiteNeed)
+            d.tonalCurve = .init(highlightsEV: -min(0.12, highlightNeed))
+        case .softAtmosphere:
+            b.tonalCurve = .init(midtonesEV: m.medianLuminance < 0.20 ? 0.10 : 0)
+            d.tonalCurve = .init(whitesEV: whiteNeed)
+        case .backlit:
+            a.tonalCurve = .init(shadowsEV: min(0.30, shadowNeed), highlightsEV: -highlightNeed)
+            b.tonalCurve = .init(shadowsEV: min(0.65, shadowNeed + 0.15),
+                                midtonesEV: 0.10, highlightsEV: -min(0.40, highlightNeed + 0.10),
+                                whitesEV: whiteNeed)
+            d.tonalCurve = .init(shadowsEV: min(0.25, shadowNeed), highlightsEV: -highlightNeed)
+        case .portrait:
+            // Frame measurements are observations, never a universal skin target.
+            if let face, face.medianLuminance < 0.08 {
+                let need = clamp(log2(0.08 / max(face.medianLuminance, 0.008)) * 0.20, 0, 0.40)
+                a.tonalCurve = .init(shadowsEV: need * 0.5)
+                b.tonalCurve = .init(shadowsEV: need, midtonesEV: need * 0.25,
+                                    highlightsEV: -highlightNeed)
+            }
+            d.tonalCurve = .init(highlightsEV: -min(0.15, highlightNeed))
+        case .landscape:
+            if broad {
+                a.tonalCurve = .init(shadowsEV: min(0.25, shadowNeed), highlightsEV: -highlightNeed)
+            }
+            b.tonalCurve = .init(shadowsEV: min(0.40, shadowNeed), midtonesEV: 0.10,
+                                highlightsEV: -highlightNeed, whitesEV: whiteNeed)
+            d.tonalCurve = .init(highlightsEV: -highlightNeed)
+        case .monochrome:
+            b.tonalCurve = .init(shadowsEV: min(0.15, shadowNeed), midtonesEV: 0.10)
+            d.tonalCurve = .init(highlightsEV: -min(0.15, highlightNeed))
+        case .general:
+            let separatedShadows = m.p05Luminance < 0.06 && c.darkFraction > 0.15
+                && m.dynamicRangeStops >= 3
+            b.tonalCurve = .init(shadowsEV: separatedShadows ? min(0.45, shadowNeed) : 0,
+                                highlightsEV: -highlightNeed, whitesEV: whiteNeed)
+            d.tonalCurve = .init(highlightsEV: -min(0.25, highlightNeed))
+        }
+        if [a, b, d].contains(where: { $0.tonalCurve.map { !$0.isNeutral } ?? false }) {
+            evidence.append("三方案按不同亮度区域给出 EV 曲线变化，保留最暗锚点；实际增量仍接受原尺寸渲染检查。")
+        }
         func protect(_ delta: SceneAdjustmentDelta) -> SceneAdjustmentDelta {
             var value = delta
             value.exposureEV = clamp(value.exposureEV, -0.25, 0.40)
@@ -219,7 +276,7 @@ enum SceneAdaptivePlanner {
             if chromatic || gray || category == .portrait || category == .monochrome { value.saturation = 0 }
             return value
         }
-        return PhotoSceneAssessment(policyVersion: 1, requestedIntent: intent, category: category,
+        return PhotoSceneAssessment(policyVersion: 2, requestedIntent: intent, category: category,
             selectionSource: category == .general && intent == .automatic ? .fallback : source,
             traits: traits, evidence: evidence, uncertainties: uncertainties, subject: face,
             balanced: protect(a), bright: protect(b), soft: protect(d))

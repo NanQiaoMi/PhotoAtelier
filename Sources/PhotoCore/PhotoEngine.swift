@@ -268,6 +268,7 @@ public final class PhotoEngine {
         try require(settings.saturation, within: 0...4, named: "饱和度")
         try require(settings.highlights, within: -1...1, named: "高光")
         try require(settings.shadows, within: -1...1, named: "阴影")
+        if let tonal = settings.tonalCurve { try TonalCurveEngine.validate(tonal) }
         try require(settings.lutIntensity, within: 0...1, named: "LUT 强度")
         try require(settings.preserveLuminance, within: 0...1, named: "亮度保护")
         try require(settings.protectSkin, within: 0...1, named: "肤色保护")
@@ -382,6 +383,10 @@ public final class PhotoEngine {
                 working = try ColorHarmonyEngine.protect(reference: lightOnly, candidate: working,
                                                         settings: harmony, scene: nil, context: context)
             }
+        }
+
+        if let tonal = settings.tonalCurve {
+            working = try TonalCurveEngine.apply(working, settings: tonal)
         }
 
         if settings.autoStraighten {

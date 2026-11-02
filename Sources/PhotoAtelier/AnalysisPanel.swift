@@ -111,6 +111,9 @@ struct AnalysisPanel: View {
         VStack(alignment: .leading, spacing: 7) {
             heading("自动基础增量检查")
             metric("自动曝光增量", String(format: "%+.2f EV", value.exposureDeltaEV))
+            if let delta = value.tonalDelta, !delta.isNeutral {
+                TonalDeltaSummary(delta: delta)
+            }
             metric("保留建议强度", String(format: "%.0f%%", value.retainedFraction * 100))
             metric("新增高光越界 / 黑位", String(format: "%.2f%% / %.2f%%",
                 value.introducedHighlightFraction * 100, value.introducedShadowFraction * 100))

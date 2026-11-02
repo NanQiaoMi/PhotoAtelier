@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import CryptoKit
 import PhotoCore
 import SwiftUI
@@ -161,6 +162,28 @@ private final class SmokeSession {
                     throw AtelierError.invalidConfiguration("恢复逐图判断后仍使用旧显式场景结果")
                 }
                 assertions.append("Returning to automatic intent refreshes evidence and all three scene-dependent proposals")
+                model.adjustments.tonalCurve = TonalCurveSettings(shadowsEV: 0.35, midtonesEV: 0.07)
+                model.requestPreview(immediate: true)
+                phase = 13
+            case 13:
+                guard !model.previewBusy, !model.analysisBusy, model.proposalPreviews.count == 3,
+                      let curve = model.adjustments.tonalCurve else { return }
+                let savedRecipe = try JSONEncoder().encode(model.recipe)
+                try savedRecipe.write(to: evidence.appendingPathComponent("tonal-recipe.json"), options: .atomic)
+                let restored = try JSONDecoder().decode(Recipe.self, from: savedRecipe)
+                let fields: [KeyPath<TonalCurveSettings, Double>] = [
+                    \.blacksEV, \.shadowsEV, \.midtonesEV, \.highlightsEV, \.whitesEV
+                ]
+                guard abs(curve.shadowsEV - 0.35) < 1e-8, abs(curve.midtonesEV - 0.07) < 1e-8,
+                      restored.version == 5, let decoded = restored.adjustments.tonalCurve,
+                      fields.allSatisfy({ abs(decoded[keyPath: $0] - curve[keyPath: $0]) < 1e-12 }) else {
+                    throw AtelierError.invalidConfiguration("五区手动微调或配方 v5 读写没有保留实际值")
+                }
+                assertions.append("Manual five-zone EV edits refresh preview and survive recipe v5 round-trip")
+                try snapshotView("03-tonal-controls.png", width: 420, height: 430,
+                                 content: TonalCurvePanel(model: model).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
                 model.maskKind = .radial
                 model.maskDrawMode = .new
                 model.addMask(start: .init(x: 0.52, y: 0.52), end: .init(x: 0.78, y: 0.77), points: [])
@@ -272,20 +295,20 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 4,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 5,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]
                           return quality?["outputColorSpace"] as? String == "displayP3"
                               && report?["lutCompatibility"] is [String: Any]
                       }) else { throw AtelierError.invalidConfiguration("配方版本或逐张色彩保护报告未记录") }
-                assertions.append("Recipe v4 and per-photo output gamut / color-protection reports retained")
+                assertions.append("Recipe v5 and per-photo output gamut / color-protection reports retained")
                 guard completed.allSatisfy({ entry in
                     let record = (entry["report"] as? [String: Any])?["analysis"] as? [String: Any]
                     guard let scene = record?["sceneAssessment"] as? [String: Any],
                           let category = scene["category"] as? String,
                           let evidence = scene["evidence"] as? [String] else { return false }
-                    return !category.isEmpty && !evidence.isEmpty && scene["policyVersion"] as? Int == 1
+                    return !category.isEmpty && !evidence.isEmpty && scene["policyVersion"] as? Int == 2
                         && scene["requestedIntent"] as? String == "automatic"
                 }) else { throw AtelierError.invalidConfiguration("逐图场景决策及证据未写入报告") }
                 assertions.append("Each exported photo records its own scene policy, evidence and requested intent")
@@ -321,7 +344,7 @@ private final class SmokeSession {
                 if let raw = rawItems.first {
                     model.selectPhoto(raw)
                     phase = 4
-                } else { finish(error: nil) }
+                } else { try startRegionalFixture() }
             case 4:
                 guard !model.previewBusy, !model.analysisBusy, model.afterImage != nil,
                       model.proposalPreviews.count == 3, let analysis = model.analysis else { return }
@@ -337,10 +360,76 @@ private final class SmokeSession {
                 }
                 try snapshot("05-raw-analysis.png", tab: 0, compare: false)
                 assertions.append("Real camera RAW preview, metadata and three candidate renders completed")
+                try startRegionalFixture()
+            case 14:
+                guard !model.scanning, !model.previewBusy, !model.analysisBusy,
+                      model.afterImage != nil, model.regionalSuggestions.count == 2 else { return }
+                guard model.adjustments.masks.isEmpty,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.luminanceMax == 0.5 }) else {
+                    throw AtelierError.invalidConfiguration("局部建议未生成，或在用户采用前自动写入蒙版")
+                }
+                assertions.append("Positional light suggestions appear without automatically applying masks")
+                try snapshotView("06-regional-suggestions.png", width: 420, height: 650,
+                                 content: RegionalSuggestionsPanel(model: model, editLocals: {}).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
+                model.applyRegionalSuggestion(shadow.id)
+                phase = 15
+            case 15:
+                guard !model.previewBusy, let inspection = model.maskInspection,
+                      model.maskOverlayImage != nil,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.luminanceMax == 0.5 }) else { return }
+                guard model.adjustments.masks.count == 1, model.selectedMask == shadow.mask.id,
+                      inspection.coverage > 0, model.selectedLocalMask?.restrictLuminance == true,
+                      model.selectedLocalMask?.stage == .beforeLook else {
+                    throw AtelierError.invalidConfiguration("采用建议未创建可编辑且限亮度范围的局部蒙版")
+                }
+                model.applyRegionalSuggestion(shadow.id)
+                phase = 16
+            case 16:
+                guard !model.previewBusy, model.maskInspection != nil else { return }
+                guard model.adjustments.masks.count == 1 else {
+                    throw AtelierError.invalidConfiguration("重复采用同一局部建议导致蒙版叠加")
+                }
+                assertions.append("Accepting a suggestion creates a measured editable mask; repeat acceptance replaces rather than stacks it")
+                try snapshot("06-regional-mask.png", tab: 2, compare: false)
+                model.exportSettings.recursive = false
+                model.reloadFolder()
+                phase = 17
+            case 17:
+                guard !model.scanning, !model.previewBusy else { return }
+                let count = model.adjustments.masks.count
+                guard model.selectedPhoto == nil, model.regionalSuggestions.isEmpty,
+                      !model.applyRegionalSuggestion("region.0.shadow"),
+                      model.adjustments.masks.count == count else {
+                    throw AtelierError.invalidConfiguration("空文件夹仍可采用上张照片的局部建议")
+                }
+                assertions.append("Empty rescan clears old regional suggestions and rejects stale acceptance")
                 finish(error: nil)
             default: break
             }
         } catch { finish(error: error) }
+    }
+
+    private func startRegionalFixture() throws {
+        let directory = evidence.appendingPathComponent("regional-input", isDirectory: true)
+        let nested = directory.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        func field(_ luminance: CGFloat, _ rect: CGRect) -> CIImage {
+            CIImage(color: CIColor(red: luminance, green: luminance, blue: luminance,
+                                   alpha: 1, colorSpace: space)!).cropped(to: rect)
+        }
+        let source = field(0.03, CGRect(x: 0, y: 512, width: 256, height: 256))
+            .composited(over: field(0.9, CGRect(x: 512, y: 0, width: 256, height: 256)))
+            .composited(over: field(0.25, CGRect(x: 0, y: 0, width: 768, height: 768)))
+        var settings = ExportSettings(); settings.format = .png
+        try PhotoExporter.write(image: source, to: nested.appendingPathComponent("regional.png"),
+                                settings: settings, sourceProperties: [:], context: PhotoEngine().context)
+        model.resetAdjustments()
+        model.exportSettings.recursive = true
+        model.loadFolder(directory)
+        phase = 14
     }
 
     private func hashes(in directory: URL) throws -> [String: String] {

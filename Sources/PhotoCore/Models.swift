@@ -218,6 +218,8 @@ public struct AdjustmentSettings: Codable, Equatable {
     public var saturation: Double = 1
     public var highlights: Double = 0
     public var shadows: Double = 0
+    /// Optional so older recipes keep their original tone response.
+    public var tonalCurve: TonalCurveSettings? = .init()
     /// Rendered camera JPEGs may already be corrected; opt in to avoid double correction.
     public var lensCorrection = false
     public var lensProfileID: String? = nil
@@ -252,9 +254,8 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 4 adds an explicit per-batch scene intent. Older apps must reject
-    /// it rather than silently ignoring the chosen photographic direction.
-    public var version = 4
+    /// Version 5 adds EV-based luminance-zone curves. Older apps must reject it.
+    public var version = 5
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -269,11 +270,16 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard [1, 2, 3, 4].contains(version) else {
+        guard (1...5).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
             throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")
+        }
+        let curves = [adjustments.tonalCurve, automatic?.baseline.tonalCurve,
+                      automatic?.referenceSettings.tonalCurve]
+        guard version >= 5 || curves.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的亮度分区曲线需要配方版本 5，不能静默降级。")
         }
     }
 }

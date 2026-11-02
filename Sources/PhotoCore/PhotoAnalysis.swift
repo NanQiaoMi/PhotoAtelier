@@ -599,6 +599,7 @@ public final class PhotoAnalyzer {
             requested.saturation = clamp(baseline.saturation + delta.saturation, 0, 4)
             requested.highlights = clamp(baseline.highlights + delta.highlights, -1, 1)
             requested.shadows = clamp(baseline.shadows + delta.shadows, -1, 1)
+            requested.tonalCurve = TonalAdjustmentMath.adding(delta.tonalCurve, to: baseline.tonalCurve)
             let result = try AutomaticSafetyEvaluator.limit(source: source, baseline: baseline,
                                                             requested: requested, engine: engine)
             let wb = baseline.autoWhiteBalance ? "沿用用户已开启的有限自动白平衡。" : "保留白点与手动冷暖/色调。"

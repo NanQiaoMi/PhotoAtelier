@@ -91,7 +91,7 @@ final class LocalMaskTests: XCTestCase {
         let decoded = try JSONDecoder().decode(Recipe.self, from: data)
 
         XCTAssertEqual(decoded, recipe)
-        XCTAssertEqual(recipe.version, 4)
+        XCTAssertEqual(recipe.version, 5)
         XCTAssertEqual(LocalMask().stage, .beforeLook)
         XCTAssertEqual(MaskComponent().kind, .brush)
     }
@@ -116,14 +116,14 @@ final class LocalMaskTests: XCTestCase {
         let input = root.appendingPathComponent("input")
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             var recipe = legacy; recipe.version = version
             let summary = try BatchProcessor().run(items: [], inputRoot: input,
                 outputRoot: root.appendingPathComponent("output-\(version)"), recipe: recipe,
                 lut: nil, cancellation: CancellationToken(), onEvent: { _ in })
             XCTAssertNotNil(summary.manifestURL)
         }
-        var future = legacy; future.version = 5
+        var future = legacy; future.version = 6
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))
