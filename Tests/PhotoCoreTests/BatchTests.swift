@@ -22,9 +22,9 @@ final class BatchTests: XCTestCase {
         let loaded = try PhotoLoader.load(url: input.appendingPathComponent("dark.png"), lensCorrection: false)
         let baseline = AdjustmentSettings()
         let analysis = try PhotoAnalyzer().analyze(image: loaded.image, properties: loaded.properties, baseline: baseline)
-        let selected = try XCTUnwrap(analysis.proposals.first { $0.id == "balanced" })
+        let selected = try XCTUnwrap(analysis.proposals.first { $0.id == "bright" })
         var refined = selected.settings; refined.exposureEV += 0.1
-        let automatic = AutomaticBatchRecipe(styleID: "balanced", baseline: baseline, referenceSettings: selected.settings)
+        let automatic = AutomaticBatchRecipe(styleID: "bright", baseline: baseline, referenceSettings: selected.settings)
         let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
                                                inputRoot: input, outputRoot: output,
                                                recipe: Recipe(adjustments: refined, automatic: automatic),
@@ -36,8 +36,11 @@ final class BatchTests: XCTestCase {
         for entry in entries {
             let report = try XCTUnwrap(entry["report"] as? [String: Any])
             let evidence = try XCTUnwrap(report["analysis"] as? [String: Any])
-            XCTAssertEqual(evidence["selectedProposal"] as? String, "balanced")
+            XCTAssertEqual(evidence["selectedProposal"] as? String, "bright")
             XCTAssertNotNil(evidence["metrics"])
+            let scene = try XCTUnwrap(evidence["sceneAssessment"] as? [String: Any])
+            XCTAssertEqual(scene["requestedIntent"] as? String, "automatic")
+            XCTAssertNotNil(scene["evidence"])
             let applied = try XCTUnwrap(evidence["applied"] as? [String: Any])
             exposure[try XCTUnwrap(entry["input"] as? String)] = try XCTUnwrap(applied["exposureEV"] as? Double)
         }

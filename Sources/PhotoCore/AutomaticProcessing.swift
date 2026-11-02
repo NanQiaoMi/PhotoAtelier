@@ -6,9 +6,13 @@ public struct AutomaticBatchRecipe: Codable, Equatable {
     public var styleID: String
     public var baseline: AdjustmentSettings
     public var referenceSettings: AdjustmentSettings
+    /// Absent in older recipes: infer from each photo's own evidence.
+    public var sceneIntent: PhotoSceneIntent?
 
-    public init(styleID: String, baseline: AdjustmentSettings, referenceSettings: AdjustmentSettings) {
+    public init(styleID: String, baseline: AdjustmentSettings, referenceSettings: AdjustmentSettings,
+                sceneIntent: PhotoSceneIntent? = nil) {
         self.styleID = styleID; self.baseline = baseline; self.referenceSettings = referenceSettings
+        self.sceneIntent = sceneIntent
     }
 
     public func validate() throws {
@@ -70,6 +74,7 @@ public struct AutomaticAnalysisRecord: Codable, Equatable {
     public let colorScene: ColorSceneProfile?
     /// The proposal's check excludes the later manual refinements in `applied`.
     public let proposalSafety: AutomaticSafetyReport?
+    public let sceneAssessment: PhotoSceneAssessment?
 
     public init(analysis: PhotoAnalysis, selectedProposal: String, applied: AdjustmentSettings) {
         summary = analysis.summary; issues = analysis.issues; metrics = analysis.metrics
@@ -78,6 +83,7 @@ public struct AutomaticAnalysisRecord: Codable, Equatable {
         self.applied = AutomaticAppliedAdjustments(applied)
         colorScene = analysis.colorScene
         proposalSafety = analysis.proposals.first { $0.id == selectedProposal }?.safety
+        sceneAssessment = analysis.sceneAssessment
     }
 }
 

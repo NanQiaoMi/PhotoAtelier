@@ -13,8 +13,8 @@ final class AutomaticTests: XCTestCase {
         baseline.lutIntensity = 0.4; baseline.rotationDegrees = 2
         let dark = try PhotoAnalyzer().analyze(image: source(0.06), properties: [:], baseline: baseline)
         let bright = try PhotoAnalyzer().analyze(image: source(0.55), properties: [:], baseline: baseline)
-        let reference = try XCTUnwrap(dark.proposals.first { $0.id == "balanced" })
-        let automatic = AutomaticBatchRecipe(styleID: "balanced", baseline: baseline, referenceSettings: reference.settings)
+        let reference = try XCTUnwrap(dark.proposals.first { $0.id == "bright" })
+        let automatic = AutomaticBatchRecipe(styleID: "bright", baseline: baseline, referenceSettings: reference.settings)
         var refined = reference.settings
         refined.exposureEV += 0.2; refined.lutIntensity = 0.75
         refined.masks = [LocalMask(exposureEV: 0.4)]

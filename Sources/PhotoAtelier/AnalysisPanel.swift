@@ -14,6 +14,7 @@ struct AnalysisPanel: View {
                 Button("重新分析") { model.reanalyze() }.font(.system(size: 9))
                     .disabled(model.selectedPhoto == nil || model.analysisBusy)
             }
+            if model.selectedPhoto != nil { SceneIntentPanel(model: model) }
             if model.analysisBusy {
                 HStack(spacing: 9) {
                     ProgressView().controlSize(.mini)
@@ -56,7 +57,7 @@ struct AnalysisPanel: View {
                 }
             }
             VStack(alignment: .leading, spacing: 11) {
-                heading("问题依据与处理方向")
+                heading("像素观察与处理方向")
                 ForEach(analysis.issues) { issue in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(issue.title).font(.system(size: 11, weight: .medium))

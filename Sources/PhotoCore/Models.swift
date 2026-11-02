@@ -252,9 +252,9 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 3 adds perceptual color protection and output gamut mapping.
-    /// Versions 1 and 2 remain readable; older apps must reject this version.
-    public var version = 3
+    /// Version 4 adds an explicit per-batch scene intent. Older apps must reject
+    /// it rather than silently ignoring the chosen photographic direction.
+    public var version = 4
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -266,6 +266,15 @@ public struct Recipe: Codable, Equatable {
         self.adjustments = adjustments; self.export = export
         self.lutPath = lutPath; self.lutIdentifier = lutIdentifier
         self.automatic = automatic
+    }
+
+    public func validateVersion() throws {
+        guard [1, 2, 3, 4].contains(version) else {
+            throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        guard version >= 4 || automatic?.sceneIntent == nil else {
+            throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")
+        }
     }
 }
 

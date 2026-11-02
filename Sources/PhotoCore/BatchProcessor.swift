@@ -89,7 +89,8 @@ public final class BatchProcessor {
                         let analysis = try PhotoAnalyzer().analyze(image: loaded.image,
                                                                   properties: loaded.properties,
                                                                   sourceURL: sourceURL,
-                                                                  baseline: automatic.baseline)
+                                                                  baseline: automatic.baseline,
+                                                                  intent: automatic.sceneIntent ?? .automatic)
                         try cancellation.check()
                         settings = try automatic.resolve(analysis: analysis, current: settings)
                         report.analysis = AutomaticAnalysisRecord(analysis: analysis,
@@ -213,7 +214,7 @@ private struct BatchManifestEntry: Codable {
 }
 
 private func validateRecipe(_ recipe: Recipe) throws {
-    guard [1, 2, 3].contains(recipe.version) else { throw AtelierError.invalidConfiguration("不支持的配方版本：\(recipe.version)") }
+    try recipe.validateVersion()
     guard recipe.export.jpegQuality.isFinite, (0...1).contains(recipe.export.jpegQuality) else {
         throw AtelierError.invalidConfiguration("JPEG 品质必须在 0 到 1 之间")
     }

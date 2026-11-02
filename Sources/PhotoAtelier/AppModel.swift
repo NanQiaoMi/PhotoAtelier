@@ -88,6 +88,7 @@ final class AppModel: ObservableObject {
     @Published var analysisError: String?
     @Published var proposalPreviews: [String: NSImage] = [:]
     @Published private(set) var automaticRecipe: AutomaticBatchRecipe?
+    @Published private(set) var sceneIntent: PhotoSceneIntent = .automatic
     private let previewQueue = DispatchQueue(label: "atelier.preview", qos: .userInitiated)
     private let batchQueue = DispatchQueue(label: "atelier.batch", qos: .userInitiated)
     private let scanQueue = DispatchQueue(label: "atelier.scan", qos: .utility)
@@ -95,6 +96,7 @@ final class AppModel: ObservableObject {
     private var analysisSourceKey: String?
     private var analysisGeneration = UUID()
     private var analysisBaseline = AdjustmentSettings()
+    private var analysisIntent: PhotoSceneIntent = .automatic
     private var analysisImage: CIImage?
     private var proposalSettings: AdjustmentSettings?
     private var proposalLUTID: String?
@@ -388,12 +390,30 @@ final class AppModel: ObservableObject {
         requestPreview(immediate: true)
     }
 
+    func setSceneIntent(_ intent: PhotoSceneIntent) {
+        guard !batchRunning, sceneIntent != intent else { return }
+        sceneIntent = intent
+        if var automatic = automaticRecipe {
+            if intent == .preserveStyle {
+                // Freeze the currently visible global result instead of
+                // removing a previously accepted automatic correction.
+                automatic.baseline = adjustments
+                automatic.referenceSettings = adjustments
+            }
+            automatic.sceneIntent = intent
+            automaticRecipe = automatic
+        }
+        invalidateAnalysis()
+        requestPreview(immediate: true)
+    }
+
     private func enqueueAnalysis(_ loaded: LoadedPhoto, photo: PhotoItem, key: String) {
         guard selectedID == photo.id else { return }
         let baseline = automaticRecipe?.baseline ?? adjustments
+        let intent = automaticRecipe?.sceneIntent ?? sceneIntent
         let baselineBasicsChanged = AutomaticBatchRecipe.copyBasicAdjustments(
             from: baseline, into: analysisBaseline) != analysisBaseline
-        guard analysisSourceKey != key || baselineBasicsChanged else {
+        guard analysisSourceKey != key || baselineBasicsChanged || analysisIntent != intent else {
             refreshProposalPreviews()
             return
         }
@@ -401,13 +421,14 @@ final class AppModel: ObservableObject {
         let generation = UUID(); analysisGeneration = generation
         analysis = nil; proposalToken?.cancel(); proposalSettings = nil; proposalLUTID = nil
         analysisBaseline = baseline
+        analysisIntent = intent
         analysisImage = loaded.image
         analysisBusy = true; analysisError = nil; proposalPreviews = [:]
         analysisQueue.async { [weak self] in
             let result = Result { () throws -> PhotoAnalysis in
                 try autoreleasepool {
                     try PhotoAnalyzer().analyze(image: loaded.image, properties: loaded.properties,
-                                               sourceURL: photo.url, baseline: baseline)
+                                               sourceURL: photo.url, baseline: baseline, intent: intent)
                 }
             }
             DispatchQueue.main.async {
@@ -480,7 +501,7 @@ final class AppModel: ObservableObject {
     func applyProposal(_ id: String) {
         guard !batchRunning, let proposal = analysis?.proposals.first(where: { $0.id == id }) else { return }
         automaticRecipe = AutomaticBatchRecipe(styleID: id, baseline: analysisBaseline,
-                                               referenceSettings: proposal.settings)
+                                               referenceSettings: proposal.settings, sceneIntent: analysisIntent)
         adjustments = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: adjustments)
         cancelMaskInteraction()
         status = "已采用“\(proposal.title)”。可继续微调；批量导出会逐张分析并叠加这些微调。"
@@ -566,6 +587,7 @@ final class AppModel: ObservableObject {
     func cancelBatch() { batchToken?.cancel(); status = "正在安全停止；已完成的照片保留。" }
 
     func resetAdjustments() {
+        sceneIntent = .automatic
         automaticRecipe = nil; invalidateAnalysis()
         cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
         adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false
@@ -767,7 +789,7 @@ final class AppModel: ObservableObject {
             let data = try Data(contentsOf: url)
             guard data.count < 4_000_000 else { throw AtelierError.invalidConfiguration("配方文件过大") }
             let saved = try JSONDecoder().decode(Recipe.self, from: data)
-            guard [1, 2, 3].contains(saved.version) else { throw AtelierError.invalidConfiguration("不支持此版本的配方") }
+            try saved.validateVersion()
             try PhotoEngine.validate(saved.adjustments)
             try saved.automatic?.validate()
             var target = "none"
@@ -785,6 +807,7 @@ final class AppModel: ObservableObject {
             }
             adjustments = saved.adjustments; exportSettings = saved.export; selectedLUT = target
             automaticRecipe = saved.automatic; invalidateAnalysis()
+            sceneIntent = saved.automatic?.sceneIntent ?? .automatic
             selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
             status = "配方已载入。"; reloadFolder(); requestPreview(immediate: true)
         } catch { present(error) }

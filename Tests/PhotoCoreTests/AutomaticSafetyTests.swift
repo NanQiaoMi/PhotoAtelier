@@ -170,14 +170,14 @@ final class AutomaticSafetyTests: XCTestCase {
     }
 
     func testBaselinePixelsAreMeasuredBeforeAutomaticExposureDelta() throws {
-        let source = twoToneImage(first: 0.10, second: 0.30, firstShare: 0.6)
+        let source = twoToneImage(first: 0.06, second: 0.30, firstShare: 0.6)
         var noBaseline = AdjustmentSettings()
         noBaseline.autoExposure = false
         var raisedBaseline = noBaseline
         raisedBaseline.exposureEV = 0.8
 
-        let unraised = try analyzer.analyze(image: source, properties: [:], baseline: noBaseline)
-        let raised = try analyzer.analyze(image: source, properties: [:], baseline: raisedBaseline)
+        let unraised = try analyzer.analyze(image: source, properties: [:], baseline: noBaseline, intent: .landscape)
+        let raised = try analyzer.analyze(image: source, properties: [:], baseline: raisedBaseline, intent: .landscape)
         let unraisedEV = try XCTUnwrap(unraised.proposals.first { $0.id == "balanced" }).settings.exposureEV
             - noBaseline.exposureEV
         let raisedEV = try XCTUnwrap(raised.proposals.first { $0.id == "balanced" }).settings.exposureEV

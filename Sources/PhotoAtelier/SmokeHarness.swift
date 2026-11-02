@@ -28,6 +28,7 @@ private final class SmokeSession {
     private var originalHashes: [String: String] = [:]
     private var assertions: [String] = []
     private var originalMaskCoverage = 0.0
+    private var exposureBeforePreserving = 0.0
 
     init(model: AppModel, input: URL, output: URL, evidence: URL) {
         self.model = model; self.input = input; self.output = output; self.evidence = evidence
@@ -133,6 +134,33 @@ private final class SmokeSession {
                                  content: AnalysisPanel(model: model, editParameters: {}).padding(24)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                                     .background(AtelierPalette.panel))
+                exposureBeforePreserving = model.adjustments.exposureEV
+                model.setSceneIntent(.preserveStyle)
+                phase = 11
+            case 11:
+                guard !model.previewBusy, !model.analysisBusy, model.proposalPreviews.count == 3,
+                      let scene = model.analysis?.sceneAssessment else { return }
+                guard scene.requestedIntent == .preserveStyle, scene.selectionSource == .user,
+                      abs(model.adjustments.exposureEV - exposureBeforePreserving) < 1e-8,
+                      model.analysis?.proposals.allSatisfy({ abs($0.safety?.exposureDeltaEV ?? 999) < 1e-8 }) == true,
+                      model.recipe.automatic?.sceneIntent == .preserveStyle else {
+                    throw AtelierError.invalidConfiguration("保留已有风格未固定当前基础结果或未写入配方")
+                }
+                assertions.append("Explicit preserve-style intent freezes visible base exposure and is retained in recipe")
+                try JSONEncoder().encode(model.analysis).write(to: evidence.appendingPathComponent("preserve-style-analysis.json"), options: .atomic)
+                try snapshotView("02-scene-intent.png", width: 420, height: 550,
+                                 content: SceneIntentPanel(model: model).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
+                model.setSceneIntent(.automatic)
+                phase = 12
+            case 12:
+                guard !model.previewBusy, !model.analysisBusy, model.proposalPreviews.count == 3,
+                      let scene = model.analysis?.sceneAssessment else { return }
+                guard scene.requestedIntent == .automatic, scene.selectionSource != .user else {
+                    throw AtelierError.invalidConfiguration("恢复逐图判断后仍使用旧显式场景结果")
+                }
+                assertions.append("Returning to automatic intent refreshes evidence and all three scene-dependent proposals")
                 model.maskKind = .radial
                 model.maskDrawMode = .new
                 model.addMask(start: .init(x: 0.52, y: 0.52), end: .init(x: 0.78, y: 0.77), points: [])
@@ -244,14 +272,23 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 3,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 4,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]
                           return quality?["outputColorSpace"] as? String == "displayP3"
                               && report?["lutCompatibility"] is [String: Any]
                       }) else { throw AtelierError.invalidConfiguration("配方版本或逐张色彩保护报告未记录") }
-                assertions.append("Recipe v3 and per-photo output gamut / color-protection reports retained")
+                assertions.append("Recipe v4 and per-photo output gamut / color-protection reports retained")
+                guard completed.allSatisfy({ entry in
+                    let record = (entry["report"] as? [String: Any])?["analysis"] as? [String: Any]
+                    guard let scene = record?["sceneAssessment"] as? [String: Any],
+                          let category = scene["category"] as? String,
+                          let evidence = scene["evidence"] as? [String] else { return false }
+                    return !category.isEmpty && !evidence.isEmpty && scene["policyVersion"] as? Int == 1
+                        && scene["requestedIntent"] as? String == "automatic"
+                }) else { throw AtelierError.invalidConfiguration("逐图场景决策及证据未写入报告") }
+                assertions.append("Each exported photo records its own scene policy, evidence and requested intent")
                 guard completed.allSatisfy({ entry in
                     let record = (entry["report"] as? [String: Any])?["analysis"] as? [String: Any]
                     guard let safety = record?["proposalSafety"] as? [String: Any],

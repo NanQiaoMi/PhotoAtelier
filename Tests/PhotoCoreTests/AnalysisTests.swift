@@ -7,13 +7,16 @@ import XCTest
 final class AnalysisTests: XCTestCase {
     private let analyzer = PhotoAnalyzer()
 
-    func testDarkerPixelsReceiveGreaterExposureRecommendation() throws {
+    func testLowAndHighKeyScenesPreserveTheirDifferentTonalIntent() throws {
         let dark = try analyzer.analyze(image: solidImage(red: 0.035, green: 0.035, blue: 0.035),
                                         properties: [:], sourceURL: URL(fileURLWithPath: "/tmp/dark.jpg"))
         let bright = try analyzer.analyze(image: solidImage(red: 0.65, green: 0.65, blue: 0.65),
                                           properties: [:], sourceURL: URL(fileURLWithPath: "/tmp/bright.jpg"))
 
-        XCTAssertGreaterThan(dark.proposals[0].settings.exposureEV, bright.proposals[0].settings.exposureEV)
+        XCTAssertEqual(dark.sceneAssessment?.category, .lowKey)
+        XCTAssertEqual(bright.sceneAssessment?.category, .highKey)
+        XCTAssertEqual(dark.proposals[0].settings.exposureEV, 0, accuracy: 1e-12)
+        XCTAssertEqual(bright.proposals[0].settings.exposureEV, 0, accuracy: 1e-12)
         XCTAssertEqual(dark.proposals.map(\.id), ["balanced", "bright", "soft"])
         XCTAssertEqual(bright.proposals.map(\.id), ["balanced", "bright", "soft"])
         XCTAssertGreaterThan(dark.metrics.sampleCount, 0)
@@ -23,6 +26,8 @@ final class AnalysisTests: XCTestCase {
         XCTAssertEqual(decoded.summary, dark.summary)
         XCTAssertEqual(decoded.metrics, dark.metrics)
         XCTAssertEqual(decoded.colorScene, dark.colorScene)
+        XCTAssertEqual(decoded.sceneAssessment?.category, dark.sceneAssessment?.category)
+        XCTAssertEqual(decoded.sceneAssessment?.evidence, dark.sceneAssessment?.evidence)
         XCTAssertEqual(decoded.issues, dark.issues)
         XCTAssertEqual(decoded.metadata, dark.metadata)
         XCTAssertEqual(decoded.content, dark.content)
