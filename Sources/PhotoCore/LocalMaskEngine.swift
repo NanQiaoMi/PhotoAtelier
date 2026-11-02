@@ -124,6 +124,10 @@ enum LocalMaskValidator {
         // Color-distance values are normalized Delta E 76 (distance / 100).
         try require(mask.colorTolerance, 0...1, "颜色容差")
         try require(mask.colorSoftness, 0...1, "颜色范围羽化")
+        if let detail = mask.detail { try LocalDetailEngine.validate(detail) }
+        guard mask.contentSelection == nil || mask.kind == .luminance else {
+            throw AtelierError.invalidConfiguration("内容感知选区必须使用全范围亮度基础，再通过修边限定。")
+        }
         guard mask.points.count <= 4096, mask.components.count <= 64 else {
             throw AtelierError.invalidConfiguration("蒙版笔迹不能超过 4096 点，几何组件不能超过 64 个。")
         }
@@ -286,26 +290,43 @@ enum LocalMaskEngine {
 
     static func isLegacyCompatibleAfterLook(_ mask: LocalMask) -> Bool {
         mask.stage == .afterLook && mask.components.isEmpty && mask.opacity == 1 &&
+        mask.contentSelection == nil && (mask.detail?.isNeutral ?? true) &&
         mask.tint == 0 && mask.contrast == 1 && mask.highlights == 0 && mask.shadows == 0 &&
         mask.sharpness == 0 && mask.highlightProtection == 0 && mask.colorProtection == 0 &&
         !mask.restrictLuminance && !mask.restrictColor && mask.kind != .luminance && mask.kind != .color
     }
 
     static func coverage(for mask: LocalMask, reference: CIImage,
-                         context: CIContext) throws -> CIImage {
+                         context: CIContext, contentSelections: ContentSelectionResult? = nil) throws -> CIImage {
         try LocalMaskValidator.validate(mask)
         let extent = reference.extent
         guard !extent.isNull, !extent.isInfinite, extent.width.isFinite, extent.height.isFinite,
               extent.width > 0, extent.height > 0 else {
             throw AtelierError.invalidConfiguration("蒙版参考图必须有有限且非空的图像范围。")
         }
-        guard mask.enabled, mask.kind != .brush || !mask.points.isEmpty || !mask.components.isEmpty else {
+        guard mask.enabled, mask.opacity > 0, mask.kind != .brush || !mask.points.isEmpty || !mask.components.isEmpty else {
             return CIImage(color: .black).cropped(to: extent)
         }
 
+        var contentImage: CIImage?
+        if let target = mask.contentSelection {
+            let result = try contentSelections ?? ContentSelectionAnalyzer.analyze(
+                reference: reference, targets: [target], context: context)
+            // A failed/empty semantic selection must remain empty, including
+            // inverted masks and additions that would otherwise cover the frame.
+            guard let detected = result.image(for: target) else {
+                return CIImage(color: .black).cropped(to: extent)
+            }
+            guard detected.extent == extent else {
+                throw AtelierError.invalidConfiguration("内容感知选区与参考图范围不一致。")
+            }
+            contentImage = detected
+        }
         let baseKind: MaskKind = (mask.kind == .luminance || mask.kind == .color) ? .radial : mask.kind
         var combined: CIImage
-        if mask.kind == .luminance || mask.kind == .color {
+        if let contentImage {
+            combined = contentImage
+        } else if mask.kind == .luminance || mask.kind == .color {
             combined = CIImage(color: .white).cropped(to: extent)
         } else {
             combined = try geometry(kind: baseKind, start: mask.start, end: mask.end,
@@ -365,11 +386,15 @@ enum LocalMaskEngine {
     }
 
     static func apply(_ mask: LocalMask, to image: CIImage, reference: CIImage,
-                      context: CIContext,
+                      context: CIContext, contentSelections: ContentSelectionResult? = nil,
                       makeFilter: (String) throws -> CIFilter,
                       applyTemperature: (Double, Double, CIImage) throws -> CIImage) throws -> CIImage {
         let extent = image.extent
-        let coverageImage = try coverage(for: mask, reference: reference, context: context)
+        guard mask.enabled, mask.opacity > 0 else { return image }
+        let coverageImage = try coverage(for: mask, reference: reference, context: context,
+                                         contentSelections: contentSelections)
+        if let target = mask.contentSelection, let contentSelections,
+           contentSelections.image(for: target) == nil { return image }
         var adjusted = image
         if abs(mask.exposureEV) > 0.0001 {
             let filter = try makeFilter("CIExposureAdjust")
@@ -392,6 +417,9 @@ enum LocalMaskEngine {
                 throw AtelierError.invalidConfiguration("局部色调 kernel 无法生成输出。")
             }
             adjusted = output.cropped(to: extent)
+        }
+        if let detail = mask.detail, !detail.isNeutral {
+            adjusted = try LocalDetailEngine.apply(adjusted, settings: detail)
         }
         if mask.sharpness > 0.0001 {
             let filter = try makeFilter("CIUnsharpMask")

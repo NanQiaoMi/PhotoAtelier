@@ -9,8 +9,15 @@ import SwiftUI
 /// driving other apps or synthesizing system mouse/keyboard events.
 enum SmokeHarness {
     private static var session: SmokeSession?
+    private static var portraitSession: PortraitSmokeSession?
     static func startIfRequested(model: AppModel) {
         let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--portrait-self-test"), args.count > index + 3 {
+            guard portraitSession == nil else { return }
+            let task = PortraitSmokeSession(model: model, input: URL(fileURLWithPath: args[index + 1]),
+                output: URL(fileURLWithPath: args[index + 2]), evidence: URL(fileURLWithPath: args[index + 3]))
+            portraitSession = task; task.start(); return
+        }
         guard session == nil, let index = args.firstIndex(of: "--self-test"), args.count > index + 3 else { return }
         let task = SmokeSession(model: model, input: URL(fileURLWithPath: args[index + 1], isDirectory: true),
                                 output: URL(fileURLWithPath: args[index + 2], isDirectory: true),
@@ -176,11 +183,11 @@ private final class SmokeSession {
                     \.blacksEV, \.shadowsEV, \.midtonesEV, \.highlightsEV, \.whitesEV
                 ]
                 guard abs(curve.shadowsEV - 0.35) < 1e-8, abs(curve.midtonesEV - 0.07) < 1e-8,
-                      restored.version == 5, let decoded = restored.adjustments.tonalCurve,
+                      restored.version == 6, let decoded = restored.adjustments.tonalCurve,
                       fields.allSatisfy({ abs(decoded[keyPath: $0] - curve[keyPath: $0]) < 1e-12 }) else {
-                    throw AtelierError.invalidConfiguration("五区手动微调或配方 v5 读写没有保留实际值")
+                    throw AtelierError.invalidConfiguration("五区手动微调或配方 v6 读写没有保留实际值")
                 }
-                assertions.append("Manual five-zone EV edits refresh preview and survive recipe v5 round-trip")
+                assertions.append("Manual five-zone EV edits refresh preview and survive recipe v6 round-trip")
                 try snapshotView("03-tonal-controls.png", width: 420, height: 430,
                                  content: TonalCurvePanel(model: model).padding(24)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -296,14 +303,14 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 5,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 6,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]
                           return quality?["outputColorSpace"] as? String == "displayP3"
                               && report?["lutCompatibility"] is [String: Any]
                       }) else { throw AtelierError.invalidConfiguration("配方版本或逐张色彩保护报告未记录") }
-                assertions.append("Recipe v5 and per-photo output gamut / color-protection reports retained")
+                assertions.append("Recipe v6 and per-photo output gamut / color-protection reports retained")
                 guard completed.allSatisfy({ entry in
                     let record = (entry["report"] as? [String: Any])?["analysis"] as? [String: Any]
                     guard let scene = record?["sceneAssessment"] as? [String: Any],

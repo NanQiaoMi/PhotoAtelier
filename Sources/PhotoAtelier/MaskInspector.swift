@@ -10,12 +10,14 @@ struct MaskInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             creationTools
+            contentTools
             coverageTools
             maskList
             if let mask = model.selectedLocalMask {
                 selectedHeader(mask)
                 selectionControls(mask)
                 regionalEvidence
+                detailControls(mask)
                 lightControls(mask)
                 colorControls(mask)
                 harmonyControls(mask)
@@ -24,9 +26,74 @@ struct MaskInspector: View {
                 Text("先建立选区，再检查覆盖范围。可以用画笔补选、减去不需要的部分，或按亮度和颜色进一步限定。")
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.muted).lineSpacing(5)
             }
-            Text("几何选区按相对位置用于整批照片，不跟踪主体。亮度和颜色范围逐张重算；区域建议仅依据当前照片，采用的局部参数用于整批。")
+            Text("人物、背景与面部候选逐张重新检测；手绘修边仍按相对位置同步，不跟踪主体。亮度和颜色范围逐张重算，局部参数用于整批。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(5)
         }
+    }
+
+    private var contentTools: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("人像与背景", systemImage: "person.crop.rectangle")
+                .font(.system(size: 11, weight: .medium))
+            HStack {
+                Button("人物选区") { model.addContentMask(.people) }
+                Button("背景选区") { model.addContentMask(.background) }
+            }
+            Button("面部皮肤候选") { model.addContentMask(.faceSkin) }
+            Text("本机检测，每张重新定位；先检查粉色覆盖，再调节光色或细节。面部候选依据关键点和颜色，眼眉嘴会避让，仍需修边。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+            if let report = model.previewReport.contentSelection {
+                Text("人物：\(selectionStatus(report.personStatus)) · 面部：\(selectionStatus(report.faceStatus)) · 检测脸数 \(report.faceCount)")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, warning in
+                    Text(warning).font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }.font(.system(size: 10))
+            .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
+                      || model.adjustments.masks.count >= 16)
+    }
+
+    private func selectionStatus(_ status: String) -> String {
+        switch status {
+        case "available": return "已生成候选"
+        case "noDetection": return "未找到可靠区域"
+        case "unavailable": return "本图未能检测"
+        default: return "未请求"
+        }
+    }
+
+    private func detailControls(_ mask: LocalMask) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("纹理与肤色细修", systemImage: "slider.horizontal.3")
+                .font(.system(size: 11, weight: .medium))
+            Button("轻度精修起点") { model.applyNaturalDetailStartingPoint() }
+                .disabled(model.previewBusy || model.scanning || (model.maskInspection?.coverage ?? 0) <= 0.0005)
+            AdjustmentSlider(title: "光影平整", value: detailBinding(mask, \.smoothing), range: 0...1, percent: true)
+            AdjustmentSlider(title: "细纹理保留", value: detailBinding(mask, \.textureRetention), range: 0...1, percent: true)
+            AdjustmentSlider(title: "邻域色彩均匀", value: detailBinding(mask, \.toneUniformity), range: 0...1, percent: true)
+            Text("只作用于当前覆盖；平整中尺度明暗，保留细节，不设统一肤色或美白目标。请放大检查，无法判断痘痣与需要保留的特征。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+            if mask.contentSelection != nil && !mask.components.isEmpty {
+                Text("手绘修边按固定位置用于整批，构图不同请逐张复核。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.accent)
+            }
+        }.font(.system(size: 10)).padding(.vertical, 8)
+    }
+
+    private func detailBinding(_ mask: LocalMask, _ path: WritableKeyPath<LocalDetailSettings, Double>) -> Binding<Double> {
+        Binding(get: {
+            let detail = model.adjustments.masks.first { $0.id == mask.id }?.detail ?? LocalDetailSettings()
+            return detail[keyPath: path]
+        }, set: { value in
+            update(mask.id) {
+                var detail = $0.detail ?? LocalDetailSettings()
+                detail[keyPath: path] = value
+                $0.detail = detail
+            }
+        })
     }
 
     private var creationTools: some View {
@@ -100,7 +167,7 @@ struct MaskInspector: View {
                         Image(systemName: mask.enabled ? "circle.lefthalf.filled" : "circle.dashed")
                         VStack(alignment: .leading, spacing: 3) {
                             Text(mask.name).lineLimit(1)
-                            Text("\(mask.kind.title) · \(Int(mask.opacity * 100))%\(mask.enabled ? "" : " · 已停用")")
+                            Text("\(mask.contentSelection?.title ?? mask.kind.title) · \(Int(mask.opacity * 100))%\(mask.enabled ? "" : " · 已停用")")
                                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                         }
                         Spacer()
@@ -131,6 +198,10 @@ struct MaskInspector: View {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle(mask.kind == .luminance || mask.kind == .color ? "反选范围与修边结果" : "反转基础选区与修边结果",
                        isOn: binding(mask, \.inverted))
+                if let target = mask.contentSelection {
+                    Text("内容依据：\(target.title)。检测失败时反选仍为空，不会误选全图。背景可单独创建；人物不按身份区分。")
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                }
                 if mask.kind == .radial || mask.kind == .linear {
                     Toggle("编辑形状控制点", isOn: $model.maskEditMode)
                         .onChange(of: model.maskEditMode) { editing in

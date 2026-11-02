@@ -319,7 +319,8 @@ public final class PhotoEngine {
                         lut: LUTCube?,
                         initialReport: ProcessingReport = .init(),
                         outputColorSpace: OutputColorSpace? = nil,
-                        cancellation: CancellationToken? = nil) throws -> ProcessedPhoto {
+                        cancellation: CancellationToken? = nil,
+                        preparedContentSelections: ContentSelectionResult? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -406,13 +407,30 @@ public final class PhotoEngine {
         // The range/protection reference remains the global-only image throughout
         // both mask stages, avoiding feedback from preceding local adjustments.
         let localMaskReference = working
+        let contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
+            .compactMap(\.contentSelection))
+        // A preview caller may reuse one result only while its source, global
+        // reference and requested targets are unchanged. Batch callers leave
+        // this nil so each still image receives fresh Vision requests.
+        let contentSelections: ContentSelectionResult?
+        if contentTargets.isEmpty {
+            contentSelections = nil
+        } else if let preparedContentSelections {
+            contentSelections = preparedContentSelections
+        } else {
+            contentSelections = try ContentSelectionAnalyzer.analyze(
+                reference: localMaskReference, targets: contentTargets, context: context, cancellation: cancellation)
+        }
+        report.contentSelection = contentSelections?.report
+        if let contentSelections { report.warnings.append(contentsOf: contentSelections.report.warnings) }
         for mask in settings.masks where mask.enabled && mask.stage == .beforeLook {
             try cancellation?.check()
             if mask.kind == .brush, mask.points.isEmpty, mask.components.isEmpty {
                 report.warnings.append("画笔蒙版“\(mask.name)”没有笔迹，已跳过。")
                 continue
             }
-            working = try applyLocalMask(mask, to: working, reference: localMaskReference)
+            working = try applyLocalMask(mask, to: working, reference: localMaskReference,
+                                         contentSelections: contentSelections)
         }
 
         if let lut, settings.lutIntensity > 0 {
@@ -457,7 +475,8 @@ public final class PhotoEngine {
             if LocalMaskEngine.isLegacyCompatibleAfterLook(mask) {
                 working = try apply(mask, to: working)
             } else {
-                working = try applyLocalMask(mask, to: working, reference: localMaskReference)
+                working = try applyLocalMask(mask, to: working, reference: localMaskReference,
+                                             contentSelections: contentSelections)
             }
         }
 
@@ -479,13 +498,14 @@ public final class PhotoEngine {
                 outputColorSpace: outputColorSpace, context: context)
         }
         try cancellation?.check()
-        return ProcessedPhoto(image: working, report: report)
+        return ProcessedPhoto(image: working, report: report, contentSelections: contentSelections)
     }
 
     /// Returns the mask's effective coverage as a linear, single-channel CIImage.
     /// Its extent and origin match `reference`; geometry is rasterized at no more
     /// than 2048 pixels per longest edge before Core Image scales it back.
-    public func localMaskImage(_ mask: LocalMask, reference: CIImage) throws -> CIImage {
+    public func localMaskImage(_ mask: LocalMask, reference: CIImage,
+                               contentSelections: ContentSelectionResult? = nil) throws -> CIImage {
         var settings = AdjustmentSettings()
         settings.masks = [mask]
         try Self.validate(settings)
@@ -496,7 +516,8 @@ public final class PhotoEngine {
         if LocalMaskEngine.isLegacyCompatibleAfterLook(mask) {
             return try renderMask(mask, extent: extent)
         }
-        return try LocalMaskEngine.coverage(for: mask, reference: reference, context: context)
+        return try LocalMaskEngine.coverage(for: mask, reference: reference, context: context,
+                                            contentSelections: contentSelections)
     }
 
     /// Builds the stable mask-selection reference using global adjustments and
@@ -515,15 +536,17 @@ public final class PhotoEngine {
 
     /// Summarizes the actual mask-weighted region and provides conservative
     /// suggestions. Suggestions are data only and never mutate the recipe.
-    public func inspectLocalMask(_ mask: LocalMask, reference: CIImage) throws -> MaskInspection {
-        let coverage = try localMaskImage(mask, reference: reference)
+    public func inspectLocalMask(_ mask: LocalMask, reference: CIImage,
+                                 contentSelections: ContentSelectionResult? = nil) throws -> MaskInspection {
+        let coverage = try localMaskImage(mask, reference: reference, contentSelections: contentSelections)
         return try LocalMaskEngine.inspect(mask, reference: reference, context: context,
                                            coverageImage: coverage)
     }
 
     private func applyLocalMask(_ mask: LocalMask, to image: CIImage,
-                                reference: CIImage) throws -> CIImage {
+                                reference: CIImage, contentSelections: ContentSelectionResult?) throws -> CIImage {
         try LocalMaskEngine.apply(mask, to: image, reference: reference, context: context,
+                                  contentSelections: contentSelections,
                                   makeFilter: { try self.makeFilter($0) },
                                   applyTemperature: { temperature, tint, source in
                                       try self.applyTemperature(temperature, tint: tint, to: source)

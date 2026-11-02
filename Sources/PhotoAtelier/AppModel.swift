@@ -118,6 +118,8 @@ final class AppModel: ObservableObject {
     private var cachedMaskReferenceSettings: AdjustmentSettings?
     private var cachedMaskReferenceSource: String?
     private var cachedMaskReferencePhotoID: String?
+    private var cachedContentTargets = Set<ContentSelectionTarget>()
+    private var cachedContentSelections: ContentSelectionResult?
     private var rememberedSpaces: [String: String] = UserDefaults.standard.dictionary(forKey: "lutColorSpaces") as? [String: String] ?? [:]
 
     var selectedPhoto: PhotoItem? { photos.first { $0.id == selectedID } }
@@ -277,6 +279,7 @@ final class AppModel: ObservableObject {
         pendingPreview?.cancel(); previewToken?.cancel()
         let generation = UUID(); previewGeneration = generation
         maskOverlayImage = nil; maskInspection = nil
+        previewReport.contentSelection = nil
         guard let photo = selectedPhoto else {
             regionalSuggestions = []; previewBusy = false
             return
@@ -319,16 +322,6 @@ final class AppModel: ObservableObject {
                 }
                 try token.check()
                 let small = loaded.image
-                let output = try self.engine.process(small, settings: settings, lut: cube, initialReport: loaded.report,
-                                                     outputColorSpace: outputSpace, cancellation: token)
-                let space = outputSpace.cgColorSpace
-                guard let before = self.engine.context.createCGImage(small, from: small.extent, format: .RGBA8, colorSpace: space),
-                      let after = self.engine.context.createCGImage(output.image, from: output.image.extent, format: .RGBA8, colorSpace: space) else {
-                    throw AtelierError.imageRead("预览渲染失败")
-                }
-                let histogram = self.makeHistogram(output.image)
-                var maskOverlay: CGImage?
-                var inspection: MaskInspection?
                 var referenceSettings = settings
                 referenceSettings.masks = []
                 let reference: CIImage
@@ -342,15 +335,45 @@ final class AppModel: ObservableObject {
                     self.cachedMaskReferenceSettings = referenceSettings
                     self.cachedMaskReferenceSource = cacheKey
                     self.cachedMaskReferencePhotoID = photo.id
+                    self.cachedContentTargets = []
+                    self.cachedContentSelections = nil
                 }
                 try token.check()
+                let contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
+                    .compactMap(\.contentSelection))
+                let contentSelections: ContentSelectionResult?
+                if contentTargets.isEmpty {
+                    contentSelections = nil
+                } else if self.cachedContentTargets == contentTargets, let cached = self.cachedContentSelections {
+                    contentSelections = cached
+                } else {
+                    contentSelections = try ContentSelectionAnalyzer.analyze(reference: reference, targets: contentTargets,
+                                                                              context: self.engine.context,
+                                                                              cancellation: token)
+                    try token.check()
+                    self.cachedContentTargets = contentTargets
+                    self.cachedContentSelections = contentSelections
+                }
+                let output = try self.engine.process(small, settings: settings, lut: cube, initialReport: loaded.report,
+                                                     outputColorSpace: outputSpace, cancellation: token,
+                                                     preparedContentSelections: contentSelections)
+                let space = outputSpace.cgColorSpace
+                guard let before = self.engine.context.createCGImage(small, from: small.extent, format: .RGBA8, colorSpace: space),
+                      let after = self.engine.context.createCGImage(output.image, from: output.image.extent, format: .RGBA8, colorSpace: space) else {
+                    throw AtelierError.imageRead("预览渲染失败")
+                }
+                let histogram = self.makeHistogram(output.image)
+                var maskOverlay: CGImage?
+                var inspection: MaskInspection?
                 let regionalSuggestions = try RegionalAdjustmentAnalyzer.suggestions(reference: reference,
                                                                                       context: self.engine.context)
                 if let mask = selectedMask {
                     try token.check()
-                    inspection = try self.engine.inspectLocalMask(mask, reference: reference)
+                    inspection = try self.engine.inspectLocalMask(mask, reference: reference,
+                                                                  contentSelections: output.contentSelections)
                     if needsMaskOverlay {
-                        let coverage = try self.engine.localMaskImage(mask, reference: reference)
+                        let coverage = try self.engine.localMaskImage(mask, reference: reference,
+                                                                      contentSelections: output.contentSelections)
                         let color = CIImage(color: CIColor(red: 0.95, green: 0.18, blue: 0.4)).cropped(to: reference.extent)
                         let clear = CIImage(color: .clear).cropped(to: reference.extent)
                         let overlay = color.applyingFilter("CIBlendWithMask", parameters: [
@@ -657,6 +680,29 @@ final class AppModel: ObservableObject {
         requestPreview()
     }
 
+    func addContentMask(_ target: ContentSelectionTarget) {
+        guard !batchRunning, !scanning, selectedPhoto != nil, adjustments.masks.count < 16 else { return }
+        cancelMaskInteraction()
+        let mask = LocalMask(name: target.title, kind: .luminance, exposureEV: 0,
+                             highlightProtection: 0.65, colorProtection: 0.8,
+                             contentSelection: target)
+        adjustments.masks.append(mask); selectedMask = mask.id
+        showMaskCoverage = true; showMaskOverlay = true
+        status = "正在检测“\(target.title)”；每张照片独立重算，请检查覆盖后调整。"
+        requestPreview(immediate: true)
+    }
+
+    func applyNaturalDetailStartingPoint() {
+        guard !batchRunning, !previewBusy, !scanning, selectedPhoto != nil,
+              !(automaticRecipe != nil && (analysisBusy || analysis == nil || analysisError != nil)),
+              let index = activeMaskIndex,
+              maskInspection?.coverage ?? 0 > 0.0005 else { return }
+        adjustments.masks[index].detail = LocalDetailSettings(smoothing: 0.25,
+                                                             textureRetention: 0.9, toneUniformity: 0.12)
+        status = "已采用轻度细节起点；请放大检查，其他局部光色参数保留。"
+        requestPreview(immediate: true)
+    }
+
     func deleteSelectedMask() {
         guard !batchRunning else { return }
         cancelMaskInteraction()
@@ -763,6 +809,7 @@ final class AppModel: ObservableObject {
         var mask = adjustments.masks[index]
         mask.exposureEV = 0; mask.highlights = 0; mask.shadows = 0; mask.contrast = 1
         mask.saturation = 1; mask.warmth = 0; mask.tint = 0; mask.sharpness = 0
+        mask.detail = nil
         adjustments.masks[index] = mask
         requestPreview()
     }

@@ -96,6 +96,9 @@ public struct LocalMask: Codable, Identifiable, Equatable {
     public var color: MaskColor
     public var colorTolerance: Double
     public var colorSoftness: Double
+    /// A semantic selection is recalculated per image, never stored as face coordinates.
+    public var contentSelection: ContentSelectionTarget?
+    public var detail: LocalDetailSettings?
 
     public init(id: UUID = UUID(), name: String = "局部调整", kind: MaskKind = .radial,
                 start: MaskPoint = .init(x: 0.5, y: 0.5), end: MaskPoint = .init(x: 0.75, y: 0.75),
@@ -109,7 +112,8 @@ public struct LocalMask: Codable, Identifiable, Equatable {
                 restrictLuminance: Bool = false, luminanceMin: Double = 0,
                 luminanceMax: Double = 1, rangeSoftness: Double = 0.15,
                 restrictColor: Bool = false, color: MaskColor = .init(red: 0.5, green: 0.5, blue: 0.5),
-                colorTolerance: Double = 0.2, colorSoftness: Double = 0.15) {
+                colorTolerance: Double = 0.2, colorSoftness: Double = 0.15,
+                contentSelection: ContentSelectionTarget? = nil, detail: LocalDetailSettings? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.start = start; self.end = end
         self.points = points; self.radius = radius; self.feather = feather
         self.inverted = inverted; self.enabled = enabled; self.exposureEV = exposureEV
@@ -122,6 +126,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         self.luminanceMax = luminanceMax; self.rangeSoftness = rangeSoftness
         self.restrictColor = restrictColor; self.color = color
         self.colorTolerance = colorTolerance; self.colorSoftness = colorSoftness
+        self.contentSelection = contentSelection; self.detail = detail
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -131,6 +136,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         case highlightProtection, colorProtection, stage, restrictLuminance
         case luminanceMin, luminanceMax, rangeSoftness, restrictColor, color
         case colorTolerance, colorSoftness
+        case contentSelection, detail
     }
 
     public init(from decoder: Decoder) throws {
@@ -167,6 +173,8 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         color = try container.decodeIfPresent(MaskColor.self, forKey: .color) ?? .init(red: 0.5, green: 0.5, blue: 0.5)
         colorTolerance = try container.decodeIfPresent(Double.self, forKey: .colorTolerance) ?? 0.2
         colorSoftness = try container.decodeIfPresent(Double.self, forKey: .colorSoftness) ?? 0.15
+        contentSelection = try container.decodeIfPresent(ContentSelectionTarget.self, forKey: .contentSelection)
+        detail = try container.decodeIfPresent(LocalDetailSettings.self, forKey: .detail)
         try LocalMaskValidator.validate(self)
     }
 
@@ -204,6 +212,8 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         try container.encode(color, forKey: .color)
         try container.encode(colorTolerance, forKey: .colorTolerance)
         try container.encode(colorSoftness, forKey: .colorSoftness)
+        try container.encodeIfPresent(contentSelection, forKey: .contentSelection)
+        try container.encodeIfPresent(detail, forKey: .detail)
     }
 }
 
@@ -254,8 +264,8 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 5 adds EV-based luminance-zone curves. Older apps must reject it.
-    public var version = 5
+    /// Version 6 adds per-photo content selections and local texture processing.
+    public var version = 6
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -270,7 +280,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...5).contains(version) else {
+        guard (1...6).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
@@ -280,6 +290,13 @@ public struct Recipe: Codable, Equatable {
                       automatic?.referenceSettings.tonalCurve]
         guard version >= 5 || curves.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("非中性的亮度分区曲线需要配方版本 5，不能静默降级。")
+        }
+        let maskGroups = [adjustments.masks, automatic?.baseline.masks ?? [],
+                          automatic?.referenceSettings.masks ?? []]
+        guard version >= 6 || maskGroups.joined().allSatisfy({
+            $0.contentSelection == nil && ($0.detail?.isNeutral ?? true)
+        }) else {
+            throw AtelierError.invalidConfiguration("内容感知选区或非中性细节处理需要配方版本 6，不能静默降级。")
         }
     }
 }
@@ -302,6 +319,7 @@ public struct ProcessingReport: Codable, Equatable {
     public var analysis: AutomaticAnalysisRecord?
     public var colorQuality: ColorQualityReport?
     public var lutCompatibility: LUTCompatibilityReport?
+    public var contentSelection: ContentSelectionReport?
     public init() {}
 }
 
@@ -317,7 +335,11 @@ public struct LoadedPhoto {
 public struct ProcessedPhoto {
     public let image: CIImage
     public let report: ProcessingReport
-    public init(image: CIImage, report: ProcessingReport) { self.image = image; self.report = report }
+    /// Ephemeral coverage is shared within this photo's preview; never encoded in recipes/reports.
+    public let contentSelections: ContentSelectionResult?
+    public init(image: CIImage, report: ProcessingReport, contentSelections: ContentSelectionResult? = nil) {
+        self.image = image; self.report = report; self.contentSelections = contentSelections
+    }
 }
 
 public struct BatchSummary: Codable {
