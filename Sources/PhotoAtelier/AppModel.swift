@@ -527,6 +527,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func applyRegionalSuggestion(_ id: String) -> Bool {
         guard !batchRunning, !previewBusy, !scanning, selectedPhoto != nil,
+              !(automaticRecipe != nil && (analysisBusy || analysis == nil || analysisError != nil)),
               let suggestion = regionalSuggestions.first(where: { $0.id == id }) else { return false }
         cancelMaskInteraction()
         if let index = adjustments.masks.firstIndex(where: { $0.id == suggestion.mask.id }) {
@@ -767,13 +768,14 @@ final class AppModel: ObservableObject {
     }
 
     func applyMaskSuggestion() {
-        guard !batchRunning, !previewBusy, let index = activeMaskIndex,
-              let inspection = maskInspection, inspection.coverage > 0.005 else { return }
+        guard !batchRunning, !previewBusy, !scanning, selectedPhoto != nil, let index = activeMaskIndex,
+              !(automaticRecipe != nil && (analysisBusy || analysis == nil || analysisError != nil)),
+              let inspection = maskInspection, inspection.coverage > 0.005,
+              inspection.lightGuidance?.hasSuggestion == true else { return }
         var mask = adjustments.masks[index]
         mask.exposureEV = inspection.suggestedExposureEV
-        mask.highlights = inspection.suggestedHighlights; mask.shadows = inspection.suggestedShadows
         adjustments.masks[index] = mask
-        status = "已采用本张照片所选区域的保守建议；可继续细调，批处理使用当前局部参数。"
+        status = "已采用选区曝光建议，保留其他局部微调；批处理使用当前局部参数。"
         requestPreview()
     }
 

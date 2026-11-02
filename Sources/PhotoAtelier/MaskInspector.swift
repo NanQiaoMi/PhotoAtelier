@@ -211,8 +211,21 @@ struct MaskInspector: View {
                     Text(String(format: "中位亮度 %.3f", inspection.medianLuminance))
                 }.font(.system(size: 9, design: .monospaced)).foregroundColor(AtelierPalette.muted)
                 Text(inspection.summary).font(.system(size: 10)).lineSpacing(4).fixedSize(horizontal: false, vertical: true)
-                Button("采用区域光线建议") { model.applyMaskSuggestion() }
-                    .font(.system(size: 10)).disabled(model.previewBusy || inspection.coverage <= 0.005)
+                if let guidance = inspection.lightGuidance {
+                    Text(String(format: "选区线性 P05 / P50 / P95：%.3f / %.3f / %.3f；P99 最大 RGB 通道 %.3f。",
+                                guidance.selectedP05Linear, guidance.selectedMedianLinear,
+                                guidance.selectedP95Linear, guidance.selectedP99MaxChannel))
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("建议基于最长边 384 的选区样本；覆盖内新增越界为曝光混合估计，不包含后续蒙版或 LUT。")
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button("采用区域曝光建议") { model.applyMaskSuggestion() }
+                    .font(.system(size: 10)).disabled(model.previewBusy || model.batchRunning || model.scanning
+                        || model.selectedPhoto == nil || inspection.coverage <= 0.005
+                        || inspection.lightGuidance?.hasSuggestion != true
+                        || (model.automaticRecipe != nil && (model.analysisBusy || model.analysis == nil || model.analysisError != nil)))
             } else {
                 Text(model.previewBusy ? "正在测量有效选区…" : "调整选区后显示实测结果。")
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.muted)

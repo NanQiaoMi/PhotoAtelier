@@ -30,6 +30,7 @@ private final class SmokeSession {
     private var assertions: [String] = []
     private var originalMaskCoverage = 0.0
     private var exposureBeforePreserving = 0.0
+    private var regionalExposureBeforeAdvice = 0.0
 
     init(model: AppModel, input: URL, output: URL, evidence: URL) {
         self.model = model; self.input = input; self.output = output; self.evidence = evidence
@@ -369,7 +370,9 @@ private final class SmokeSession {
                     throw AtelierError.invalidConfiguration("局部建议未生成，或在用户采用前自动写入蒙版")
                 }
                 assertions.append("Positional light suggestions appear without automatically applying masks")
-                try snapshotView("06-regional-suggestions.png", width: 420, height: 650,
+                try JSONEncoder().encode(model.regionalSuggestions)
+                    .write(to: evidence.appendingPathComponent("regional-suggestions.json"), options: .atomic)
+                try snapshotView("06-regional-suggestions.png", width: 420, height: 1100,
                                  content: RegionalSuggestionsPanel(model: model, editLocals: {}).padding(24)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                                     .background(AtelierPalette.panel))
@@ -384,6 +387,28 @@ private final class SmokeSession {
                       model.selectedLocalMask?.stage == .beforeLook else {
                     throw AtelierError.invalidConfiguration("采用建议未创建可编辑且限亮度范围的局部蒙版")
                 }
+                guard let guidance = inspection.lightGuidance, guidance == shadow.lightGuidance,
+                      abs(inspection.coverage - (shadow.effectiveCoverage ?? -1)) < 1e-9,
+                      abs(inspection.suggestedExposureEV - shadow.mask.exposureEV) < 1e-9 else {
+                    throw AtelierError.invalidConfiguration("位置建议与真实蒙版的亮度依据或曝光不一致")
+                }
+                assertions.append("Positional advice and mask inspection share the same measured coverage, RGB headroom and exposure")
+                regionalExposureBeforeAdvice = shadow.mask.exposureEV
+                guard let index = model.activeMaskIndex else {
+                    throw AtelierError.invalidConfiguration("缺少待采用曝光建议的蒙版")
+                }
+                model.adjustments.masks[index].highlights = 0.12
+                model.adjustments.masks[index].shadows = 0.18
+                model.applyMaskSuggestion()
+                phase = 18
+            case 18:
+                guard !model.previewBusy, model.maskInspection != nil,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.luminanceMax == 0.5 }) else { return }
+                guard abs((model.selectedLocalMask?.exposureEV ?? -100) - regionalExposureBeforeAdvice) < 1e-9,
+                      model.selectedLocalMask?.highlights == 0.12, model.selectedLocalMask?.shadows == 0.18 else {
+                    throw AtelierError.invalidConfiguration("区域曝光建议重新归一曝光或清除了其他局部微调")
+                }
+                assertions.append("One-click mask advice preserves regional exposure and manual highlight/shadow edits")
                 model.applyRegionalSuggestion(shadow.id)
                 phase = 16
             case 16:
@@ -393,8 +418,92 @@ private final class SmokeSession {
                 }
                 assertions.append("Accepting a suggestion creates a measured editable mask; repeat acceptance replaces rather than stacks it")
                 try snapshot("06-regional-mask.png", tab: 2, compare: false)
+                try snapshotView("07-local-measurements.png", width: 420, height: 2650,
+                                 content: MaskInspector(model: model).padding(24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(AtelierPalette.panel))
+                guard let index = model.activeMaskIndex else {
+                    throw AtelierError.invalidConfiguration("缺少待检查的蒙版")
+                }
+                model.adjustments.masks[index].start = .init(x: 0.5, y: 0.5)
+                model.adjustments.masks[index].end = .init(x: 0.58, y: 0.58)
+                model.adjustments.masks[index].feather = 0.1
+                model.adjustments.masks[index].restrictLuminance = false
+                model.adjustments.masks[index].exposureEV = 0.27
+                model.adjustments.masks[index].highlights = 0.17
+                model.adjustments.masks[index].shadows = 0.11
+                model.requestPreview(immediate: true)
+                phase = 19
+            case 19:
+                guard !model.previewBusy, let inspection = model.maskInspection else { return }
+                guard inspection.lightGuidance?.hasSuggestion == false else {
+                    throw AtelierError.invalidConfiguration("中间调区域不应被全图亮度强迫矫正")
+                }
+                let before = model.adjustments.masks
+                model.applyMaskSuggestion()
+                guard model.adjustments.masks == before else {
+                    throw AtelierError.invalidConfiguration("无调整依据时一键建议覆盖了手动参数")
+                }
+                assertions.append("Without supported light advice, one-click acceptance leaves manual local adjustments intact")
+                model.applyProposal("balanced")
+                phase = 20
+            case 20:
+                guard !model.previewBusy, !model.analysisBusy, model.automaticRecipe != nil,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.exposureEV > 0 }) else { return }
+                guard model.applyRegionalSuggestion(shadow.id) else {
+                    throw AtelierError.invalidConfiguration("自动分析就绪后未能采用局部建议")
+                }
+                phase = 21
+            case 21:
+                guard !model.previewBusy, !model.analysisBusy,
+                      model.maskInspection?.lightGuidance?.hasSuggestion == true,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.exposureEV > 0 }),
+                      let index = model.activeMaskIndex else { return }
+                model.adjustments.masks[index].exposureEV = 0.21
+                let before = model.adjustments.masks
+                model.analysisBusy = true
+                let acceptedWhileBusy = model.applyRegionalSuggestion(shadow.id)
+                model.applyMaskSuggestion()
+                model.analysisBusy = false
+                guard !acceptedWhileBusy, model.adjustments.masks == before else {
+                    throw AtelierError.invalidConfiguration("自动分析期间仍可采用过时局部建议")
+                }
+                assertions.append("Automatic analysis in progress blocks both positional and one-click mask acceptance")
+                guard let next = model.photos.first(where: { $0.id != model.selectedID }) else {
+                    throw AtelierError.invalidConfiguration("换图验证缺少第二张局部样本")
+                }
+                model.selectPhoto(next)
+                guard model.analysis == nil, model.regionalSuggestions.isEmpty,
+                      !model.applyRegionalSuggestion(shadow.id) else {
+                    throw AtelierError.invalidConfiguration("自动换图后仍可采用旧照片的局部建议")
+                }
+                model.applyMaskSuggestion()
+                guard model.adjustments.masks == before else {
+                    throw AtelierError.invalidConfiguration("自动换图期间旧区域测量覆盖了局部参数")
+                }
+                assertions.append("Switching photos clears old measurements and rejects stale advice before new analysis")
+                phase = 22
+            case 22:
+                guard !model.previewBusy, !model.analysisBusy, model.analysis != nil,
+                      model.proposalPreviews.count == 3,
+                      let shadow = model.regionalSuggestions.first(where: { $0.mask.exposureEV > 0 }) else { return }
+                guard model.applyRegionalSuggestion(shadow.id) else {
+                    throw AtelierError.invalidConfiguration("新照片自动分析与预览就绪后无法采用新建议")
+                }
+                assertions.append("Fresh regional advice becomes available after the new photo analysis and resolved preview")
+                phase = 23
+            case 23:
+                guard !model.previewBusy, model.maskInspection?.lightGuidance?.hasSuggestion == true,
+                      let index = model.activeMaskIndex else { return }
+                model.adjustments.masks[index].exposureEV = 0.21
+                let before = model.adjustments.masks
                 model.exportSettings.recursive = false
                 model.reloadFolder()
+                model.applyMaskSuggestion()
+                guard model.scanning, model.adjustments.masks == before else {
+                    throw AtelierError.invalidConfiguration("目录重扫期间仍可采用旧蒙版测量")
+                }
+                assertions.append("Rescanning a folder blocks stale mask advice until the photo selection is resolved")
                 phase = 17
             case 17:
                 guard !model.scanning, !model.previewBusy else { return }
@@ -425,6 +534,11 @@ private final class SmokeSession {
             .composited(over: field(0.25, CGRect(x: 0, y: 0, width: 768, height: 768)))
         var settings = ExportSettings(); settings.format = .png
         try PhotoExporter.write(image: source, to: nested.appendingPathComponent("regional.png"),
+                                settings: settings, sourceProperties: [:], context: PhotoEngine().context)
+        let second = field(0.045, CGRect(x: 0, y: 512, width: 256, height: 256))
+            .composited(over: field(0.82, CGRect(x: 512, y: 0, width: 256, height: 256)))
+            .composited(over: field(0.25, CGRect(x: 0, y: 0, width: 768, height: 768)))
+        try PhotoExporter.write(image: second, to: nested.appendingPathComponent("regional-2.png"),
                                 settings: settings, sourceProperties: [:], context: PhotoEngine().context)
         model.resetAdjustments()
         model.exportSettings.recursive = true

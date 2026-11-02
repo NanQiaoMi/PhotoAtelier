@@ -66,16 +66,19 @@ public struct MaskInspection: Equatable {
     public var suggestedExposureEV: Double
     public var suggestedHighlights: Double
     public var suggestedShadows: Double
+    public var lightGuidance: LocalLightGuidance?
 
     public init(coverage: Double, medianLuminance: Double,
                 highlightFraction: Double, shadowFraction: Double,
                 summary: String, suggestedExposureEV: Double,
-                suggestedHighlights: Double, suggestedShadows: Double) {
+                suggestedHighlights: Double, suggestedShadows: Double,
+                lightGuidance: LocalLightGuidance? = nil) {
         self.coverage = coverage; self.medianLuminance = medianLuminance
         self.highlightFraction = highlightFraction; self.shadowFraction = shadowFraction
         self.summary = summary; self.suggestedExposureEV = suggestedExposureEV
         self.suggestedHighlights = suggestedHighlights
         self.suggestedShadows = suggestedShadows
+        self.lightGuidance = lightGuidance
     }
 }
 
@@ -502,8 +505,10 @@ enum LocalMaskEngine {
 
         var selected: [WeightedValue] = []
         var globalSamples: [WeightedValue] = []
+        var lightSamples: [LocalLightSample] = []
         selected.reserveCapacity(width * height / 2)
         globalSamples.reserveCapacity(width * height)
+        lightSamples.reserveCapacity(width * height)
         var totalAlphaWeight = 0.0
         var totalCoverage = 0.0
         var totalWeight = 0.0
@@ -524,6 +529,8 @@ enum LocalMaskEngine {
             let globalWeight = min(1, max(0, alpha))
             let maskWeight = min(1, max(0, Double(maskPixels[offset])))
             let selectedWeight = globalWeight * maskWeight
+            lightSamples.append(LocalLightSample(luminance: linearLuminance,
+                maximumChannel: max(r, max(g, b)), alpha: globalWeight, coverage: maskWeight))
             globalSamples.append(WeightedValue(value: luminance, linearValue: linearLuminance,
                                                weight: globalWeight))
             totalAlphaWeight += globalWeight
@@ -553,32 +560,21 @@ enum LocalMaskEngine {
         }
         selected.sort { $0.value < $1.value }
         let median = weightedMedian(selected, totalWeight: totalWeight, linear: false)
-        let linearMedian = weightedMedian(selected, totalWeight: totalWeight, linear: true)
         globalSamples.sort { $0.value < $1.value }
         let globalMedian = weightedMedian(globalSamples, totalWeight: totalAlphaWeight, linear: false)
-        let globalLinearMedian = weightedMedian(globalSamples, totalWeight: totalAlphaWeight, linear: true)
         let selectedHighlightFraction = highlights / totalWeight
         let selectedShadowFraction = shadows / totalWeight
-        let globalHighlights = globalSamples.filter { $0.value >= 0.8 }
-            .reduce(0.0) { $0 + $1.weight } / totalAlphaWeight
-        let globalShadows = globalSamples.filter { $0.value <= 0.18 }
-            .reduce(0.0) { $0 + $1.weight } / totalAlphaWeight
-        let ev: Double
-        if linearMedian > 0.0001, globalLinearMedian > 0.0001 {
-            ev = clamp(0.5 * log2(globalLinearMedian / linearMedian), -0.6, 0.6)
-        } else {
-            ev = 0
-        }
-        let highlightAdvice = clamp((globalHighlights - selectedHighlightFraction) * 0.8, -0.6, 0.6)
-        let shadowAdvice = clamp((selectedShadowFraction - globalShadows) * 0.8, -0.6, 0.6)
-        let summary = String(format: "覆盖 %.1f%% · 区域中位 sRGB 亮度 %.2f（全图 %.2f）· 高光 %.0f%% · 阴影 %.0f%% · 建议曝光 %+.2f EV（线性亮度中位差取一半并限制在 ±0.6 EV）。选区不是主体识别。",
+        let guidance = LocalLightGuidancePlanner.assess(lightSamples)
+        let ev = guidance?.suggestedExposureEV ?? 0
+        let summary = String(format: "覆盖 %.1f%% · 区域中位 sRGB 亮度 %.2f（全图 %.2f）· 高光 %.0f%% · 阴影 %.0f%% · 候选曝光 %+.2f EV。%@ 选区不是主体识别。",
                              coverageFraction * 100, median, globalMedian,
-                             selectedHighlightFraction * 100, selectedShadowFraction * 100, ev)
+                             selectedHighlightFraction * 100, selectedShadowFraction * 100, ev,
+                             guidance?.reason ?? "有效样本不足，保留原值。")
         return MaskInspection(coverage: coverageFraction, medianLuminance: median,
                               highlightFraction: selectedHighlightFraction,
                               shadowFraction: selectedShadowFraction, summary: summary,
-                              suggestedExposureEV: ev, suggestedHighlights: highlightAdvice,
-                              suggestedShadows: shadowAdvice)
+                              suggestedExposureEV: ev, suggestedHighlights: 0,
+                              suggestedShadows: 0, lightGuidance: guidance)
     }
 
     private static func geometry(kind: MaskKind, start: MaskPoint, end: MaskPoint,

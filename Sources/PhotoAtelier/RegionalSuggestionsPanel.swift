@@ -7,6 +7,7 @@ struct RegionalSuggestionsPanel: View {
 
     private var isBusy: Bool {
         model.batchRunning || model.previewBusy || model.scanning || model.selectedPhoto == nil
+            || (model.automaticRecipe != nil && (model.analysisBusy || model.analysis == nil || model.analysisError != nil))
     }
 
     var body: some View {
