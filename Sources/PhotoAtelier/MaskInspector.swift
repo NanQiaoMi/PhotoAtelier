@@ -37,11 +37,24 @@ struct MaskInspector: View {
                 .font(.system(size: 11, weight: .medium))
             HStack {
                 Button("人物选区") { model.addContentMask(.people) }
+                    .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
+                              || model.adjustments.masks.count >= 16)
                 Button("背景选区") { model.addContentMask(.background) }
+                    .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
+                              || model.adjustments.masks.count >= 16)
             }
             Button("面部皮肤候选") { model.addContentMask(.faceSkin) }
+                .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
+                          || model.adjustments.masks.count >= 16)
+            Button { model.addPortraitRefinement() } label: {
+                Label("智能人像精修", systemImage: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+            }.buttonStyle(.borderedProminent).disabled(!model.canAddPortraitRefinement)
             Button("整图细节适配") { model.addAdaptiveDetailMask() }
-            Text("本机检测，每张重新定位；先检查粉色覆盖，再调节光色或细节。面部候选依据关键点和颜色，眼眉嘴会避让，仍需修边。")
+                .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
+                          || model.adjustments.masks.count >= 16)
+            Text("本机检测，每张重新定位；先用面部候选检查覆盖，再调节光色或细节。面部依据关键点和颜色，眼眉嘴会避让，仍需修边。智能精修优先复用当前安全候选，按每张照片实际覆盖测量。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             if let report = model.previewReport.contentSelection {
                 Text("人物：\(selectionStatus(report.personStatus)) · 面部：\(selectionStatus(report.faceStatus)) · 检测脸数 \(report.faceCount)")
@@ -53,8 +66,6 @@ struct MaskInspector: View {
                 }
             }
         }.font(.system(size: 10))
-            .disabled(model.batchRunning || model.scanning || model.selectedPhoto == nil
-                      || model.adjustments.masks.count >= 16)
     }
 
     private func selectionStatus(_ status: String) -> String {

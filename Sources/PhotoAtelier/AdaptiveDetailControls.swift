@@ -22,7 +22,9 @@ struct AdaptiveDetailControls: View {
                 AdjustmentSlider(title: "适配强度", value: Binding(get: {
                     active.detailAdaptation?.strength ?? adaptation.strength
                 }, set: { amount in update { $0.detailAdaptation?.strength = amount } }), range: 0...1, percent: true)
-                Text("每张重新测量当前覆盖，细节统一先于局部光色与滤镜执行；手动细节值暂存，关闭适配后恢复。曝光、光色与独立锐化仍按你的设置执行。")
+                Text("按最终覆盖权重做隔离邻域采样，并随选区尺寸调整滤波尺度。自适应只处理纹理、噪点与细节；肤色冷暖和饱和度仍在“局部颜色”中调整，曝光、光色与独立锐化按原设置执行。")
+                    .foregroundColor(AtelierPalette.muted)
+                Text("细节先于局部光色与滤镜执行；手动细节值暂存，关闭适配后恢复。")
                     .foregroundColor(AtelierPalette.muted)
                 if active.contentSelection == .faceSkin && (active.inverted || active.components.contains { $0.operation == .add }) {
                     Text("加选或反选后不自动继承皮肤方向。需要精修皮肤，可单独手绘选区并选择皮肤纹理优先。")
@@ -45,7 +47,7 @@ struct AdaptiveDetailControls: View {
                     Text(model.previewBusy ? "正在测量当前区域…" : "选区不足或尚未完成预览。")
                         .foregroundColor(AtelierPalette.muted)
                 }
-                Text("此处依据预览图像；导出按原尺寸重新测量，细节强度可能不同。无法恢复源文件已丢失的纹理。")
+                Text("普通缩图与原尺寸覆盖的噪点频段不同；导出按原尺寸重新测量，结果可能不同，请在 100% 检查。无法恢复源文件已丢失的纹理。")
                     .foregroundColor(AtelierPalette.muted)
             }
         }.font(.system(size: 9)).lineSpacing(4)

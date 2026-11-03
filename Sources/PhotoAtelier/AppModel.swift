@@ -162,6 +162,19 @@ final class AppModel: ObservableObject {
     var activeMaskIndex: Int? { adjustments.masks.firstIndex { $0.id == selectedMask } }
     var maskInteractionActive: Bool { drawingMask || maskEditMode || pickingMaskColor }
     var selectedLocalMask: LocalMask? { adjustments.masks.first { $0.id == selectedMask } }
+    var canAddPortraitRefinement: Bool {
+        guard !batchRunning, !previewBusy, !scanning, selectedPhoto != nil,
+              !(automaticRecipe != nil && (analysisBusy || analysis == nil || analysisError != nil)) else { return false }
+        return safePortraitMaskIndex != nil || adjustments.masks.count < 16
+    }
+    private var safePortraitMaskIndex: Int? {
+        if let index = activeMaskIndex, isSafePortraitMask(adjustments.masks[index]) { return index }
+        return adjustments.masks.firstIndex(where: isSafePortraitMask)
+    }
+    private func isSafePortraitMask(_ mask: LocalMask) -> Bool {
+        mask.contentSelection == .faceSkin && mask.opacity > 0 && !mask.inverted
+            && !mask.components.contains { $0.operation == .add }
+    }
     private var maskPointCount: Int {
         adjustments.masks.reduce(0) { count, mask in
             count + mask.points.count + mask.components.reduce(0) { $0 + $1.points.count }
@@ -867,6 +880,34 @@ final class AppModel: ObservableObject {
         adjustments.masks.append(mask); selectedMask = mask.id
         showMaskCoverage = true; showMaskOverlay = true
         status = "正在检测“\(target.title)”；每张照片独立重算，请检查覆盖后调整。"
+        requestPreview(immediate: true)
+    }
+
+    func addPortraitRefinement() {
+        guard canAddPortraitRefinement else { return }
+        cancelMaskInteraction()
+        if let index = safePortraitMaskIndex {
+            var mask = adjustments.masks[index]
+            mask.enabled = true
+            if var adaptation = mask.detailAdaptation {
+                adaptation.intent = .portrait
+                mask.detailAdaptation = adaptation
+            } else {
+                mask.detailAdaptation = LocalDetailAdaptation(intent: .portrait, strength: 0.6)
+            }
+            adjustments.masks[index] = mask
+            selectedMask = mask.id
+        } else {
+            let mask = LocalMask(name: "智能人像精修 · 面部皮肤候选", kind: .luminance,
+                                 exposureEV: 0, highlightProtection: 0.65, colorProtection: 0.8,
+                                 contentSelection: .faceSkin,
+                                 detailAdaptation: LocalDetailAdaptation(intent: .portrait, strength: 0.6))
+            adjustments.masks.append(mask)
+            selectedMask = mask.id
+        }
+        showMaskCoverage = false
+        showMaskOverlay = false
+        status = "正在测量本张照片的面部候选；若未检测到可靠覆盖，细节处理会跳过。不会重置其他蒙版或已保存的局部参数。"
         requestPreview(immediate: true)
     }
 

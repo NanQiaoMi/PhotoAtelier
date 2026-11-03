@@ -50,6 +50,8 @@ public struct LocalDetailPlan: Codable, Equatable {
     public let settings: LocalDetailSettings
     /// Effective sqrt-luminance threshold passed to the renderer.
     public let noiseEstimate: Double
+    /// Missing in older reports. Each photograph remeasures its effective area.
+    public let sampling: LocalDetailSamplingPlan?
     public let evidence: [String]
     public let warnings: [String]
 }
@@ -180,13 +182,18 @@ public enum AdaptiveLocalDetailAnalyzer {
             nearBlackFraction: fraction { $0.luma <= 0.002 },
             nearWhiteFraction: fraction { $0.maximum >= 0.985 },
             ambiguousFinePattern: ambiguous)
+        try cancellation?.check()
+        let sampling = try LocalDetailSamplingPlan.measure(coverage: coverage, reference: reference, context: context)
+        try cancellation?.check()
         return plan(measurements: measurements, maskID: maskID, target: target, adaptation: adaptation,
-                    sufficientNoiseEvidence: candidates.count >= 32, isSpatiallyLimited: isSpatiallyLimited)
+                    sufficientNoiseEvidence: candidates.count >= 32, isSpatiallyLimited: isSpatiallyLimited,
+                    sampling: sampling)
     }
 
     static func plan(measurements m: LocalDetailMeasurements, maskID: UUID,
                      target: ContentSelectionTarget?, adaptation: LocalDetailAdaptation,
-                     sufficientNoiseEvidence: Bool = true, isSpatiallyLimited: Bool = false) -> LocalDetailPlan {
+                     sufficientNoiseEvidence: Bool = true, isSpatiallyLimited: Bool = false,
+                     sampling: LocalDetailSamplingPlan? = nil) -> LocalDetailPlan {
         let noiseEstimate = min(0.25, max(m.luminanceNoise,
             m.chromaNoise / max(0.1, 2 * sqrt(m.medianLuminance))))
         let intent: LocalDetailIntent
@@ -227,12 +234,17 @@ public enum AdaptiveLocalDetailAnalyzer {
         if m.nearWhiteFraction > 0.01 { warnings.append("部分通道接近显示白；若原文件已截断，压暗也无法恢复纹理。此测量不证明源数据剪切。") }
         if m.nearBlackFraction > 0.05 { warnings.append("部分区域接近黑位；无法据此证明暗部存在可恢复细节。") }
         if m.nearBlackFraction > 0.8 || m.nearWhiteFraction > 0.8 { settings = LocalDetailSettings() }
-        return LocalDetailPlan(policyVersion: 1, maskID: maskID, requestedIntent: adaptation.intent,
+        var evidence = [String(format: "%d 个原像素样本 · %d 个局部块 · 线性亮度中位 %.3f", m.sampleCount, m.patchCount, m.medianLuminance),
+                        String(format: "噪点候选 %.4f · 色度残差 %.4f · 结构占比 %.1f%% · 强边缘 %.1f%%", m.luminanceNoise, m.chromaNoise, m.textureFraction * 100, m.strongEdgeFraction * 100),
+                        "采用\(intent.title)，细节先于局部光色和滤镜执行；不自动美白、统一肤色或生成纹理。"]
+        if let sampling {
+            evidence.append(String(format: "选区有效面积约 %.0f 原像素；细／粗平整半径 %.2f／%.2f 像素，由本图覆盖范围确定。", sampling.effectiveAreaPixels, sampling.fineRadius, sampling.coarseRadius))
+            evidence.append("平整与噪点邻域只读取当前覆盖内的有效样本，细节候选仍从同一参考图独立生成；没有把背景颜色作为肤色目标。")
+        }
+        return LocalDetailPlan(policyVersion: sampling == nil ? 1 : 2, maskID: maskID, requestedIntent: adaptation.intent,
             resolvedIntent: intent, status: sufficient ? "measured" : "insufficientSamples",
             processingStage: "beforeLocalColorAndLook", measurements: m,
-            settings: settings, noiseEstimate: noiseEstimate,
-            evidence: [String(format: "%d 个原像素样本 · %d 个局部块 · 线性亮度中位 %.3f", m.sampleCount, m.patchCount, m.medianLuminance),
-                       String(format: "噪点候选 %.4f · 色度残差 %.4f · 结构占比 %.1f%% · 强边缘 %.1f%%", m.luminanceNoise, m.chromaNoise, m.textureFraction * 100, m.strongEdgeFraction * 100),
-                       "采用\(intent.title)，细节先于局部光色和滤镜执行；不自动美白、统一肤色或生成纹理。"], warnings: warnings)
+            settings: settings, noiseEstimate: noiseEstimate, sampling: sampling,
+            evidence: evidence, warnings: warnings)
     }
 }

@@ -127,19 +127,19 @@ enum AdaptiveDetailRenderer {
             try cancellation?.check()
             guard let plan = plans[mask.id] else { continue }
 
-            let candidate = try LocalDetailEngine.apply(reference,
-                                                        settings: plan.settings,
-                                                        noiseEstimate: plan.noiseEstimate,
-                                                        modernProtection: true)
-            guard candidate.extent == extent else {
-                throw AtelierError.invalidConfiguration("自适应细节候选与参考图范围不一致。")
-            }
             let coverage = try LocalMaskEngine.coverage(for: mask,
                                                         reference: reference,
                                                         context: context,
                                                         contentSelections: contentSelections)
             guard coverage.extent == extent else {
                 throw AtelierError.invalidConfiguration("自适应细节覆盖图与参考图范围不一致。")
+            }
+            let candidate = try LocalDetailEngine.apply(reference,
+                settings: plan.settings, noiseEstimate: plan.noiseEstimate,
+                modernProtection: true, samplingMask: plan.sampling == nil ? nil : coverage,
+                samplingPlan: plan.sampling)
+            guard candidate.extent == extent else {
+                throw AtelierError.invalidConfiguration("自适应细节候选与参考图范围不一致。")
             }
             let weightedCandidate = try LocalMaskEngine.protectAdaptiveCandidate(
                 candidate, reference: reference, coverage: coverage, mask: mask)

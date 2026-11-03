@@ -90,10 +90,13 @@ public enum LocalDetailEngine {
                                   __sample coarseGuide,
                                   __sample maximumGuide,
                                   __sample minimumGuide,
+                                  __sample regionMask,
                                   float smoothing,
                                   float textureRetention,
                                   float toneUniformity,
-                                  float modernDetailActive) {
+                                  float modernDetailActive,
+                                  float isolated) {
+        if (isolated > 0.5 && !(regionMask.r > 0.000001 && regionMask.r <= 1.0)) { return source; }
         float alpha = source.a;
         if (!(alpha > 0.000001) || !(alpha <= 1.0)) { return source; }
 
@@ -124,8 +127,8 @@ public enum LocalDetailEngine {
         float edgeGuard = 1.0 - smoothRamp(0.035, 0.24, abs(fineDetail));
         float modernFlat = 0.0;
         if (modernDetailActive > 0.5) {
-            if (abs(minimumGuide.a - alpha) > 0.001
-                || abs(maximumGuide.a - alpha) > 0.001) { return source; }
+            if (isolated < 0.5 && (abs(minimumGuide.a - alpha) > 0.001
+                || abs(maximumGuide.a - alpha) > 0.001)) { return source; }
             // Stop the broad Gaussian operation across a strong boundary over
             // its entire support, not only at the central fine-scale gradient.
             float neighborhoodRange = maximumGuide.r / maximumGuide.a
@@ -137,6 +140,11 @@ public enum LocalDetailEngine {
             // Guide surfaces may use half precision. Treat sub-quantization
             // variation as flat rather than manufacturing an exposure change.
             modernFlat = localResidual < 0.002 * max(1.0, abs(centerLog)) ? 1.0 : 0.0;
+            if (isolated > 0.5) {
+                float chromaResidual = length(centerGuide.gb / centerGuide.a
+                    - smallGuide.gb / smallGuide.a);
+                if (chromaResidual > 0.0001) { modernFlat = 0.0; }
+            }
             edgeGuard *= coarseEdgeGuard * (1.0 - smoothRamp(0.1, 0.3, neighborhoodRange));
             // A constant neighborhood has no spatial correction to make. Do
             // not round-trip its guide through transcendental functions.
@@ -244,8 +252,11 @@ public enum LocalDetailEngine {
         return value < 0.0 ? -magnitude : magnitude;
     }
 
-    vec4 localColor(sampler source, vec2 coordinate) {
-        vec4 sampleColor = sample(source, coordinate);
+    vec4 localColor(sampler source, sampler regionMask, vec2 coordinate,
+                    float isolated, float centerCoverage) {
+        vec2 destination = destCoord() + coordinate - samplerCoord(source);
+        vec4 sampleColor = isolated > 0.5
+            ? sample(source, samplerTransform(source, destination)) : sample(source, coordinate);
         if (!(sampleColor.a > 0.000001) || !(sampleColor.a <= 1.0)) {
             return vec4(0.0);
         }
@@ -253,10 +264,19 @@ public enum LocalDetailEngine {
         if (!(abs(color.r) <= 65504.0) || !(abs(color.g) <= 65504.0)
             || !(abs(color.b) <= 65504.0)) { return vec4(0.0); }
         float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-        return vec4(luma, color.r - luma, color.b - luma, 1.0);
+        vec4 value = vec4(luma, color.r - luma, color.b - luma, 1.0);
+        if (isolated > 0.5) {
+            float coverage = sample(regionMask,
+                samplerTransform(regionMask, destination)).r;
+            if (!(coverage >= 0.0 && coverage <= 1.0)) { return vec4(0.0); }
+            float weight = clamp(coverage * sampleColor.a / max(centerCoverage, 0.000001), 0.0, 1.0);
+            return vec4(value.rgb * weight, weight);
+        }
+        return value;
     }
 
     float localDifference(vec4 neighbor, vec4 center) {
+        neighbor.rgb /= max(neighbor.a, 0.000001);
         float lumaDifference = abs(signedLogLuma(neighbor.r)
                                    - signedLogLuma(center.r));
         float referenceLuma = max(max(abs(neighbor.r), abs(center.r)), 0.05);
@@ -270,10 +290,10 @@ public enum LocalDetailEngine {
                           abs(value));
     }
 
-    kernel vec4 refineLocalTexture(sampler source,
+    kernel vec4 refineLocalTexture(sampler source, sampler regionMask,
                                    float noiseEstimate,
                                    float noiseReduction,
-                                   float detailRecovery) {
+                                   float detailRecovery, float isolated) {
         // samplerCoord is in this source sampler's pixel-coordinate space, so
         // integer offsets below denote fixed source pixels rather than a scale
         // derived from the image extent.
@@ -287,29 +307,34 @@ public enum LocalDetailEngine {
             || !(abs(originalColor.g) <= 65504.0)
             || !(abs(originalColor.b) <= 65504.0)) { return original; }
 
-        vec4 center = localColor(source, coordinate);
+        float centerCoverage = 1.0;
+        if (isolated > 0.5) {
+            centerCoverage = sample(regionMask, samplerCoord(regionMask)).r * alpha;
+            if (!(centerCoverage > 0.000001 && centerCoverage <= 1.0)) { return original; }
+        }
+        vec4 center = localColor(source, regionMask, coordinate, 0.0, centerCoverage);
         if (!(center.a > 0.5)) { return original; }
 
         vec2 one = vec2(1.0, 0.0);
         vec2 diagonal = vec2(1.0, 1.0);
-        vec4 p1 = localColor(source, coordinate + one);
-        vec4 m1 = localColor(source, coordinate - one);
-        vec4 p2 = localColor(source, coordinate + one.yx);
-        vec4 m2 = localColor(source, coordinate - one.yx);
-        vec4 pp = localColor(source, coordinate + diagonal);
-        vec4 pm = localColor(source, coordinate + vec2(1.0, -1.0));
-        vec4 mp = localColor(source, coordinate + vec2(-1.0, 1.0));
-        vec4 mm = localColor(source, coordinate - diagonal);
+        vec4 p1 = localColor(source, regionMask, coordinate + one, isolated, centerCoverage);
+        vec4 m1 = localColor(source, regionMask, coordinate - one, isolated, centerCoverage);
+        vec4 p2 = localColor(source, regionMask, coordinate + one.yx, isolated, centerCoverage);
+        vec4 m2 = localColor(source, regionMask, coordinate - one.yx, isolated, centerCoverage);
+        vec4 pp = localColor(source, regionMask, coordinate + diagonal, isolated, centerCoverage);
+        vec4 pm = localColor(source, regionMask, coordinate + vec2(1.0, -1.0), isolated, centerCoverage);
+        vec4 mp = localColor(source, regionMask, coordinate + vec2(-1.0, 1.0), isolated, centerCoverage);
+        vec4 mm = localColor(source, regionMask, coordinate - diagonal, isolated, centerCoverage);
         vec2 two = vec2(2.0, 0.0);
         vec2 twoDiagonal = vec2(2.0, 2.0);
-        vec4 p3 = localColor(source, coordinate + two);
-        vec4 m3 = localColor(source, coordinate - two);
-        vec4 p4 = localColor(source, coordinate + two.yx);
-        vec4 m4 = localColor(source, coordinate - two.yx);
-        vec4 p5 = localColor(source, coordinate + twoDiagonal);
-        vec4 p6 = localColor(source, coordinate + vec2(2.0, -2.0));
-        vec4 m5 = localColor(source, coordinate + vec2(-2.0, 2.0));
-        vec4 m6 = localColor(source, coordinate - twoDiagonal);
+        vec4 p3 = localColor(source, regionMask, coordinate + two, isolated, centerCoverage);
+        vec4 m3 = localColor(source, regionMask, coordinate - two, isolated, centerCoverage);
+        vec4 p4 = localColor(source, regionMask, coordinate + two.yx, isolated, centerCoverage);
+        vec4 m4 = localColor(source, regionMask, coordinate - two.yx, isolated, centerCoverage);
+        vec4 p5 = localColor(source, regionMask, coordinate + twoDiagonal, isolated, centerCoverage);
+        vec4 p6 = localColor(source, regionMask, coordinate + vec2(2.0, -2.0), isolated, centerCoverage);
+        vec4 m5 = localColor(source, regionMask, coordinate + vec2(-2.0, 2.0), isolated, centerCoverage);
+        vec4 m6 = localColor(source, regionMask, coordinate - twoDiagonal, isolated, centerCoverage);
 
         float nearWeight = 0.25
             + (p1.a + m1.a + p2.a + m2.a) * 0.125
@@ -328,24 +353,25 @@ public enum LocalDetailEngine {
             + (p5.r + p6.r + m5.r + m6.r) * 0.0625) / farWeight;
 
         float localEdge = 0.0;
-        if (p1.a > 0.5) { localEdge = max(localEdge, localDifference(p1, center)); }
-        if (m1.a > 0.5) { localEdge = max(localEdge, localDifference(m1, center)); }
-        if (p2.a > 0.5) { localEdge = max(localEdge, localDifference(p2, center)); }
-        if (m2.a > 0.5) { localEdge = max(localEdge, localDifference(m2, center)); }
-        if (pp.a > 0.5) { localEdge = max(localEdge, localDifference(pp, center)); }
-        if (pm.a > 0.5) { localEdge = max(localEdge, localDifference(pm, center)); }
-        if (mp.a > 0.5) { localEdge = max(localEdge, localDifference(mp, center)); }
-        if (mm.a > 0.5) { localEdge = max(localEdge, localDifference(mm, center)); }
+        float minimumNeighborWeight = isolated > 0.5 ? 0.000001 : 0.5;
+        if (p1.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p1, center)); }
+        if (m1.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m1, center)); }
+        if (p2.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p2, center)); }
+        if (m2.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m2, center)); }
+        if (pp.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(pp, center)); }
+        if (pm.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(pm, center)); }
+        if (mp.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(mp, center)); }
+        if (mm.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(mm, center)); }
         // Every neighbor contributing to recovery must also contribute to the
         // edge guard, including the wider middle-frequency support.
-        if (p3.a > 0.5) { localEdge = max(localEdge, localDifference(p3, center)); }
-        if (m3.a > 0.5) { localEdge = max(localEdge, localDifference(m3, center)); }
-        if (p4.a > 0.5) { localEdge = max(localEdge, localDifference(p4, center)); }
-        if (m4.a > 0.5) { localEdge = max(localEdge, localDifference(m4, center)); }
-        if (p5.a > 0.5) { localEdge = max(localEdge, localDifference(p5, center)); }
-        if (p6.a > 0.5) { localEdge = max(localEdge, localDifference(p6, center)); }
-        if (m5.a > 0.5) { localEdge = max(localEdge, localDifference(m5, center)); }
-        if (m6.a > 0.5) { localEdge = max(localEdge, localDifference(m6, center)); }
+        if (p3.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p3, center)); }
+        if (m3.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m3, center)); }
+        if (p4.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p4, center)); }
+        if (m4.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m4, center)); }
+        if (p5.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p5, center)); }
+        if (p6.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(p6, center)); }
+        if (m5.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m5, center)); }
+        if (m6.a > minimumNeighborWeight) { localEdge = max(localEdge, localDifference(m6, center)); }
         float edgeGuard = 1.0 - smoothstep(0.18, 0.62, localEdge);
 
         float lumaMagnitude = abs(center.r);
@@ -516,11 +542,17 @@ public enum LocalDetailEngine {
     public static func apply(_ image: CIImage,
                             settings: LocalDetailSettings,
                             noiseEstimate: Double = 0.006,
-                            modernProtection: Bool = false) throws -> CIImage {
+                            modernProtection: Bool = false,
+                            samplingMask: CIImage? = nil,
+                            samplingPlan: LocalDetailSamplingPlan? = nil) throws -> CIImage {
         try validate(settings)
         guard noiseEstimate.isFinite, (0...0.25).contains(noiseEstimate) else {
             throw AtelierError.invalidConfiguration(
                 "人像细节噪声估计必须是 0...0.25 之间的有限数值。")
+        }
+        if let samplingPlan { try LocalDetailSamplingPlan.validate(samplingPlan) }
+        if let samplingMask, samplingMask.extent != image.extent {
+            throw AtelierError.invalidConfiguration("细节采样蒙版与图像的范围必须一致。")
         }
         if settings.isNeutral { return image }
 
@@ -531,7 +563,7 @@ public enum LocalDetailEngine {
             throw AtelierError.invalidConfiguration("人像细节处理需要有限且非空的图像范围。")
         }
         var output = image
-        let modernActive = modernProtection || settings.noiseReduction != 0 || settings.detailRecovery != 0
+        let modernActive = modernProtection || samplingMask != nil || settings.noiseReduction != 0 || settings.detailRecovery != 0
         if settings.smoothing != 0 || settings.toneUniformity != 0 {
             guard let guideKernel = guideKernel,
                   let refinementKernel = refinementKernel else {
@@ -543,11 +575,12 @@ public enum LocalDetailEngine {
             }
 
             let minimumSide = min(extent.width, extent.height)
-            let smallRadius = max(0.5, minimumSide * 0.0015)
-            let coarseRadius = max(smallRadius * 3.5, minimumSide * 0.008)
+            let smallRadius = samplingPlan.map { CGFloat($0.fineRadius) } ?? max(0.5, minimumSide * 0.0015)
+            let coarseRadius = samplingPlan.map { CGFloat($0.coarseRadius) } ?? max(smallRadius * 3.5, minimumSide * 0.008)
+            let samplingGuide = try samplingMask.map { try LocalDetailSampling.weighted(guide, coverage: $0) } ?? guide
 
             func blurred(_ radius: CGFloat) -> CIImage {
-                guide.clampedToExtent()
+                samplingGuide.clampedToExtent()
                     .applyingFilter("CIGaussianBlur", parameters: [
                         kCIInputRadiusKey: NSNumber(value: Double(radius))
                     ])
@@ -559,9 +592,15 @@ public enum LocalDetailEngine {
             var maximumGuide = guide, minimumGuide = guide
             if modernActive {
                 let radius = NSNumber(value: Double(ceil(coarseRadius * 3)))
-                maximumGuide = guide.clampedToExtent().applyingFilter("CIMorphologyMaximum",
+                let maximumSource = try samplingMask.map {
+                    try LocalDetailSampling.extremaGuide(guide, coverage: $0, maximum: true)
+                } ?? guide
+                let minimumSource = try samplingMask.map {
+                    try LocalDetailSampling.extremaGuide(guide, coverage: $0, maximum: false)
+                } ?? guide
+                maximumGuide = maximumSource.clampedToExtent().applyingFilter("CIMorphologyMaximum",
                     parameters: [kCIInputRadiusKey: radius]).cropped(to: extent)
-                minimumGuide = guide.clampedToExtent().applyingFilter("CIMorphologyMinimum",
+                minimumGuide = minimumSource.clampedToExtent().applyingFilter("CIMorphologyMinimum",
                     parameters: [kCIInputRadiusKey: radius]).cropped(to: extent)
             }
             guard let legacyOutput = refinementKernel.apply(extent: extent, arguments: [
@@ -571,10 +610,12 @@ public enum LocalDetailEngine {
                 coarseScale,
                 maximumGuide,
                 minimumGuide,
+                samplingMask ?? CIImage(color: .white).cropped(to: extent),
                 NSNumber(value: settings.smoothing),
                 NSNumber(value: settings.textureRetention),
                 NSNumber(value: settings.toneUniformity),
-                NSNumber(value: modernActive ? 1 : 0)
+                NSNumber(value: modernActive ? 1 : 0),
+                NSNumber(value: samplingMask == nil ? 0 : 1)
             ]) else {
                 throw AtelierError.invalidConfiguration("人像细节调整无法生成输出。")
             }
@@ -591,9 +632,11 @@ public enum LocalDetailEngine {
                 roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
                 arguments: [
                     output.clampedToExtent(),
+                    samplingMask?.clampedToExtent() ?? CIImage(color: .white).cropped(to: extent),
                     NSNumber(value: noiseEstimate),
                     NSNumber(value: settings.noiseReduction),
-                    NSNumber(value: settings.detailRecovery)
+                    NSNumber(value: settings.detailRecovery),
+                    NSNumber(value: samplingMask == nil ? 0 : 1)
                 ]) else {
             throw AtelierError.invalidConfiguration("局部噪声与纹理调整无法生成输出。")
         }

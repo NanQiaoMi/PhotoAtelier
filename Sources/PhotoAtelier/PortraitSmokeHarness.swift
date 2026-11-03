@@ -15,6 +15,9 @@ final class PortraitSmokeSession {
     private var hashes: [String: String] = [:]
     private var firstCoverage = 0.0
     private var firstID: String?
+    private let preservedManualDetail = LocalDetailSettings(
+        smoothing: 0.4, textureRetention: 0.87, toneUniformity: 0.21,
+        noiseReduction: 0.13, detailRecovery: 0.04)
 
     init(model: AppModel, input: URL, output: URL, evidence: URL) {
         self.model = model; self.input = input; self.output = output; self.evidence = evidence
@@ -47,6 +50,18 @@ final class PortraitSmokeSession {
                 guard ready, model.proposalPreviews.count == 3 else { return }
                 try require(model.photos.count >= 2, "At least two real local portrait inputs loaded")
                 firstID = model.selectedID
+                try verifyPortraitCapacityBoundaries()
+                model.addPortraitRefinement()
+                try require(model.adjustments.masks.count == 1
+                            && model.selectedLocalMask?.contentSelection == .faceSkin
+                            && model.selectedLocalMask?.detailAdaptation == LocalDetailAdaptation(intent: .portrait, strength: 0.6),
+                            "Smart portrait command creates one neutral-color face refinement when none exists")
+                phase = -1
+            case -1:
+                guard ready, let plan = model.previewReport.localDetails?.first else { return }
+                try require(plan.policyVersion == 2 && plan.status == "measured" && plan.sampling != nil,
+                            "New smart portrait candidate produces actual selected-region measurements")
+                model.adjustments.masks = []; model.selectedMask = nil
                 model.addContentMask(.people); phase = 1
             case 1:
                 guard ready, let report = model.previewReport.contentSelection else { return }
@@ -109,8 +124,65 @@ final class PortraitSmokeSession {
             case 41:
                 guard ready, let plan = model.previewReport.localDetails?.first else { return }
                 try require(plan.settings.isNeutral, "Zero adaptive strength yields neutral detail without applying manual detail twice")
-                if let index = model.activeMaskIndex { model.adjustments.masks[index].detailAdaptation?.strength = 0.6 }
-                model.requestPreview(immediate: true); phase = 5
+                guard let index = model.activeMaskIndex else { return }
+                var mask = model.adjustments.masks[index]
+                mask.exposureEV = 0.37; mask.saturation = 1.23; mask.warmth = -0.14; mask.tint = 0.08
+                mask.detail = preservedManualDetail
+                mask.detailAdaptation = LocalDetailAdaptation(intent: .automatic, strength: 0.43)
+                model.adjustments.masks[index] = mask
+                model.requestPreview(immediate: true); phase = 42
+            case 42:
+                guard ready, let maskID = model.selectedMask,
+                      let before = model.selectedLocalMask else { return }
+                let count = model.adjustments.masks.count
+                let adaptedFaceMasks = model.adjustments.masks.filter {
+                    $0.contentSelection == .faceSkin && $0.detailAdaptation != nil
+                }.count
+                model.addPortraitRefinement()
+                guard let after = model.selectedLocalMask else { return }
+                try require(model.adjustments.masks.count == count && model.selectedMask == maskID
+                            && adaptedFaceMasks == model.adjustments.masks.filter {
+                                $0.contentSelection == .faceSkin && $0.detailAdaptation != nil
+                            }.count,
+                            "Smart portrait refinement reuses the existing face mask without adding or duplicating one")
+                try require(after.detailAdaptation?.intent == .portrait
+                            && after.detailAdaptation?.strength == before.detailAdaptation?.strength,
+                            "Smart refinement sets portrait intent and preserves the existing adaptive strength")
+                try require(after.exposureEV == 0.37 && after.saturation == 1.23
+                            && after.warmth == -0.14 && after.tint == 0.08 && after.detail == preservedManualDetail,
+                            "Smart refinement preserves local exposure, color and stored manual detail")
+                try require(!model.showMaskCoverage && !model.showMaskOverlay,
+                            "Smart refinement opens the processed result without a pink coverage overlay")
+                phase = 43
+            case 43:
+                guard ready, let maskID = model.selectedMask,
+                      let plan = model.previewReport.localDetails?.first(where: { $0.maskID == maskID }),
+                      let mask = model.selectedLocalMask else { return }
+                try require(plan.policyVersion == 2 && plan.maskID == maskID
+                            && plan.requestedIntent == .portrait && plan.resolvedIntent == .portrait,
+                            "Ready preview reports policy two with the selected portrait mask ID and intent")
+                let settings = [plan.settings.smoothing, plan.settings.textureRetention,
+                                plan.settings.toneUniformity, plan.settings.noiseReduction,
+                                plan.settings.detailRecovery]
+                try require(plan.status == "measured" && plan.measurements.sampleCount >= 128
+                            && settings.allSatisfy { $0.isFinite && (0...1).contains($0) }
+                            && plan.settings != (mask.detail ?? LocalDetailSettings()),
+                            "Policy two returns bounded per-photo settings from measured coverage, separate from stored manual detail")
+                let count = model.adjustments.masks.count
+                model.addPortraitRefinement()
+                try require(model.adjustments.masks.count == count && model.selectedMask == maskID,
+                            "Repeating smart refinement reuses the same face mask")
+                phase = 44
+            case 44:
+                guard ready, let maskID = model.selectedMask else { return }
+                let matchingPlans = model.previewReport.localDetails?.filter { $0.maskID == maskID } ?? []
+                let adaptedFaceMasks = model.adjustments.masks.filter {
+                    $0.contentSelection == .faceSkin && $0.detailAdaptation != nil
+                }
+                try require(matchingPlans.count == 1 && adaptedFaceMasks.count == 1
+                            && adaptedFaceMasks[0].id == maskID,
+                            "Repeated refinement leaves one matching adaptive face plan without old/new duplicate effects")
+                phase = 5
             case 5:
                 guard ready else { return }
                 try require(model.previewReport.contentSelection?.coverage["people"] == firstCoverage,
@@ -163,6 +235,27 @@ final class PortraitSmokeSession {
                 .map { String(format: "%02x", $0) }.joined()
         }
         return values
+    }
+
+    private func verifyPortraitCapacityBoundaries() throws {
+        let original = model.adjustments, selected = model.selectedMask
+        defer { model.adjustments = original; model.selectedMask = selected }
+        var face = LocalMask(name: "Capacity check", kind: .luminance, exposureEV: 0,
+                             contentSelection: .faceSkin)
+        face.opacity = 0
+        model.adjustments.masks = [face] + (1..<16).map {
+            LocalMask(name: "Capacity \($0)", kind: .luminance, exposureEV: 0)
+        }
+        model.selectedMask = face.id
+        try require(!model.canAddPortraitRefinement,
+                    "A zero-opacity face cannot pretend to be an active reusable candidate at capacity")
+        model.addPortraitRefinement()
+        try require(model.adjustments.masks.count == 16 && model.selectedLocalMask?.opacity == 0
+                    && model.selectedLocalMask?.detailAdaptation == nil,
+                    "Disabled capacity command preserves the zero-opacity mask and all sixteen layers")
+        model.adjustments.masks[0].opacity = 0.6
+        try require(model.canAddPortraitRefinement,
+                    "A positive-opacity safe face remains reusable at sixteen layers")
     }
 
     private func snapshot(_ name: String) throws {
