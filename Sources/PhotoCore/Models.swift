@@ -259,6 +259,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     public var creativeEffects: CreativeEffectsSettings? = nil
     /// Optional for exact compatibility with recipes written before v9.
     public var adaptiveLUT: AdaptiveLUTSettings? = nil
+    /// Optional for exact compatibility with recipes written before v10.
+    /// Absent or neutral settings keep the pre-v10 render path untouched.
+    public var portrait: PortraitRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -276,6 +279,7 @@ public struct ExportSettings: Codable, Equatable {
 
 public struct Recipe: Codable, Equatable {
     /// Version 9 adds opt-in per-photo LUT candidate evaluation.
+    /// Version 10 adds portrait refinement and later reference-color/export fields.
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -291,8 +295,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...9).contains(version) else {
+        guard (1...10).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let portraitSettings = [adjustments.portrait,
+                                automatic?.baseline.portrait,
+                                automatic?.referenceSettings.portrait]
+        guard version >= 10 || portraitSettings.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的人像修复需要配方版本 10，不能静默降级。")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
             throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")
@@ -348,6 +358,9 @@ public struct ProcessingReport: Codable, Equatable {
     public var lutAdaptation: LUTAdaptationReport?
     public var contentSelection: ContentSelectionReport?
     public var localDetails: [LocalDetailPlan]?
+    /// Per-photo portrait pass status; batch manifests use it to record
+    /// "applied" versus "no usable face" without re-running detection.
+    public var portrait: PortraitRefinementReport?
     public init() {}
 }
 

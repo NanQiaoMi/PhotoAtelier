@@ -55,6 +55,7 @@ private final class SmokeSession {
     private var originalMaskCoverage = 0.0
     private var exposureBeforePreserving = 0.0
     private var regionalExposureBeforeAdvice = 0.0
+    private var rawPhotoForPhase4: PhotoItem?
 
     init(model: AppModel, input: URL, output: URL, evidence: URL) {
         self.model = model; self.input = input; self.output = output; self.evidence = evidence
@@ -365,8 +366,36 @@ private final class SmokeSession {
                 assertions.append("Per-photo analysis evidence and effective automatic settings recorded")
                 assertions.append("Source hashes unchanged")
                 if model.failed > 0 { assertions.append("Broken image isolated without aborting later images") }
-                try snapshot("04-export.png", tab: 3)
-                if let raw = rawItems.first {
+                try snapshot("04-export.png", tab: 4)
+                rawPhotoForPhase4 = rawItems.first
+                // W5: exercise the portrait inspector on the synthetic fixture.
+                // It has no detectable face, so this asserts explicit no-face
+                // degradation instead of pretending a retouch happened.
+                model.requestPortraitDetection()
+                phase = 24
+            case 24:
+                guard !model.portraitFaceStatus.isDetecting, !model.previewBusy,
+                      !model.analysisBusy else { return }
+                guard model.portraitFaceStatus.detectedFaceCount == 0 else {
+                    throw AtelierError.invalidConfiguration("合成夹具不应检测出人脸，人像面板“无脸”分支未被验证")
+                }
+                model.adjustments.portrait = PortraitRefinementSettings(
+                    blemishStrength: 0.25, dodgeBurn: 0.30, structure: 0.15, texture: 0.15,
+                    gloss: 0.15, teethWhiten: 0.20, eyeBrighten: 0.20, skinToneUnify: 0.20)
+                model.requestPreview(immediate: true)
+                phase = 25
+            case 25:
+                guard !model.previewBusy, !model.analysisBusy else { return }
+                guard let portraitReport = model.previewReport.portrait, !portraitReport.applied else {
+                    let report = String(describing: model.previewReport.portrait)
+                    let settings = String(describing: model.adjustments.portrait)
+                    throw AtelierError.invalidConfiguration(
+                        "无脸时人像阶段未在预览报告中显式标记跳过（report=\(report) settings=\(settings) status=\(model.status) warnings=\(model.previewReport.warnings)）")
+                }
+                assertions.append("Portrait panel reports no detectable face and the portrait pipeline degrades explicitly")
+                try snapshot("04-portrait.png", tab: 3)
+                model.adjustments.portrait = nil
+                if let raw = rawPhotoForPhase4 {
                     model.selectPhoto(raw)
                     phase = 4
                 } else { try startRegionalFixture() }

@@ -7,8 +7,12 @@ import Darwin
 
 /// Reads supported still images without discarding their embedded color profile.
 public enum PhotoLoader {
+    /// Still-image extensions decoded through ImageIO. HEIC/HEIF/AVIF/WebP are
+    /// container/codec families that macOS ImageIO can read; an extension is only
+    /// a candidate, so a file is accepted only after `load` actually decodes it.
     private static let rasterExtensions: Set<String> = [
-        "jpg", "jpeg", "jpe", "png", "tif", "tiff"
+        "jpg", "jpeg", "jpe", "png", "tif", "tiff",
+        "heic", "heif", "avif", "webp"
     ]
 
     // These are scan candidates only. A filename extension does not guarantee
@@ -40,8 +44,14 @@ public enum PhotoLoader {
             try validateSourceDimensions(sourceProperties, filename: sourceURL.lastPathComponent)
         }
         var report = ProcessingReport()
-        if !isRAW && CGImageSourceGetCount(source) > 1 {
-            throw AtelierError.imageRead("只处理单页静态照片，请先将多页 TIFF / 动画拆分为单张照片")
+        if !isRAW {
+            let frameCount = CGImageSourceGetCount(source)
+            guard frameCount > 0 else {
+                throw AtelierError.imageRead("ImageIO 无法解析此文件（格式可能不受本机支持或文件已损坏）：\(sourceURL.lastPathComponent)")
+            }
+            guard frameCount == 1 else {
+                throw AtelierError.imageRead("只处理单页静态照片，请先将多页 TIFF / 动画 PNG / HEIC 序列拆分为单张照片")
+            }
         }
 
         var image: CIImage
@@ -296,7 +306,10 @@ public enum PhotoLoader {
         return result
     }
 
-    private static func isSupportedCandidate(_ url: URL) -> Bool {
+    /// Whether a filename is even a candidate input, by extension only
+    /// (raster formats plus RAW decoder candidates). A filename extension does not
+    /// prove the file decodes; `load` still reports the real decode error.
+    static func isSupportedCandidate(_ url: URL) -> Bool {
         let fileExtension = url.pathExtension.lowercased()
         return rasterExtensions.contains(fileExtension) || isRawCandidate(url)
     }
@@ -307,7 +320,8 @@ public enum PhotoLoader {
         return UTType(filenameExtension: fileExtension)?.conforms(to: .rawImage) == true
     }
 
-    private static func relativePath(of url: URL, under root: URL) -> String? {
+    /// Relative path of `url` inside `root`, or nil when it is not below the root.
+    static func relativePath(of url: URL, under root: URL) -> String? {
         let rootPath = root.standardizedFileURL.path
         let filePath = url.standardizedFileURL.path
         let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"

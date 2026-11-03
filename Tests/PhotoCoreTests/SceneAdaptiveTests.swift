@@ -405,9 +405,11 @@ final class SceneAdaptiveTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: oldAutomaticObject))
         XCTAssertNil(oldAutomatic.sceneIntent, "Missing legacy intent means automatic scene selection.")
 
+        // New recipes still default to v9; v10 is only required when the opt-in
+        // portrait/reference-color/export-extension fields are used.
         let defaultRecipe = Recipe(automatic: selected)
         XCTAssertEqual(defaultRecipe.version, 9)
-        for version in 1...9 {
+        for version in 1...10 {
             var recipe = Recipe(automatic: oldAutomatic)
             recipe.version = version
             XCTAssertEqual(try JSONDecoder().decode(Recipe.self,
@@ -419,16 +421,18 @@ final class SceneAdaptiveTests: XCTestCase {
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for version in 1...9 {
+        // v1-v10 are supported; 10 is the current version.
+        for version in 1...10 {
             var recipe = Recipe()
             recipe.version = version
             XCTAssertNoThrow(try BatchProcessor().run(items: [], inputRoot: input,
                 outputRoot: root.appendingPathComponent("version-\(version)"), recipe: recipe,
                 lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))
         }
+        // Unknown future versions are rejected before the output directory is created.
         var unsupported = Recipe()
-        unsupported.version = 10
-        let rejectedOutput = root.appendingPathComponent("version-10")
+        unsupported.version = 11
+        let rejectedOutput = root.appendingPathComponent("version-11")
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: rejectedOutput, recipe: unsupported, lut: nil,
             cancellation: CancellationToken(), onEvent: { _ in }))

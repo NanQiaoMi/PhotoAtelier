@@ -163,11 +163,12 @@ final class IOTests: XCTestCase {
             "canon.cr2", "canon.cr3", "nikon.nef", "sony.arw", "fuji.raf",
             "olympus.orf", "panasonic.rw2", "pentax.pef", "samsung.srw", "raw.dng"
         ]
-        for name in rasterAndRAWNames + ["later.heic", "notes.txt"] {
+        let newFormatNames = ["later.heic", "later.heif", "later.avif", "later.webp"]
+        for name in rasterAndRAWNames + newFormatNames + ["notes.txt"] {
             try Data("candidate".utf8).write(to: temp.appendingPathComponent(name))
         }
         let scanned = try PhotoLoader.scan(folder: temp, recursive: false)
-        XCTAssertEqual(Set(scanned.map { $0.url.lastPathComponent }), Set(rasterAndRAWNames))
+        XCTAssertEqual(Set(scanned.map { $0.url.lastPathComponent }), Set(rasterAndRAWNames + newFormatNames))
 
         // This is deliberately corrupt RAW payload, not a camera fixture. The
         // loader must report a RAW decoder error instead of returning an ImageIO
@@ -200,6 +201,138 @@ final class IOTests: XCTestCase {
         XCTAssertTrue((encoded.colorSpace?.name as String? ?? "").lowercased().contains("srgb"))
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any])
         XCTAssertEqual((properties[kCGImagePropertyOrientation as String] as? NSNumber)?.intValue, 1)
+    }
+
+    // ImageIO HEIC encode/decode was verified on this machine (macOS 13.7.8); the
+    // generator uses even dimensions. HEVC round-trips the flat 0.05-gray center
+    // with a small loss, so the color assertion is deliberately conservative.
+    func testHEICIsGeneratedAndDecodedThroughImageIO() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let url = temp.appendingPathComponent("generated.heic")
+        try TestFiles.writeFixture(to: url, width: 8, height: 6, type: .heic)
+        XCTAssertTrue(PhotoLoader.isSupportedCandidate(url))
+
+        let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+        XCTAssertEqual(loaded.image.extent.width, 8, accuracy: 0.01)
+        XCTAssertEqual(loaded.image.extent.height, 6, accuracy: 0.01)
+        XCTAssertFalse(loaded.report.inputWasRAW)
+        XCTAssertNotNil(loaded.image.colorSpace)
+
+        let context = CIContext(options: [.cacheIntermediates: false])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let center = CGRect(x: 4, y: 3, width: 1, height: 1)
+        context.render(loaded.image, toBitmap: &pixel, rowBytes: 4, bounds: center,
+                       format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        for channel in 0..<3 {
+            XCTAssertLessThanOrEqual(abs(Int(pixel[channel]) - 13), 20,
+                                     "HEIC center pixel channel \(channel) drifted: \(pixel)")
+        }
+
+        // HEIF is the same container family with a different extension; it must
+        // resolve as a candidate and decode through the same ImageIO path.
+        let heif = temp.appendingPathComponent("generated.heif")
+        try FileManager.default.copyItem(at: url, to: heif)
+        let heifLoaded = try PhotoLoader.load(url: heif, lensCorrection: false)
+        XCTAssertEqual(heifLoaded.image.extent.width, 8, accuracy: 0.01)
+
+        let scanned = try PhotoLoader.scan(folder: temp, recursive: false)
+        XCTAssertEqual(Set(scanned.map { $0.url.lastPathComponent }), ["generated.heic", "generated.heif"])
+        let thumbnail = try PhotoLoader.thumbnail(url: url, maxDimension: 16)
+        XCTAssertEqual(thumbnail.width, 8)
+        XCTAssertEqual(thumbnail.height, 6)
+    }
+
+    // ImageIO decodes WebP on macOS 13 but cannot encode it, so the fixture is a
+    // checked-in 44-byte 1x1 white WebP instead of a generated file.
+    func testEmbeddedWebPFixtureIsDecodedAndScanned() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let data = try XCTUnwrap(Data(base64Encoded: TestFiles.webP1x1Base64))
+        XCTAssertEqual(data.count, 44)
+        let url = temp.appendingPathComponent("fixture.webp")
+        try data.write(to: url)
+        XCTAssertTrue(PhotoLoader.isSupportedCandidate(url))
+
+        let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+        XCTAssertEqual(loaded.image.extent.width, 1, accuracy: 0.01)
+        XCTAssertEqual(loaded.image.extent.height, 1, accuracy: 0.01)
+
+        let context = CIContext(options: [.cacheIntermediates: false])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(loaded.image, toBitmap: &pixel, rowBytes: 4,
+                       bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                       format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        XCTAssertGreaterThanOrEqual(pixel[0], 250, "fixture must stay a white pixel: \(pixel)")
+        XCTAssertGreaterThanOrEqual(pixel[1], 250, "fixture must stay a white pixel: \(pixel)")
+        XCTAssertGreaterThanOrEqual(pixel[2], 250, "fixture must stay a white pixel: \(pixel)")
+
+        let thumbnail = try PhotoLoader.thumbnail(url: url, maxDimension: 8)
+        XCTAssertEqual(thumbnail.width, 1)
+        XCTAssertEqual(thumbnail.height, 1)
+        let scanned = try PhotoLoader.scan(folder: temp, recursive: false)
+        XCTAssertEqual(scanned.map { $0.url.lastPathComponent }, ["fixture.webp"])
+    }
+
+    // macOS 13 ImageIO can decode AVIF but cannot encode it, so this test covers
+    // the two verifiable halves: extension recognition + the explicit failure
+    // path for an undecodable payload. A successful AVIF decode is NOT covered
+    // here and is reported as unverified rather than faked.
+    func testAVIFExtensionIsRecognizedAndUndecodablePayloadFailsExplicitly() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let corrupt = temp.appendingPathComponent("corrupt.avif")
+        try Data("not an avif payload".utf8).write(to: corrupt)
+        XCTAssertTrue(PhotoLoader.isSupportedCandidate(corrupt),
+                      "AVIF must be recognized as a candidate extension")
+
+        XCTAssertThrowsError(try PhotoLoader.load(url: corrupt, lensCorrection: false)) { error in
+            guard let atelierError = error as? AtelierError,
+                  case .imageRead(let message) = atelierError else {
+                XCTFail("Expected an explicit imageRead error for corrupt AVIF, got: \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("corrupt.avif"), message)
+            XCTAssertTrue(message.contains("无法解析") || message.contains("无法解码"), message)
+        }
+
+        let scanned = try PhotoLoader.scan(folder: temp, recursive: false)
+        XCTAssertEqual(scanned.map { $0.url.lastPathComponent }, ["corrupt.avif"])
+    }
+
+    // Multi-image containers must keep being rejected: a still-photo pipeline
+    // cannot silently pick frame 0. Multi-page TIFF is generated by ImageIO; the
+    // animated PNG fixture is a checked-in 2-frame APNG because ImageIO cannot
+    // write APNG (it silently writes a single-frame PNG instead).
+    func testMultiPageTIFFAndAnimatedPNGAreStillRejected() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let tiff = temp.appendingPathComponent("two-pages.tiff")
+        try TestFiles.writeMultiPageTIFF(to: tiff, frameCount: 2)
+        let tiffSource = try XCTUnwrap(CGImageSourceCreateWithURL(tiff as CFURL, nil))
+        XCTAssertEqual(CGImageSourceGetCount(tiffSource), 2, "fixture must really contain two pages")
+        XCTAssertThrowsError(try PhotoLoader.load(url: tiff, lensCorrection: false)) { error in
+            guard let atelierError = error as? AtelierError,
+                  case .imageRead(let message) = atelierError else {
+                XCTFail("Expected explicit imageRead for multi-page TIFF, got: \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("只处理单页静态照片"), message)
+        }
+
+        let apng = temp.appendingPathComponent("animated.png")
+        try XCTUnwrap(Data(base64Encoded: TestFiles.animatedPNGBase64)).write(to: apng)
+        let apngSource = try XCTUnwrap(CGImageSourceCreateWithURL(apng as CFURL, nil))
+        XCTAssertEqual(CGImageSourceGetCount(apngSource), 2, "fixture must really be a 2-frame APNG")
+        XCTAssertThrowsError(try PhotoLoader.load(url: apng, lensCorrection: false)) { error in
+            guard let atelierError = error as? AtelierError,
+                  case .imageRead(let message) = atelierError else {
+                XCTFail("Expected explicit imageRead for animated PNG, got: \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("只处理单页静态照片"), message)
+        }
     }
 }
 
@@ -240,8 +373,48 @@ enum TestFiles {
         }
         CGImageDestinationAddImage(destination, cgImage, [kCGImagePropertyOrientation as String: orientation] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
-            throw AtelierError.imageWrite("测试图片写入失败")
+            throw AtelierError.imageWrite("测试图片写入失败（\(type.identifier)）")
         }
+    }
+
+    /// 1x1 white WebP (44 bytes). ImageIO decodes WebP on macOS 13 but cannot
+    /// encode it, so decoding is covered by this embedded fixture.
+    static let webP1x1Base64 = "UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA="
+
+    /// Two-frame animated PNG (1x1 frames). ImageIO cannot write APNG through
+    /// CGImageDestination, so these verified PNG chunks are embedded verbatim.
+    static let animatedPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAABAAAAAQAAAAAAAAAAAAEACgAAWn8w0AAAAA1JREFUCB1j+K/G8B8ABXICJUhdPgIAAAAaZmNUTAAAAAEAAAABAAAAAQAAAAAAAAAAAAEACgAAwQzaBAAAABFmZEFUAAAAAggdY/ivxvAfAAVyAiVbUZB7AAAAAElFTkSuQmCC"
+
+    static func writeMultiPageTIFF(to url: URL, frameCount: Int) throws {
+        guard frameCount >= 2 else {
+            throw AtelierError.imageWrite("多页 TIFF 夹具至少需要 2 页")
+        }
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.tiff.identifier as CFString, frameCount, nil
+        ) else {
+            throw AtelierError.imageWrite("测试多页 TIFF 目标创建失败")
+        }
+        for index in 0..<frameCount {
+            guard let image = solidImage(width: 4 + index, height: 4 + index) else {
+                throw AtelierError.imageWrite("测试多页 TIFF 栅格化失败")
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+        }
+        guard CGImageDestinationFinalize(destination) else {
+            throw AtelierError.imageWrite("测试多页 TIFF 写入失败")
+        }
+    }
+
+    static func solidImage(width: Int, height: Int) -> CGImage? {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let bitmap = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                     bytesPerRow: 0, space: colorSpace,
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        bitmap.setFillColor(CGColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1))
+        bitmap.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return bitmap.makeImage()
     }
 
     static func renderedPixels(_ image: CIImage, context: CIContext) throws -> Data {

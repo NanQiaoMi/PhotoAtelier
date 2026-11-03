@@ -277,6 +277,7 @@ public final class PhotoEngine {
         if let harmony = settings.colorHarmony { try ColorHarmonyEngine.validate(harmony) }
         if let effects = settings.creativeEffects { try CreativeEffectsEngine.validate(effects) }
         if let adaptation = settings.adaptiveLUT { try LUTAdaptationEngine.validate(adaptation) }
+        if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         try require(settings.rotationDegrees, within: -45...45, named: "旋转")
         try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
         try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
@@ -404,6 +405,30 @@ public final class PhotoEngine {
             working = try applyPerspective(working,
                                            vertical: settings.verticalPerspective,
                                            horizontal: settings.horizontalPerspective)
+        }
+        try cancellation?.check()
+
+        // Pipeline order: global tone/geometry → portrait refinement → local
+        // masks/detail → LUT → output gamut. Portrait masks are measured on the
+        // globally adjusted image and the refined result becomes the reference
+        // for local-mask measurement, so local edits see the same skin the user
+        // sees. A neutral portrait setting skips this whole stage (pre-v10 path).
+        if let portrait = settings.portrait, !portrait.isNeutral {
+            let faces = PortraitSemanticMaskProvider.masks(in: working)
+            if faces.isEmpty {
+                let note = "未检测到可用人脸或本机 Vision 不可用，人像修复已跳过（原图保持不变）。"
+                report.portrait = PortraitRefinementReport(applied: false, faceCount: 0, note: note)
+                report.warnings.append(note)
+            } else {
+                let portraitResult = try PortraitRefinementEngine.apply(
+                    working, settings: portrait, faceMasks: faces,
+                    context: context, cancellation: cancellation)
+                working = portraitResult.image
+                report.portrait = portraitResult.report
+                if let note = portraitResult.report.note {
+                    report.warnings.append(note)
+                }
+            }
         }
         try cancellation?.check()
 

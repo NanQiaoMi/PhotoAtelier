@@ -96,7 +96,7 @@ final class LocalMaskTests: XCTestCase {
         XCTAssertEqual(MaskComponent().kind, .brush)
     }
 
-    func testLegacyRecipeVersionLoadsAndBothVersionsPassBatchValidation() throws {
+    func testLegacyRecipeVersionLoadsAndSupportedVersionsPassBatchValidation() throws {
         var settings = neutralSettings()
         settings.masks = [LocalMask(exposureEV: 0.2)]
         let data = try JSONEncoder().encode(Recipe(adjustments: settings))
@@ -116,6 +116,7 @@ final class LocalMaskTests: XCTestCase {
         let input = root.appendingPathComponent("input")
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        // Recipes v1-v9 keep their legacy mask defaults and stay batch-runnable.
         for version in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
             var recipe = legacy; recipe.version = version
             let summary = try BatchProcessor().run(items: [], inputRoot: input,
@@ -123,7 +124,15 @@ final class LocalMaskTests: XCTestCase {
                 lut: nil, cancellation: CancellationToken(), onEvent: { _ in })
             XCTAssertNotNil(summary.manifestURL)
         }
-        var future = legacy; future.version = 10
+        // Version 10 is the current supported version (portrait/export extensions
+        // are opt-in fields, so a v10 recipe without them is still valid).
+        var current = legacy; current.version = 10
+        let currentSummary = try BatchProcessor().run(items: [], inputRoot: input,
+            outputRoot: root.appendingPathComponent("output-10"), recipe: current,
+            lut: nil, cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertNotNil(currentSummary.manifestURL)
+        // An unknown future version is rejected before any output directory exists.
+        var future = legacy; future.version = 11
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))

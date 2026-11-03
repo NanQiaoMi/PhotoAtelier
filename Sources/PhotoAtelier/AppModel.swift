@@ -48,6 +48,19 @@ enum LocalMaskPreset: String, CaseIterable {
     }
 }
 
+/// UI-facing result of the background face detection used by the portrait tab.
+/// Detection is explicit about unusable results instead of silently disabling
+/// controls: the panel shows the summary and keeps the sliders disabled.
+struct PortraitFaceStatus: Equatable {
+    var isDetecting = false
+    var hasCompleted = false
+    var photoID: String?
+    var detectedFaceCount = 0
+    var maximumConfidence = 0.0
+    var hasUsableSkinMask = false
+    var summary = "切到“人像”页签会自动检测人脸。"
+}
+
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     @Published var inputRoot: URL?
@@ -55,7 +68,10 @@ final class AppModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
     @Published var selectedID: String?
     @Published var adjustments = AdjustmentSettings() {
-        didSet { refreshNativeInspection() }
+        didSet {
+            refreshNativeInspection()
+            recordUndoAdjustmentChange(from: oldValue)
+        }
     }
     @Published var exportSettings = ExportSettings() {
         didSet { if oldValue.colorSpace != exportSettings.colorSpace { refreshNativeInspection() } }
@@ -72,8 +88,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var styleReference: CIImage?
     let stylePreviews: StylePreviewController
     @Published var selectedLUT = "none" {
-        didSet { refreshNativeInspection() }
+        didSet {
+            refreshNativeInspection()
+            recordUndoLookChange(previousLUT: oldValue)
+        }
     }
+    /// Undo/redo availability for the menu; the snapshot stack stays private.
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
     @Published var showNativeInspection = false
     @Published private(set) var nativeInspectionRegion = NativeInspectionRegion()
     let nativeInspection: NativeInspectionController
@@ -91,6 +113,9 @@ final class AppModel: ObservableObject {
     @Published var status = "选择一个照片文件夹，开始你的调色工作。"
     @Published var errorMessage: String?
     @Published var batchMessages: [String] = []
+    /// Per-item failures from the most recent open/drop import. Empty means the
+    /// whole selection was accepted; entries are shown one by one, never hidden.
+    @Published private(set) var importIssues: [String] = []
     @Published var selectedMask: UUID?
     @Published var drawingMask = false
     @Published var maskKind: MaskKind = .radial
@@ -113,6 +138,8 @@ final class AppModel: ObservableObject {
     @Published var proposalPreviews: [String: NSImage] = [:]
     @Published private(set) var automaticRecipe: AutomaticBatchRecipe?
     @Published private(set) var sceneIntent: PhotoSceneIntent = .automatic
+    /// Background face-detection state for the portrait inspector tab.
+    @Published private(set) var portraitFaceStatus = PortraitFaceStatus()
     // Full-source decode/inspection/export share one serial resource queue.
     // A cancelled synchronous RAW stage must finish before the next decode.
     private let previewQueue = DispatchQueue(label: "atelier.photo-processing", qos: .userInitiated)
@@ -123,6 +150,12 @@ final class AppModel: ObservableObject {
     private var analysisSourceKey: String?
     private var analysisGeneration = UUID()
     private var analysisBaseline = AdjustmentSettings()
+    /// Parameter snapshots only: bounded, cheap to restore, never pixels.
+    private var undoHistory = UndoHistory()
+    /// Set while the model itself changes editing state (undo/redo, per-photo
+    /// automatic resolution, multi-property commands) so those writes never
+    /// enter the user's undo history.
+    private var undoSuppressed = false
     private var analysisIntent: PhotoSceneIntent = .automatic
     private var analysisImage: CIImage?
     private var proposalSettings: AdjustmentSettings?
@@ -134,6 +167,7 @@ final class AppModel: ObservableObject {
     private var batchToken: CancellationToken?
     private var previewGeneration = UUID()
     private var scanGeneration = UUID()
+    private var portraitDetectionGeneration = UUID()
     private var thumbnailPending = Set<String>()
     private let engine = PhotoEngine()
     /// Accessed only on previewQueue; retains one bounded preview, never the full RAW graph.
@@ -182,10 +216,14 @@ final class AppModel: ObservableObject {
     }
     private var maskComponentCount: Int { adjustments.masks.reduce(0) { $0 + $1.components.count } }
     var recipe: Recipe {
-        Recipe(adjustments: adjustments, export: exportSettings,
-               lutPath: selectedOption?.path,
-               lutIdentifier: selectedLUT == "none" || selectedOption?.path != nil ? nil : selectedLUT,
-               automatic: automaticRecipe)
+        var recipe = Recipe(adjustments: adjustments, export: exportSettings,
+                            lutPath: selectedOption?.path,
+                            lutIdentifier: selectedLUT == "none" || selectedOption?.path != nil ? nil : selectedLUT,
+                            automatic: automaticRecipe)
+        // Non-neutral portrait refinement is a version-10 feature; saving it as
+        // v9 would be rejected by validateVersion() on load (silent downgrade ban).
+        if !(adjustments.portrait?.isNeutral ?? true) { recipe.version = 10 }
+        return recipe
     }
     var progress: Double { photos.isEmpty ? 0 : Double(processed) / Double(photos.count) }
 
@@ -229,33 +267,167 @@ final class AppModel: ObservableObject {
 
     func chooseInput() {
         let panel = NSOpenPanel()
-        panel.title = "选择照片文件夹"
-        panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.prompt = "打开文件夹"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        loadFolder(url)
+        panel.title = "打开照片或文件夹"
+        panel.canChooseDirectories = true; panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "导入"
+        // No allowedContentTypes filter on purpose: some RAW/AVIF extensions map to
+        // dynamic UTIs on macOS 13, and a filter would hide files the decoder can
+        // actually read. Unsupported picks are reported one by one instead.
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        importSelection(panel.urls)
     }
 
     func loadFolder(_ url: URL) {
         guard !batchRunning else { return }
+        prepareLibraryTransition()
+        inputRoot = url
+        photos = []; selectedID = nil; beforeImage = nil; afterImage = nil; thumbnails = [:]
+        reloadFolder()
+    }
+
+    /// Clears per-photo state before the library root changes. Extracted from
+    /// `loadFolder` so a multi-select import can replace the library without a full
+    /// folder rescan; the reset sequence itself is unchanged.
+    private func prepareLibraryTransition() {
+        // A different library starts a new editing session: snapshots captured
+        // for the previous photos must not be undone onto the new selection.
+        resetUndoHistory()
+        // Import issues belong to the previous selection; never leave a stale
+        // "N items were not imported" hint on the new library.
+        importIssues = []
         closeNativeInspection()
         nativeInspectionRegion = .init()
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
+        invalidatePortraitDetection()
         pendingPreview?.cancel(); previewToken?.cancel(); previewGeneration = UUID()
         previewBusy = false; previewReport = .init(); histogram = Array(repeating: 0, count: 64)
         invalidateAnalysis()
-        inputRoot = url
-        photos = []; selectedID = nil; beforeImage = nil; afterImage = nil; thumbnails = [:]
-        reloadFolder()
+    }
+
+    /// Imports explicitly opened or dropped files and folders off the main thread.
+    /// Folders honor the recursive setting; files are validated by
+    /// `PhotoSelection.resolve`. An import inside the already-open folder extends
+    /// the library with de-duplication (a second import), anything else replaces
+    /// the library root. Rejected inputs are collected per item and never abort the
+    /// accepted photos. The scan generation token keeps repeated imports ordered.
+    func importSelection(_ urls: [URL], extraIssues: [String] = []) {
+        guard !batchRunning, !urls.isEmpty else {
+            if !extraIssues.isEmpty { reportImportFailure(extraIssues.joined(separator: "\n")) }
+            return
+        }
+        let inputs = urls.map { $0.standardizedFileURL }
+        let generation = UUID(); scanGeneration = generation
+        let carriedIssues = extraIssues
+        scanning = true; importIssues = carriedIssues
+        status = "正在导入所选项目…"
+        let recursive = exportSettings.recursive
+        let currentRoot = inputRoot
+        let existing = photos
+        scanQueue.async { [weak self] in
+            guard let self = self else { return }
+            var directoryURLs: [URL] = []
+            var fileURLs: [URL] = []
+            var issues: [String] = []
+            for url in inputs {
+                guard url.isFileURL else {
+                    issues.append("\(url.absoluteString)：只支持本地文件")
+                    continue
+                }
+                do {
+                    let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                    if values.isSymbolicLink == true {
+                        issues.append("\(url.lastPathComponent)：不跟随符号链接，已跳过")
+                    } else if values.isDirectory == true {
+                        directoryURLs.append(url)
+                    } else {
+                        fileURLs.append(url)
+                    }
+                } catch {
+                    issues.append("\(url.lastPathComponent)：无法读取文件属性：\(error.localizedDescription)")
+                }
+            }
+
+            var scannedURLs: [URL] = []
+            for directory in directoryURLs {
+                do {
+                    scannedURLs += try PhotoLoader.scan(folder: directory, recursive: recursive).map(\.url)
+                } catch {
+                    issues.append("\(directory.lastPathComponent)：\(error.localizedDescription)")
+                }
+            }
+            let resolved = PhotoSelection.resolve(fileURLs: fileURLs)
+            issues += resolved.issues.map { "\($0.url.lastPathComponent)：\($0.message)" }
+            let importRoot = PhotoSelection.commonRoot(
+                of: directoryURLs + resolved.items.map { $0.url.deletingLastPathComponent() }
+            )
+
+            DispatchQueue.main.async {
+                guard self.scanGeneration == generation else { return }
+                self.scanning = false
+                let allIssues = carriedIssues + issues
+                self.importIssues = allIssues
+                defer {
+                    if !allIssues.isEmpty {
+                        self.errorMessage = "以下 \(allIssues.count) 个项目未导入：\n" + allIssues.joined(separator: "\n")
+                    }
+                }
+                guard let root = importRoot else {
+                    self.status = allIssues.isEmpty ? "没有可导入的照片。" : "没有可导入的照片，请查看未导入原因。"
+                    return
+                }
+                let importedURLs = scannedURLs + resolved.items.map(\.url)
+                if PhotoSelection.shouldAppend(incomingRoot: root, currentRoot: currentRoot) {
+                    // Re-base to the open library root, not the dropped subfolder, so
+                    // `relativePath` (used for batch output naming) stays stable.
+                    let libraryRoot = currentRoot ?? root
+                    let incoming = PhotoSelection.items(fileURLs: importedURLs, root: libraryRoot)
+                    let merged = PhotoSelection.merge(existing: existing, incoming: incoming)
+                    let added = merged.count - existing.count
+                    self.photos = merged
+                    self.status = added > 0
+                        ? "已追加 \(added) 张照片 · 共 \(merged.count) 张 · 原图保持不变"
+                        : "没有新增照片；重复或不支持的项目已记录。"
+                    if self.selectedID == nil, let first = merged.first { self.selectPhoto(first) }
+                } else {
+                    let incoming = PhotoSelection.items(fileURLs: importedURLs, root: root)
+                    self.prepareLibraryTransition()
+                    self.inputRoot = root
+                    self.photos = incoming
+                    self.selectedID = incoming.first?.id
+                    self.beforeImage = nil; self.afterImage = nil; self.thumbnails = [:]
+                    self.status = incoming.isEmpty
+                        ? "所选项目中没有被支持的照片。"
+                        : "已载入 \(incoming.count) 张照片 · \(root.lastPathComponent) · 原图保持不变"
+                    self.requestPreview(immediate: true)
+                }
+            }
+        }
+    }
+
+    /// Re-opens the per-item import report in the alert; used by the library panel.
+    func reviewImportIssues() {
+        guard !importIssues.isEmpty else { return }
+        errorMessage = "以下 \(importIssues.count) 个项目未导入：\n" + importIssues.joined(separator: "\n")
+    }
+
+    /// Records a drop that never produced a usable file URL (for example a text
+    /// selection or an unreadable provider) so drag-and-drop failures stay visible.
+    func reportImportFailure(_ message: String) {
+        importIssues.append(message)
+        errorMessage = "以下 \(importIssues.count) 个项目未导入：\n" + importIssues.joined(separator: "\n")
     }
 
     func reloadFolder() {
         guard let root = inputRoot, !batchRunning else { return }
         nativeInspection.cancel()
         regionalSuggestions = []
+        // A rescan replaces the selection, so previous per-item import failures
+        // are no longer relevant (W1 review nit F2).
+        importIssues = []
         let generation = UUID(); scanGeneration = generation
         let recursive = exportSettings.recursive
         scanning = true; status = "正在扫描照片…"
@@ -349,12 +521,14 @@ final class AppModel: ObservableObject {
 
     func selectLUT(_ id: String) {
         guard !batchRunning, lutOptions.contains(where: { $0.id == id }) else { return }
-        selectedLUT = id
-        if selectedOption?.path == nil { adjustments.lutColorSpace = .sRGB }
-        else { adjustments.lutColorSpace = LUTColorSpace(rawValue: rememberedSpaces[id] ?? "") ?? .sRGB }
-        if selectedOption?.provenance != nil, adjustments.adaptiveLUT == nil {
-            adjustments.adaptiveLUT = .init()
-            status = "已启用逐图胶片适配；LUT 强度作为上限，每张照片分别评估。"
+        performUndoableEdit("look.lutIdentifier") {
+            selectedLUT = id
+            if selectedOption?.path == nil { adjustments.lutColorSpace = .sRGB }
+            else { adjustments.lutColorSpace = LUTColorSpace(rawValue: rememberedSpaces[id] ?? "") ?? .sRGB }
+            if selectedOption?.provenance != nil, adjustments.adaptiveLUT == nil {
+                adjustments.adaptiveLUT = .init()
+                status = "已启用逐图胶片适配；LUT 强度作为上限，每张照片分别评估。"
+            }
         }
     }
 
@@ -377,6 +551,7 @@ final class AppModel: ObservableObject {
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
+        invalidatePortraitDetection()
         selectedID = photo.id
         beforeImage = nil; afterImage = nil
         regionalSuggestions = []
@@ -584,16 +759,18 @@ final class AppModel: ObservableObject {
 
     func setSceneIntent(_ intent: PhotoSceneIntent) {
         guard !batchRunning, sceneIntent != intent else { return }
-        sceneIntent = intent
-        if var automatic = automaticRecipe {
-            if intent == .preserveStyle {
-                // Freeze the currently visible global result instead of
-                // removing a previously accepted automatic correction.
-                automatic.baseline = adjustments
-                automatic.referenceSettings = adjustments
+        performUndoableEdit("analysis.sceneIntent") {
+            sceneIntent = intent
+            if var automatic = automaticRecipe {
+                if intent == .preserveStyle {
+                    // Freeze the currently visible global result instead of
+                    // removing a previously accepted automatic correction.
+                    automatic.baseline = adjustments
+                    automatic.referenceSettings = adjustments
+                }
+                automatic.sceneIntent = intent
+                automaticRecipe = automatic
             }
-            automatic.sceneIntent = intent
-            automaticRecipe = automatic
         }
         invalidateAnalysis()
         requestPreview(immediate: true)
@@ -632,7 +809,10 @@ final class AppModel: ObservableObject {
                     if var automatic = self.automaticRecipe,
                        let reference = analysis.proposals.first(where: { $0.id == automatic.styleID }) {
                         do {
-                            self.adjustments = try automatic.resolve(analysis: analysis, current: self.adjustments)
+                            let resolved = try automatic.resolve(analysis: analysis, current: self.adjustments)
+                            self.undoSuppressed = true
+                            self.adjustments = resolved
+                            self.undoSuppressed = false
                             automatic.referenceSettings = reference.settings
                             self.automaticRecipe = automatic
                             self.requestPreview(immediate: true)
@@ -690,16 +870,18 @@ final class AppModel: ObservableObject {
 
     func applyProposal(_ id: String) {
         guard !batchRunning, let proposal = analysis?.proposals.first(where: { $0.id == id }) else { return }
-        automaticRecipe = AutomaticBatchRecipe(styleID: id, baseline: analysisBaseline,
-                                               referenceSettings: proposal.settings, sceneIntent: analysisIntent)
-        adjustments = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: adjustments)
-        cancelMaskInteraction()
+        performUndoableEdit("analysis.proposal") {
+            automaticRecipe = AutomaticBatchRecipe(styleID: id, baseline: analysisBaseline,
+                                                   referenceSettings: proposal.settings, sceneIntent: analysisIntent)
+            adjustments = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: adjustments)
+            cancelMaskInteraction()
+        }
         status = "已采用“\(proposal.title)”。可继续微调；批量导出会逐张分析并叠加这些微调。"
         requestPreview(immediate: true)
     }
 
     func useManualParameters() {
-        automaticRecipe = nil
+        performUndoableEdit("analysis.manualMode") { automaticRecipe = nil }
         status = "已改为统一手动配方，保留当前参数。"
     }
 
@@ -834,12 +1016,113 @@ final class AppModel: ObservableObject {
             lutID: selectedLUT, region: nativeInspectionRegion, immediate: immediate, force: force)
     }
 
-    func resetAdjustments() {
-        sceneIntent = .automatic
-        regionalSuggestions = []
-        automaticRecipe = nil; invalidateAnalysis()
+    // MARK: - Undo / redo
+
+    private func undoSnapshot(adjustments: AdjustmentSettings, lutID: String,
+                              automaticRecipe: AutomaticBatchRecipe?,
+                              sceneIntent: PhotoSceneIntent) -> UndoSnapshot {
+        UndoSnapshot(adjustments: adjustments, lutID: lutID,
+                     lutColorSpace: adjustments.lutColorSpace,
+                     automaticRecipe: automaticRecipe, sceneIntent: sceneIntent)
+    }
+
+    private var currentUndoSnapshot: UndoSnapshot {
+        undoSnapshot(adjustments: adjustments, lutID: selectedLUT,
+                     automaticRecipe: automaticRecipe, sceneIntent: sceneIntent)
+    }
+
+    /// Seeds the pre-edit state so the first ⌘Z returns to it.
+    private func seedUndoBaseline(_ snapshot: UndoSnapshot, at date: Date) {
+        guard undoHistory.isEmpty else { return }
+        undoHistory.push(snapshot, key: UndoHistory.initialKey, at: date)
+    }
+
+    private func recordUndoAdjustmentChange(from previous: AdjustmentSettings) {
+        guard !undoSuppressed else { return }
+        guard let key = adjustments.undoEditKey(comparedTo: previous) else { return }
+        let now = Date()
+        seedUndoBaseline(undoSnapshot(adjustments: previous, lutID: selectedLUT,
+                                      automaticRecipe: automaticRecipe, sceneIntent: sceneIntent), at: now)
+        undoHistory.push(currentUndoSnapshot, key: key, at: now)
+        refreshUndoAvailability()
+    }
+
+    private func recordUndoLookChange(previousLUT: String) {
+        guard !undoSuppressed, previousLUT != selectedLUT else { return }
+        let now = Date()
+        seedUndoBaseline(undoSnapshot(adjustments: adjustments, lutID: previousLUT,
+                                      automaticRecipe: automaticRecipe, sceneIntent: sceneIntent), at: now)
+        undoHistory.push(currentUndoSnapshot, key: "look.lutIdentifier", at: now)
+        refreshUndoAvailability()
+    }
+
+    /// Runs a command that touches several properties as one undo step.
+    private func performUndoableEdit(_ key: String, _ body: () -> Void) {
+        guard !undoSuppressed else { body(); return }
+        let previous = currentUndoSnapshot
+        let now = Date()
+        undoSuppressed = true
+        body()
+        undoSuppressed = false
+        let after = currentUndoSnapshot
+        guard after != previous else { return }
+        seedUndoBaseline(previous, at: now)
+        undoHistory.push(after, key: key, at: now)
+        refreshUndoAvailability()
+    }
+
+    private func refreshUndoAvailability() {
+        canUndo = undoHistory.canUndo
+        canRedo = undoHistory.canRedo
+    }
+
+    private func resetUndoHistory() {
+        undoHistory.reset()
+        refreshUndoAvailability()
+    }
+
+    /// Restores one snapshot as a whole. It must not record a new step and must not
+    /// leave an automatic baseline from a different state in place, so analysis is
+    /// re-run instead of showing proposals measured against the old baseline.
+    private func restoreUndoSnapshot(_ snapshot: UndoSnapshot) {
+        undoSuppressed = true
+        if adjustments != snapshot.adjustments { adjustments = snapshot.adjustments }
+        let lutID = lutOptions.contains { $0.id == snapshot.lutID } ? snapshot.lutID : "none"
+        if selectedLUT != lutID { selectedLUT = lutID }
+        if automaticRecipe != snapshot.automaticRecipe { automaticRecipe = snapshot.automaticRecipe }
+        if sceneIntent != snapshot.sceneIntent { sceneIntent = snapshot.sceneIntent }
+        undoSuppressed = false
+        if let selected = selectedMask, !adjustments.masks.contains(where: { $0.id == selected }) {
+            selectedMask = adjustments.masks.last?.id
+        }
         cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
-        adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false
+        invalidateAnalysis()
+        refreshUndoAvailability()
+        requestPreview(immediate: true)
+    }
+
+    func undo() {
+        guard !batchRunning else { return }
+        guard let snapshot = undoHistory.undo() else { return }
+        restoreUndoSnapshot(snapshot)
+        status = "已撤销上一步编辑。"
+    }
+
+    func redo() {
+        guard !batchRunning else { return }
+        guard let snapshot = undoHistory.redo() else { return }
+        restoreUndoSnapshot(snapshot)
+        status = "已重做上一步编辑。"
+    }
+
+    func resetAdjustments() {
+        performUndoableEdit("settings.reset") {
+            sceneIntent = .automatic
+            regionalSuggestions = []
+            automaticRecipe = nil; invalidateAnalysis()
+            cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
+            adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false
+        }
         requestPreview(immediate: true)
     }
 
@@ -1087,6 +1370,100 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Portrait refinement
+
+    /// Requests face detection on a background queue. The panel stays disabled
+    /// until a useful skin matte exists, and the summary states why.
+    func requestPortraitDetection(force: Bool = true) {
+        guard let photo = selectedPhoto, !batchRunning else {
+            invalidatePortraitDetection()
+            return
+        }
+        if !force, portraitFaceStatus.isDetecting == false,
+           portraitFaceStatus.hasCompleted, portraitFaceStatus.photoID == photo.id {
+            return
+        }
+        let generation = UUID(); portraitDetectionGeneration = generation
+        portraitFaceStatus = PortraitFaceStatus(isDetecting: true, photoID: photo.id,
+            summary: "正在检测人脸与皮肤蒙版…")
+        analysisQueue.async { [weak self] in
+            let result = Result { () throws -> (faces: [FaceLandmarkSet], usableSkin: Bool) in
+                let loaded = try PhotoLoader.load(url: photo.url, lensCorrection: false)
+                let faces = FaceSemanticAnalyzer.detect(in: loaded.image, maxFaces: 8)
+                var usableSkin = false
+                for landmarks in faces.prefix(4) {
+                    let masks = FaceSemanticAnalyzer.masks(image: loaded.image,
+                                                           faceBounds: landmarks.boundingBox,
+                                                           landmarks: landmarks)
+                    if masks.skin != nil { usableSkin = true; break }
+                }
+                return (faces, usableSkin)
+            }
+            DispatchQueue.main.async {
+                guard let self = self, self.portraitDetectionGeneration == generation else { return }
+                switch result {
+                case .success(let detection):
+                    let confidence = detection.faces.map(\.confidence).max() ?? 0
+                    if detection.faces.isEmpty {
+                        self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
+                            photoID: photo.id, summary:
+                            "未检测到可用人脸：人像修复依赖本机 Vision 的人脸地标；侧脸、遮挡、小脸可能漏检。未检测到人脸时不应用人像调整。")
+                    } else if !detection.usableSkin {
+                        self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
+                            photoID: photo.id, detectedFaceCount: detection.faces.count,
+                            maximumConfidence: confidence,
+                            summary: "检测到 \(detection.faces.count) 张人脸，但未能生成可用的皮肤蒙版；人像修正在本图不可用。")
+                    } else {
+                        self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
+                            photoID: photo.id, detectedFaceCount: detection.faces.count,
+                            maximumConfidence: confidence, hasUsableSkinMask: true,
+                            summary: "检测到 \(detection.faces.count) 张人脸 · 最高置信度 \(Int((confidence * 100).rounded()))%；人像调整只在这张照片的预览中应用。")
+                    }
+                case .failure(let error):
+                    self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true, photoID: photo.id,
+                        summary: "人脸检测未完成：\(error.localizedDescription)；人像调整未启用。")
+                }
+            }
+        }
+    }
+
+    func invalidatePortraitDetection() {
+        portraitDetectionGeneration = UUID()
+        portraitFaceStatus = PortraitFaceStatus()
+    }
+
+    /// Applies one portrait-field edit. Neutral settings collapse back to `nil`
+    /// so old recipes keep the exact pre-v10 decode/encode shape.
+    func updatePortraitSettings(_ mutate: (inout PortraitRefinementSettings) -> Void) {
+        var settings = adjustments.portrait ?? PortraitRefinementSettings()
+        mutate(&settings)
+        adjustments.portrait = settings.isNeutral ? nil : settings
+    }
+
+    func setPortraitToneReference(_ reference: PortraitToneReference) {
+        var settings = adjustments.portrait ?? PortraitRefinementSettings()
+        settings.skinToneReference = reference
+        if settings.isNeutral { adjustments.portrait = nil } else { adjustments.portrait = settings }
+    }
+
+    /// Conservative "light retouch" starting point. Requires a usable face so the
+    /// button cannot silently do nothing on a frame without landmarks.
+    func applyLightPortraitStart() {
+        guard portraitFaceStatus.hasUsableSkinMask, !batchRunning else {
+            status = "未检测到可用人脸或皮肤蒙版，无法应用人像精修起点。"
+            return
+        }
+        adjustments.portrait = PortraitRefinementSettings(
+            blemishStrength: 0.25, dodgeBurn: 0.30, structure: 0.15, texture: 0.15,
+            gloss: 0.15, teethWhiten: 0.20, eyeBrighten: 0.20, skinToneUnify: 0.20)
+        status = "已应用轻度人像精修起点；请逐张预览确认，算法不保证真实照片效果。"
+    }
+
+    func resetPortraitSettings() {
+        adjustments.portrait = nil
+        status = "已归零人像调整。"
+    }
+
     func saveRecipe() {
         guard lutContractReady else { status = "先确认自定义 LUT 空间，再保存逐图适配配方。"; return }
         let panel = NSSavePanel(); panel.title = "保存调色配方"
@@ -1122,12 +1499,15 @@ final class AppModel: ObservableObject {
                 guard lutOptions.contains(where: { $0.id == id }) else { throw AtelierError.invalidLUT("配方引用的内置 LUT 不存在") }
                 target = id
             }
-            adjustments = saved.adjustments; exportSettings = saved.export; selectedLUT = target
-            if saved.lutPath != nil { rememberLUTSpace() }
-            automaticRecipe = saved.automatic; invalidateAnalysis()
-            sceneIntent = saved.automatic?.sceneIntent ?? .automatic
-            selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
-            status = "配方已载入。"; reloadFolder(); requestPreview(immediate: true)
+            performUndoableEdit("recipe.load") {
+                adjustments = saved.adjustments; exportSettings = saved.export; selectedLUT = target
+                if saved.lutPath != nil { rememberLUTSpace() }
+                automaticRecipe = saved.automatic; invalidateAnalysis()
+                sceneIntent = saved.automatic?.sceneIntent ?? .automatic
+                selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
+                status = "配方已载入。"
+            }
+            reloadFolder(); requestPreview(immediate: true)
         } catch { present(error) }
     }
 

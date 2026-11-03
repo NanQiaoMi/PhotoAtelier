@@ -51,8 +51,16 @@ struct PhotoAtelierApp: App {
         .defaultSize(width: 1400, height: 900)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销") { model.undo() }
+                    .keyboardShortcut("z", modifiers: [.command])
+                    .disabled(!model.canUndo || model.batchRunning)
+                Button("重做") { model.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!model.canRedo || model.batchRunning)
+            }
             CommandGroup(replacing: .newItem) {
-                Button("打开照片文件夹…") { model.chooseInput() }.keyboardShortcut("o")
+                Button("打开照片…") { model.chooseInput() }.keyboardShortcut("o")
                     .disabled(model.batchRunning)
                 Button("导入 LUT…") { model.importLUT() }.keyboardShortcut("l", modifiers: [.command, .shift])
                     .disabled(model.batchRunning || model.lutLibraryBusy)

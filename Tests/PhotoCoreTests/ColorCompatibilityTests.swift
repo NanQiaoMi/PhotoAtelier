@@ -285,14 +285,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughNineAndRejectsTen() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughTenAndRejectsEleven() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...9 {
+        for version in 1...10 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,13 +305,54 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 10
-        let rejectedOutput = root.appendingPathComponent("output-10", isDirectory: true)
+        futureRecipe.version = 11
+        let rejectedOutput = root.appendingPathComponent("output-11", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
         XCTAssertFalse(FileManager.default.fileExists(atPath: rejectedOutput.path),
                        "未知版本应在创建输出目录前被拒绝")
+    }
+
+    func testPortraitRecipeRequiresV10RoundTripsAndLegacyPayloadsKeepOldPath() throws {
+        var settings = AdjustmentSettings()
+        settings.portrait = PortraitRefinementSettings(blemishStrength: 0.5, teethWhiten: 0.3,
+                                                       eyeBrighten: 0.2, skinToneUnify: 0.4,
+                                                       skinToneReference: .brightest)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 9
+        XCTAssertThrowsError(try recipe.validateVersion(),
+                             "v9 配方不得静默接受非中性人像字段")
+        recipe.version = 10
+        XCTAssertNoThrow(try recipe.validateVersion())
+
+        let encoded = try JSONEncoder().encode(recipe)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: encoded)
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.adjustments.portrait, settings.portrait)
+        XCTAssertEqual(decoded.version, 10)
+
+        // Old recipes carry no portrait key: they must decode as nil and keep the
+        // pre-v10 pixel path (identical to a neutral current recipe).
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var adjustments = try XCTUnwrap(object["adjustments"] as? [String: Any])
+        adjustments.removeValue(forKey: "portrait")
+        object["adjustments"] = adjustments
+        object["version"] = 9
+        let legacy = try JSONDecoder().decode(Recipe.self,
+                                              from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.adjustments.portrait)
+        XCTAssertNoThrow(try legacy.validateVersion())
+
+        let extent = CGRect(x: 0, y: 0, width: 4, height: 4)
+        let source = solid([0.32, 0.20, 0.14], extent: extent)
+        let legacyImage = try PhotoEngine().process(source, settings: legacy.adjustments, lut: nil).image
+        let neutralImage = try PhotoEngine().process(source, settings: AdjustmentSettings(), lut: nil).image
+        let legacyPixel = try pixel(legacyImage, x: 1, y: 1)
+        let neutralPixel = try pixel(neutralImage, x: 1, y: 1)
+        for channel in 0..<4 {
+            XCTAssertEqual(legacyPixel[channel], neutralPixel[channel], accuracy: 1e-9)
+        }
     }
 
     func testLUT3DInputRangeMapsToScalarDomain() throws {

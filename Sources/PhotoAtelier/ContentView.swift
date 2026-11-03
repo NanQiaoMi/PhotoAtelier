@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotoCore
+import UniformTypeIdentifiers
 
 enum AtelierPalette {
     static let background = Color(red: 0.062, green: 0.075, blue: 0.09)
@@ -17,6 +18,7 @@ struct ContentView: View {
     @State private var split = 0.5
     @State private var showLog = false
     @State private var showLensPicker = false
+    @State private var dropTargeted = false
     init(model: AppModel, initialTab: Int = 0, initialCompare: Bool = true) {
         self.model = model
         self._inspectorTab = State(initialValue: initialTab)
@@ -44,6 +46,18 @@ struct ContentView: View {
         }
         .background(AtelierPalette.background)
         .tint(AtelierPalette.accent)
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $dropTargeted) { providers in
+            importDroppedProviders(providers)
+            return true
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(AtelierPalette.accent, style: StrokeStyle(lineWidth: 2, dash: [9, 6]))
+                    .padding(10)
+                    .allowsHitTesting(false)
+            }
+        }
         .onChange(of: model.adjustments) { _ in model.requestPreview() }
         .onChange(of: model.selectedLUT) { _ in model.requestPreview() }
         .onChange(of: model.exportSettings.recursive) { _ in model.reloadFolder() }
@@ -60,6 +74,10 @@ struct ContentView: View {
         }
         .onChange(of: inspectorTab) { tab in
             if tab != 2 { model.cancelMaskInteraction(); model.showMaskCoverage = false }
+            if tab == 3 { model.requestPortraitDetection(force: false) }
+        }
+        .onChange(of: model.selectedID) { _ in
+            if inspectorTab == 3 { model.requestPortraitDetection(force: false) }
         }
         .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("知道了", role: .cancel) { model.errorMessage = nil }
@@ -90,11 +108,12 @@ struct ContentView: View {
             toolButton("风格库", icon: "square.grid.2x2") { model.showStyleBrowser = true }
             toolButton("导入 LUT", icon: "plus") { model.importLUT() }.disabled(model.batchRunning || model.lutLibraryBusy)
             Button(action: { model.chooseInput() }) {
-                Label("打开文件夹", systemImage: "folder").font(.system(size: 12, weight: .semibold))
+                Label("打开照片", systemImage: "photo.on.rectangle").font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 15).padding(.vertical, 10)
                     .foregroundColor(AtelierPalette.background).background(AtelierPalette.accent)
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }.buttonStyle(.plain).disabled(model.batchRunning)
+                .help("打开单张/多张照片或文件夹；也可直接拖放到窗口")
         }
         .padding(.horizontal, 24).padding(.top, 17).padding(.bottom, 17)
         .background(AtelierPalette.panel)
@@ -116,6 +135,13 @@ struct ContentView: View {
                 Text("尚未选择文件夹").font(.system(size: 11)).foregroundColor(AtelierPalette.muted)
                     .padding(.horizontal, 18).padding(.top, 17)
             }
+            if !model.importIssues.isEmpty {
+                Button { model.reviewImportIssues() } label: {
+                    Label("\(model.importIssues.count) 个项目未导入", systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 10)).foregroundColor(.orange.opacity(0.9))
+                }.buttonStyle(.plain).padding(.horizontal, 18).padding(.top, 9)
+                    .help(model.importIssues.joined(separator: "\n"))
+            }
             Toggle("包含子文件夹", isOn: $model.exportSettings.recursive)
                 .font(.system(size: 11)).toggleStyle(.checkbox).foregroundColor(AtelierPalette.muted)
                 .disabled(model.batchRunning).padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 18)
@@ -127,7 +153,7 @@ struct ContentView: View {
                     Image(systemName: "photo.stack").font(.system(size: 28, weight: .ultraLight))
                     Text("让照片在这里相遇")
                         .font(.system(size: 12))
-                    Text("JPEG · PNG · TIFF · RAW\n本机分析与非破坏性处理")
+                    Text("JPEG · PNG · TIFF · HEIC · WebP\nAVIF · RAW · 也可拖入照片或文件夹")
                         .font(.system(size: 10)).multilineTextAlignment(.center).lineSpacing(5)
                 }.foregroundColor(AtelierPalette.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -176,6 +202,16 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: .medium)).lineLimit(1)
             Spacer(minLength: 0)
             if model.previewBusy { ProgressView().controlSize(.mini) }
+            Button { model.undo() } label: {
+                Label("撤销", systemImage: "arrow.uturn.backward")
+                    .font(.system(size: 10))
+                    .foregroundColor(model.canUndo ? AtelierPalette.accent : AtelierPalette.muted)
+            }.buttonStyle(.plain).disabled(!model.canUndo || model.batchRunning).help("撤销 ⌘Z")
+            Button { model.redo() } label: {
+                Label("重做", systemImage: "arrow.uturn.forward")
+                    .font(.system(size: 10))
+                    .foregroundColor(model.canRedo ? AtelierPalette.accent : AtelierPalette.muted)
+            }.buttonStyle(.plain).disabled(!model.canRedo || model.batchRunning).help("重做 ⇧⌘Z")
             Button { model.openNativeInspection() } label: {
                 Label("原尺寸检查", systemImage: "viewfinder")
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
@@ -238,7 +274,8 @@ struct ContentView: View {
             }.font(.system(size: 8, design: .monospaced)).foregroundColor(AtelierPalette.muted)
                 .padding(.horizontal, 20).padding(.top, 5)
             Picker("调整分类", selection: $inspectorTab) {
-                Text("分析").tag(0); Text("基础").tag(1); Text("局部").tag(2); Text("导出").tag(3)
+                Text("分析").tag(0); Text("基础").tag(1); Text("局部").tag(2)
+                Text("人像").tag(3); Text("导出").tag(4)
             }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 17).padding(.vertical, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -248,6 +285,7 @@ struct ContentView: View {
                     }
                     else if inspectorTab == 1 { basicInspector }
                     else if inspectorTab == 2 { MaskInspector(model: model) }
+                    else if inspectorTab == 3 { PortraitRetouchPanel(model: model) }
                     else { exportInspector }
                 }.padding(.horizontal, 20).padding(.bottom, 24)
             }.disabled(model.batchRunning)
@@ -422,7 +460,7 @@ struct ContentView: View {
                             .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                     }
                     Spacer(minLength: 4)
-                    Button { inspectorTab = 3; model.startBatch() } label: {
+                    Button { inspectorTab = 4; model.startBatch() } label: {
                         HStack(spacing: 8) {
                             Text("批量导出"); Image(systemName: "arrow.up.right")
                         }.font(.system(size: 12, weight: .semibold)).padding(.horizontal, 19).padding(.vertical, 12)
@@ -477,6 +515,45 @@ struct ContentView: View {
     private func toolButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Label(title, systemImage: icon).font(.system(size: 11)).foregroundColor(.white.opacity(0.65)) }.buttonStyle(.plain)
     }
+
+    /// Resolves Finder drops (files and/or folders) into local file URLs. A drop
+    /// without any readable file URL is reported to the model instead of being
+    /// swallowed. Loading is asynchronous per provider; the model merges the
+    /// result once, so a multi-item drop never interleaves library transitions.
+    private func importDroppedProviders(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else { return }
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls: [URL] = []
+        var unreadable = 0
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                var url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let value = item as? URL {
+                    url = value
+                }
+                lock.lock()
+                if let resolved = url, resolved.isFileURL { urls.append(resolved) } else { unreadable += 1 }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            // Mixed drops must keep the per-provider failures inside the import
+            // result; reporting them first would be cleared by importSelection.
+            var issues: [String] = []
+            if unreadable > 0 { issues.append("\(unreadable) 个拖放项目无法读取为本地文件") }
+            if !urls.isEmpty {
+                model.importSelection(urls, extraIssues: issues)
+            } else if !issues.isEmpty {
+                model.reportImportFailure(issues.joined(separator: "\n"))
+            }
+        }
+    }
+
     private func presetColors(_ index: Int) -> [Color] {
         let palettes: [[Color]] = [
             [.init(red: 0.36, green: 0.40, blue: 0.42), .init(red: 0.16, green: 0.20, blue: 0.23)],

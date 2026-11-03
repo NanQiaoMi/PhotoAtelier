@@ -149,4 +149,41 @@ final class BatchTests: XCTestCase {
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
     }
+
+    func testPortraitRecipeV10BatchRecordsNoFaceSkipInManifest() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("portrait-1.png"), width: 48, height: 32)
+
+        var settings = AdjustmentSettings()
+        settings.portrait = PortraitRefinementSettings(blemishStrength: 0.4, teethWhiten: 0.2)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 10
+        let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
+                                               inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        XCTAssertEqual(summary.failed, 0)
+
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(manifestRecipe["version"] as? Int, 10, "含有非中性人像字段的批量配方必须记录为 v10")
+        let manifestAdjustments = try XCTUnwrap(manifestRecipe["adjustments"] as? [String: Any])
+        let manifestPortrait = try XCTUnwrap(manifestAdjustments["portrait"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(manifestPortrait["blemishStrength"] as? Double), 0.4, accuracy: 1e-9)
+
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let report = try XCTUnwrap(entries.first?["report"] as? [String: Any])
+        let portraitReport = try XCTUnwrap(report["portrait"] as? [String: Any],
+                                           "无脸时也必须写人人像跳过状态，而不是省略")
+        XCTAssertEqual(portraitReport["applied"] as? Bool, false)
+        XCTAssertEqual(portraitReport["faceCount"] as? Int, 0)
+        let note = try XCTUnwrap(portraitReport["note"] as? String)
+        XCTAssertTrue(note.contains("人像修复已跳过"), "跳过原因必须可在清单中复核：\(note)")
+    }
 }
