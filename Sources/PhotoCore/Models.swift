@@ -255,6 +255,8 @@ public struct AdjustmentSettings: Codable, Equatable {
     public var gamutCompression: Double = 0.8
     /// Absent in v1/v2 recipes: keeps their original rendering until explicitly enabled.
     public var colorHarmony: ColorHarmonySettings? = .init()
+    /// Optional for pixel compatibility with recipes created before v8.
+    public var creativeEffects: CreativeEffectsSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -271,8 +273,8 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 7 adds measured local detail adaptation, noise and texture controls.
-    public var version = 7
+    /// Version 8 adds independently adjustable creative effects.
+    public var version = 8
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -287,7 +289,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...7).contains(version) else {
+        guard (1...8).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
@@ -300,6 +302,11 @@ public struct Recipe: Codable, Equatable {
         }
         let maskGroups = [adjustments.masks, automatic?.baseline.masks ?? [],
                           automatic?.referenceSettings.masks ?? []]
+        let effects = [adjustments.creativeEffects, automatic?.baseline.creativeEffects,
+                       automatic?.referenceSettings.creativeEffects]
+        guard version >= 8 || effects.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("辉光、暗角与颗粒需要配方版本 8，不能静默降级。")
+        }
         guard version >= 7 || maskGroups.joined().allSatisfy({
             $0.detailAdaptation == nil && ($0.detail?.noiseReduction ?? 0) == 0 && ($0.detail?.detailRecovery ?? 0) == 0
         }) else {

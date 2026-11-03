@@ -10,6 +10,9 @@ struct LUTOption: Identifiable {
     let detail: String
     let cube: LUTCube?
     let path: String?
+    var group: LUTPresetGroup? = nil
+    var recommendedIntensity: Double? = nil
+    var tags: [String] = []
 }
 
 enum MaskDrawMode: String, CaseIterable {
@@ -57,6 +60,16 @@ final class AppModel: ObservableObject {
         didSet { if oldValue.colorSpace != exportSettings.colorSpace { refreshNativeInspection() } }
     }
     @Published var lutOptions: [LUTOption] = []
+    @Published private(set) var lutLibraryBusy = false
+    @Published private(set) var lutImportCompleted = 0
+    @Published private(set) var lutImportTotal = 0
+    @Published private(set) var lutLibraryMessages: [String] = []
+    @Published var showStyleBrowser = false {
+        didSet { if !showStyleBrowser { stylePreviews.cancel() } }
+    }
+    /// Bounded global-adjustment reference; excludes masks, LUTs and effects.
+    @Published private(set) var styleReference: CIImage?
+    let stylePreviews: StylePreviewController
     @Published var selectedLUT = "none" {
         didSet { refreshNativeInspection() }
     }
@@ -104,6 +117,8 @@ final class AppModel: ObservableObject {
     private let previewQueue = DispatchQueue(label: "atelier.photo-processing", qos: .userInitiated)
     private let scanQueue = DispatchQueue(label: "atelier.scan", qos: .utility)
     private let analysisQueue = DispatchQueue(label: "atelier.analysis", qos: .userInitiated)
+    private let lutQueue = DispatchQueue(label: "atelier.lut-library", qos: .userInitiated)
+    private var lutImportToken: CancellationToken?
     private var analysisSourceKey: String?
     private var analysisGeneration = UUID()
     private var analysisBaseline = AdjustmentSettings()
@@ -130,7 +145,15 @@ final class AppModel: ObservableObject {
     private var cachedMaskReferencePhotoID: String?
     private var cachedContentTargets = Set<ContentSelectionTarget>()
     private var cachedContentSelections: ContentSelectionResult?
-    private var rememberedSpaces: [String: String] = UserDefaults.standard.dictionary(forKey: "lutColorSpaces") as? [String: String] ?? [:]
+    private var cachedRegionalSuggestions: [RegionalAdjustmentSuggestion]?
+    private let libraryRootOverride: URL?
+    private let preferences: UserDefaults
+    private var rememberedSpaces: [String: String]
+    var lutColorContracts: [String: String] {
+        var spaces = rememberedSpaces
+        if selectedOption?.path != nil { spaces[selectedLUT] = adjustments.lutColorSpace.rawValue }
+        return spaces
+    }
 
     var selectedPhoto: PhotoItem? { photos.first { $0.id == selectedID } }
     var selectedOption: LUTOption? { lutOptions.first { $0.id == selectedLUT } }
@@ -152,20 +175,36 @@ final class AppModel: ObservableObject {
     var progress: Double { photos.isEmpty ? 0 : Double(processed) / Double(photos.count) }
 
     private var supportRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        libraryRootOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhotoAtelier", isDirectory: true)
     }
 
-    init() {
+    init(libraryRoot: URL? = nil, preferences: UserDefaults = .standard) {
+        self.libraryRootOverride = libraryRoot
+        self.preferences = preferences
+        self.rememberedSpaces = preferences.dictionary(forKey: "lutColorSpaces") as? [String: String] ?? [:]
         nativeInspection = NativeInspectionController(queue: previewQueue)
+        stylePreviews = StylePreviewController(queue: previewQueue)
         lutOptions = [LUTOption(id: "none", name: "原色", detail: "只做基础调整", cube: nil, path: nil)]
-            + LUTCube.builtIns.map { LUTOption(id: $0.id, name: $0.name, detail: $0.detail, cube: $0.cube, path: nil) }
+            + LUTCube.builtIns.map { LUTOption(id: $0.id, name: $0.name, detail: $0.detail, cube: $0.cube, path: nil,
+                                               group: $0.group, recommendedIntensity: $0.recommendedIntensity, tags: $0.tags) }
         let library = supportRoot.appendingPathComponent("LUTs", isDirectory: true)
-        if let urls = try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil) {
-            for url in urls.filter({ $0.pathExtension.lowercased() == "cube" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                if let cube = try? LUTCube.load(url: url) {
-                    lutOptions.append(LUTOption(id: url.path, name: cube.title, detail: "自定义 LUT", cube: cube, path: url.path))
+        lutLibraryBusy = true
+        lutQueue.async { [weak self] in
+            var options: [LUTOption] = []
+            var failures = 0
+            if let urls = try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil) {
+                for url in urls.filter({ $0.pathExtension.lowercased() == "cube" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                    if let cube = try? LUTCube.load(url: url) {
+                        options.append(LUTOption(id: url.path, name: cube.title, detail: "自定义 · 请确认输入空间", cube: cube, path: url.path))
+                    } else { failures += 1 }
                 }
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.lutOptions += options.filter { option in !self.lutOptions.contains { $0.id == option.id } }
+                if self.lutImportToken == nil { self.lutLibraryBusy = false }
+                if failures > 0 { self.lutLibraryMessages = ["资料库中有 \(failures) 个 LUT 无法读取，已隔离；其余风格可继续使用。"] }
             }
         }
     }
@@ -185,6 +224,7 @@ final class AppModel: ObservableObject {
         nativeInspectionRegion = .init()
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
+        styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
         pendingPreview?.cancel(); previewToken?.cancel(); previewGeneration = UUID()
         previewBusy = false; previewReport = .init(); histogram = Array(repeating: 0, count: 64)
@@ -231,26 +271,66 @@ final class AppModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.title = "导入 3D .cube LUT"
         panel.allowedContentTypes = [UTType(filenameExtension: "cube") ?? .data]
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard data.count <= 48_000_000 else { throw AtelierError.invalidLUT("文件超过 48 MB") }
-            guard let text = String(data: data, encoding: .utf8) else { throw AtelierError.invalidLUT("请选择 UTF-8 文本 .cube") }
-            let cube = try LUTCube.parse(text)
-            let library = supportRoot.appendingPathComponent("LUTs", isDirectory: true)
-            try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-            let target = library.appendingPathComponent(UUID().uuidString + ".cube")
-            try data.write(to: target, options: .atomic)
-            lutOptions.append(LUTOption(id: target.path, name: cube.title, detail: "自定义 · 请确认输入空间", cube: cube, path: target.path))
-            selectedLUT = target.path
-            adjustments.lutColorSpace = .sRGB
-            status = "已导入 \(cube.title)。请确认 LUT 的输入空间；Log / HDR LUT 需先转换。"
-            requestPreview(immediate: true)
-        } catch { present(error) }
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        importLUTFiles(panel.urls)
+    }
+
+    func importLUTFiles(_ urls: [URL]) {
+        guard !urls.isEmpty, !batchRunning, lutImportToken == nil else { return }
+        let token = CancellationToken(); lutImportToken = token
+        let selectionAtStart = selectedLUT
+        let library = supportRoot.appendingPathComponent("LUTs", isDirectory: true)
+        lutLibraryBusy = true; lutImportCompleted = 0; lutImportTotal = urls.count; lutLibraryMessages = []
+        lutQueue.async { [weak self] in
+            var imported: [LUTOption] = []
+            var failures: [String] = []
+            for (index, url) in urls.enumerated() {
+                if token.isCancelled { break }
+                autoreleasepool {
+                    do {
+                        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                        guard size <= 48_000_000 else { throw AtelierError.invalidLUT("文件超过 48 MB") }
+                        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                        guard data.count <= 48_000_000 else { throw AtelierError.invalidLUT("文件超过 48 MB") }
+                        guard let text = String(data: data, encoding: .utf8) else { throw AtelierError.invalidLUT("请选择 UTF-8 文本 .cube") }
+                        let cube = try LUTCube.parse(text)
+                        try token.check()
+                        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+                        let target = library.appendingPathComponent(UUID().uuidString + ".cube")
+                        try data.write(to: target, options: .atomic)
+                        imported.append(LUTOption(id: target.path, name: cube.title, detail: "自定义 · 请确认输入空间", cube: cube, path: target.path))
+                    } catch {
+                        if !token.isCancelled { failures.append("第 \(index + 1) 个文件：\(error.localizedDescription)") }
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in self?.lutImportCompleted = index + 1 }
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.lutOptions += imported
+                self.lutLibraryMessages = failures
+                self.lutLibraryBusy = false; self.lutImportToken = nil
+                if let last = imported.last, self.selectedLUT == selectionAtStart {
+                    self.selectLUT(last.id); self.requestPreview(immediate: true)
+                }
+                self.status = "\(token.isCancelled ? "已停止导入" : "导入完成")：成功 \(imported.count)，失败 \(failures.count)。请按作者说明确认自定义 LUT 的输入空间。"
+            }
+        }
+    }
+
+    func cancelLUTImport() {
+        lutImportToken?.cancel()
+        if lutImportToken != nil { status = "正在停止导入；当前文件的解析返回后停止，已导入风格保留。" }
+    }
+
+    func adoptRecommendedLUTIntensity() {
+        guard let strength = selectedOption?.recommendedIntensity else { return }
+        adjustments.lutIntensity = strength
     }
 
     func selectLUT(_ id: String) {
+        guard !batchRunning, lutOptions.contains(where: { $0.id == id }) else { return }
         selectedLUT = id
         if selectedOption?.path == nil { adjustments.lutColorSpace = .sRGB }
         else { adjustments.lutColorSpace = LUTColorSpace(rawValue: rememberedSpaces[id] ?? "") ?? .sRGB }
@@ -259,7 +339,7 @@ final class AppModel: ObservableObject {
     func rememberLUTSpace() {
         guard selectedOption?.path != nil else { return }
         rememberedSpaces[selectedLUT] = adjustments.lutColorSpace.rawValue
-        UserDefaults.standard.set(rememberedSpaces, forKey: "lutColorSpaces")
+        preferences.set(rememberedSpaces, forKey: "lutColorSpaces")
     }
 
     func selectPhoto(_ photo: PhotoItem) {
@@ -268,6 +348,7 @@ final class AppModel: ObservableObject {
         nativeInspectionRegion.center = .init(x: 0.5, y: 0.5)
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
+        styleReference = nil; stylePreviews.cancel()
         selectedID = photo.id
         beforeImage = nil; afterImage = nil
         regionalSuggestions = []
@@ -331,10 +412,8 @@ final class AppModel: ObservableObject {
                     let scale = min(1, 1500 / max(extent.width, extent.height))
                     let scaled = decoded.image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
                     let working = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
-                    guard let baked = self.engine.context.createCGImage(scaled, from: scaled.extent,
-                                                                         format: .RGBAh, colorSpace: working) else {
-                        throw AtelierError.imageRead("预览解码失败")
-                    }
+                    let baked = try PreviewRaster.make(scaled, context: self.engine.context,
+                                                        colorSpace: working, format: .RGBAh)
                     loaded = LoadedPhoto(image: CIImage(cgImage: baked), properties: decoded.properties, report: decoded.report)
                     self.cachedPreviewKey = cacheKey; self.cachedPreview = loaded
                 }
@@ -342,6 +421,17 @@ final class AppModel: ObservableObject {
                 let small = loaded.image
                 var referenceSettings = settings
                 referenceSettings.masks = []
+                referenceSettings.creativeEffects = nil
+                // These fields cannot affect a LUT-free, output-free reference.
+                // Canonicalize them so changing a look reuses measurements.
+                let defaults = AdjustmentSettings()
+                referenceSettings.lutIntensity = 0
+                referenceSettings.lutColorSpace = .sRGB
+                referenceSettings.preserveLuminance = defaults.preserveLuminance
+                referenceSettings.protectSkin = defaults.protectSkin
+                referenceSettings.protectNeutrals = defaults.protectNeutrals
+                referenceSettings.gamutCompression = defaults.gamutCompression
+                referenceSettings.colorHarmony = nil
                 let reference: CIImage
                 if self.cachedMaskReferenceSource == cacheKey,
                    self.cachedMaskReferenceSettings == referenceSettings,
@@ -355,6 +445,7 @@ final class AppModel: ObservableObject {
                     self.cachedMaskReferencePhotoID = photo.id
                     self.cachedContentTargets = []
                     self.cachedContentSelections = nil
+                    self.cachedRegionalSuggestions = nil
                 }
                 try token.check()
                 let contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
@@ -376,15 +467,18 @@ final class AppModel: ObservableObject {
                                                      outputColorSpace: outputSpace, cancellation: token,
                                                      preparedContentSelections: contentSelections)
                 let space = outputSpace.cgColorSpace
-                guard let before = self.engine.context.createCGImage(small, from: small.extent, format: .RGBA8, colorSpace: space),
-                      let after = self.engine.context.createCGImage(output.image, from: output.image.extent, format: .RGBA8, colorSpace: space) else {
-                    throw AtelierError.imageRead("预览渲染失败")
-                }
+                let before = try PreviewRaster.make(small, context: self.engine.context, colorSpace: space)
+                let after = try PreviewRaster.make(output.image, context: self.engine.context, colorSpace: space)
                 let histogram = self.makeHistogram(output.image)
                 var maskOverlay: CGImage?
                 var inspection: MaskInspection?
-                let regionalSuggestions = try RegionalAdjustmentAnalyzer.suggestions(reference: reference,
+                let regionalSuggestions: [RegionalAdjustmentSuggestion]
+                if let cached = self.cachedRegionalSuggestions { regionalSuggestions = cached }
+                else {
+                    regionalSuggestions = try RegionalAdjustmentAnalyzer.suggestions(reference: reference,
                                                                                       context: self.engine.context)
+                    self.cachedRegionalSuggestions = regionalSuggestions
+                }
                 if let mask = selectedMask {
                     try token.check()
                     inspection = try self.engine.inspectLocalMask(mask, reference: reference,
@@ -416,6 +510,7 @@ final class AppModel: ObservableObject {
                         self.maskInspection = inspection
                     }
                     self.previewBusy = false
+                    if self.styleReference !== reference { self.styleReference = reference }
                     self.enqueueAnalysis(loaded, photo: photo, key: cacheKey)
                 }
             } catch {
@@ -529,10 +624,8 @@ final class AppModel: ObservableObject {
                         let settings = AutomaticBatchRecipe.copyBasicAdjustments(from: proposal.settings, into: current)
                         let processed = try engine.process(small, settings: settings, lut: cube,
                                                            outputColorSpace: outputSpace, cancellation: token)
-                        guard let cg = engine.context.createCGImage(processed.image, from: processed.image.extent,
-                                                                   format: .RGBA8, colorSpace: outputSpace.cgColorSpace) else {
-                            throw AtelierError.imageRead("无法渲染自动方案预览")
-                        }
+                        let cg = try PreviewRaster.make(processed.image, context: engine.context,
+                                                        colorSpace: outputSpace.cgColorSpace)
                         result[proposal.id] = cg
                     }
                     return result
@@ -618,10 +711,11 @@ final class AppModel: ObservableObject {
     }
 
     func startBatch() {
-        guard !batchRunning, let input = inputRoot, !photos.isEmpty else { return }
+        guard !batchRunning, !lutLibraryBusy, let input = inputRoot, !photos.isEmpty else { return }
         if outputRoot == nil { chooseOutput() }
         guard let output = outputRoot else { return }
         closeNativeInspection()
+        showStyleBrowser = false; stylePreviews.cancel()
         cancelMaskInteraction()
         // Freeze the recipe and selection before moving work off the UI thread.
         let snapshot = recipe; let items = photos; let cube = selectedOption?.cube

@@ -292,7 +292,7 @@ final class ColorCompatibilityTests: XCTestCase {
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...7 {
+        for version in 1...8 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,8 +305,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 8
-        let rejectedOutput = root.appendingPathComponent("output-8", isDirectory: true)
+        futureRecipe.version = 9
+        let rejectedOutput = root.appendingPathComponent("output-9", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))

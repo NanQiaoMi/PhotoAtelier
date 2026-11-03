@@ -69,6 +69,7 @@ public final class NativeInspectionRenderer {
             initialReport: initialReport, outputColorSpace: outputColorSpace, cancellation: cancellation)
         try cancellation?.check()
         var base = settings; base.masks = []
+        base.creativeEffects = nil
         let before = try engine.process(image, settings: base, lut: nil,
             initialReport: initialReport, outputColorSpace: outputColorSpace, cancellation: cancellation)
         guard before.image.extent == processed.image.extent else {

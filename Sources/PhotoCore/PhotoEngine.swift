@@ -275,6 +275,7 @@ public final class PhotoEngine {
         try require(settings.protectNeutrals, within: 0...1, named: "中性色保护")
         try require(settings.gamutCompression, within: 0...1, named: "色域压缩")
         if let harmony = settings.colorHarmony { try ColorHarmonyEngine.validate(harmony) }
+        if let effects = settings.creativeEffects { try CreativeEffectsEngine.validate(effects) }
         try require(settings.rotationDegrees, within: -45...45, named: "旋转")
         try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
         try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
@@ -502,7 +503,13 @@ public final class PhotoEngine {
         }
 
         try cancellation?.check()
-        let hasColorTreatment = (lut != nil && settings.lutIntensity > 0) || settings.masks.contains { $0.enabled }
+        if let effects = settings.creativeEffects, !effects.isNeutral {
+            working = try CreativeEffectsEngine.apply(effects, to: working, context: context,
+                                                       cancellation: cancellation)
+        }
+        let hasCreativeEffects = !(settings.creativeEffects?.isNeutral ?? true)
+        let hasColorTreatment = (lut != nil && settings.lutIntensity > 0)
+            || settings.masks.contains { $0.enabled } || hasCreativeEffects
         if hasColorTreatment || (outputColorSpace != nil && settings.colorHarmony != nil) {
             let candidate = working
             let scene = try ColorSceneAnalyzer.analyze(image: localMaskReference, context: context)
@@ -511,7 +518,7 @@ public final class PhotoEngine {
                                                         settings: harmony, scene: scene, context: context)
             }
             try cancellation?.check()
-            if let target = outputColorSpace, settings.colorHarmony != nil {
+            if let target = outputColorSpace, settings.colorHarmony != nil || hasCreativeEffects {
                 working = try OutputGamutMapper.map(working, to: target, context: context)
             }
             report.colorQuality = try ColorQualityInspector.inspect(reference: localMaskReference,
@@ -542,11 +549,12 @@ public final class PhotoEngine {
     }
 
     /// Builds the stable mask-selection reference using global adjustments and
-    /// geometry only. Masks and LUT processing are intentionally removed.
+    /// geometry only. Masks, LUTs and creative effects are removed.
     public func maskReferenceImage(_ image: CIImage, settings: AdjustmentSettings,
                                    cancellation: CancellationToken? = nil) throws -> CIImage {
         var base = settings
         base.masks = []
+        base.creativeEffects = nil
         return try process(image, settings: base, lut: nil, cancellation: cancellation).image
     }
 

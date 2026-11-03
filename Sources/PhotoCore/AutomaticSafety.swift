@@ -94,7 +94,7 @@ enum AutomaticSafetyEvaluator {
                 exposureDeltaEV: value.exposureEV - baseline.exposureEV,
                 tonalDelta: TonalAdjustmentMath.difference(from: baseline.tonalCurve, to: value.tonalCurve),
                 summary: summary,
-                scope: "仅检查自动基础增量：在本次输入 \(Int(ceil(source.extent.width)))×\(Int(ceil(source.extent.height))) 的基础渲染上判定阈值后作面积统计，alpha 加权；新增 SDR 1.0 通道越界和 Y≤0.002 黑位或负通道各不超过 0.5%。原尺寸检查异常可见像素，另以最长边 192 取样复核。预览输入可能已缩小，导出按原图重新检查；比例受浮点归约精度影响。不含后续手调、LUT、几何或局部蒙版；不是审美评分或传感器剪切检测。")
+                scope: "仅检查自动基础增量：在本次输入 \(Int(ceil(source.extent.width)))×\(Int(ceil(source.extent.height))) 的基础渲染上判定阈值后作面积统计，alpha 加权；新增 SDR 1.0 通道越界和 Y≤0.002 黑位或负通道各不超过 0.5%。原尺寸检查异常可见像素，另以最长边 192 取样复核。预览输入可能已缩小，导出按原图重新检查；比例受浮点归约精度影响。不含后续手调、LUT、几何、局部蒙版或质感滤镜；不是审美评分或传感器剪切检测。")
             return AutomaticSafetyResult(settings: value, report: report)
         }
         // At zero increment the two processing graphs are identical. Reaching
@@ -139,6 +139,7 @@ enum AutomaticSafetyEvaluator {
         value.verticalPerspective = 0
         value.horizontalPerspective = 0
         value.masks = []
+        value.creativeEffects = nil
         return value
     }
 

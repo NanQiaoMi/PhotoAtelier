@@ -1,0 +1,217 @@
+import CoreImage
+import Foundation
+
+/// Independent, optional spatial treatments applied after the user's look.
+/// Values are normalized strengths; zero keeps the corresponding effect off.
+public struct CreativeEffectsSettings: Codable, Equatable {
+    public var bloom: Double
+    public var vignette: Double
+    public var grain: Double
+
+    public init(bloom: Double = 0, vignette: Double = 0, grain: Double = 0) {
+        self.bloom = bloom
+        self.vignette = vignette
+        self.grain = grain
+    }
+
+    public var isNeutral: Bool {
+        bloom == 0 && vignette == 0 && grain == 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case bloom, vignette, grain
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            bloom: try container.decodeIfPresent(Double.self, forKey: .bloom) ?? 0,
+            vignette: try container.decodeIfPresent(Double.self, forKey: .vignette) ?? 0,
+            grain: try container.decodeIfPresent(Double.self, forKey: .grain) ?? 0
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bloom, forKey: .bloom)
+        try container.encode(vignette, forKey: .vignette)
+        try container.encode(grain, forKey: .grain)
+    }
+}
+
+/// Core Image graph builders for small, deterministic creative treatments.
+/// Input/output RGB values stay in extended linear light and alpha is retained.
+internal enum CreativeEffectsEngine {
+    private static let highlightExtractionKernel = CIColorKernel(source: """
+    kernel vec4 extractCreativeHighlights(__sample sample) {
+        float alpha = sample.a;
+        if (!(alpha > 0.000001) || !(alpha <= 1.0)) { return vec4(0.0); }
+
+        vec3 color = sample.rgb / alpha;
+        if (!(abs(color.r) <= 65504.0) || !(abs(color.g) <= 65504.0)
+            || !(abs(color.b) <= 65504.0)) { return vec4(0.0); }
+
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        if (!(luminance >= 0.0) || !(luminance <= 65504.0)) { return vec4(0.0); }
+
+        // The soft knee excludes ordinary midtones instead of lifting the
+        // whole image. Emission stays colored and premultiplied for the blur.
+        float weight = smoothstep(0.72, 1.35, luminance);
+        vec3 emission = max(color, vec3(0.0)) * weight;
+        return vec4(emission * alpha, alpha);
+    }
+    """)
+
+    private static let bloomCompositeKernel = CIColorKernel(source: """
+    kernel vec4 addCreativeBloom(__sample source, __sample glow, float strength) {
+        float alpha = source.a;
+        if (!(alpha > 0.0) || !(alpha <= 1.0)) { return source; }
+
+        // Treat the blurred emission RGB as an unassociated color contribution;
+        // multiply it by destination alpha when forming premultiplied output.
+        vec3 addition = max(glow.rgb, vec3(0.0)) * (0.12 * strength);
+        vec3 color = source.rgb / alpha;
+
+        // Fade one shared RGB contribution as SDR highlights approach white.
+        // This protects hue ratios and leaves HDR/negative source values alone.
+        float maxRGB = max(max(color.r, color.g), color.b);
+        float sdrHeadroomScale = 1.0;
+        float largestAddition = max(max(addition.r, addition.g), addition.b);
+        if (maxRGB <= 1.0 && largestAddition > 0.0) {
+            float headroom = max(0.0, 1.0 - maxRGB);
+            float smoothHeadroom = smoothstep(0.0, 0.18, headroom);
+            sdrHeadroomScale = min(1.0, headroom / largestAddition) * smoothHeadroom;
+        }
+
+        vec3 outputColor = source.rgb + addition * (alpha * sdrHeadroomScale);
+
+        // The working graph can use half-float storage. Reduce only the bloom
+        // contribution near its representable ceiling; never clamp to SDR 0...1.
+        float largestBase = max(max(source.rgb.r, source.rgb.g), source.rgb.b);
+        float halfFloatAddition = largestAddition * alpha * sdrHeadroomScale;
+        float halfFloatHeadroom = max(0.0, 65504.0 - largestBase);
+        if (halfFloatAddition > 0.0 && halfFloatAddition > halfFloatHeadroom) {
+            float scale = halfFloatHeadroom / halfFloatAddition;
+            outputColor = source.rgb + addition * (alpha * sdrHeadroomScale * scale);
+        }
+        return vec4(outputColor, alpha);
+    }
+    """)
+
+    private static let finishKernel = CIColorKernel(source: """
+    float creativeNoise(vec2 position) {
+        // A fixed-coordinate hash makes repeated renders and ROI renders agree.
+        float hashed = sin(dot(position, vec2(127.1, 311.7))) * 43758.5453123;
+        return fract(hashed) * 2.0 - 1.0;
+    }
+
+    kernel vec4 finishCreativeEffects(__sample sample, vec4 bounds,
+                                     float vignetteStrength, float grainStrength) {
+        float alpha = sample.a;
+        if (!(alpha > 0.000001) || !(alpha <= 1.0)) { return sample; }
+
+        vec3 color = sample.rgb / alpha;
+        if (!(abs(color.r) <= 65504.0) || !(abs(color.g) <= 65504.0)
+            || !(abs(color.b) <= 65504.0)) { return sample; }
+
+        vec2 dimensions = bounds.zw;
+        vec2 center = bounds.xy + dimensions * 0.5;
+        vec2 halfSize = dimensions * 0.5;
+        vec2 offset = destCoord() - center;
+        vec2 normalized = vec2(offset.x / halfSize.x, offset.y / halfSize.y);
+        float radius = sqrt(dot(normalized, normalized));
+
+        // A broad radial falloff protects the center and darkens the corners
+        // by at most 34%, using one shared linear-light gain to retain hue.
+        float edge = smoothstep(0.52, 1.38, radius);
+        float vignetteGain = 1.0 - 0.34 * vignetteStrength * edge;
+
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        float shadowWeight = smoothstep(0.003, 0.055, max(luminance, 0.0));
+        float highlightWeight = 1.0 - 0.55 * smoothstep(0.65, 1.8, max(luminance, 0.0));
+        float noise = creativeNoise(floor(destCoord()));
+        float grainGain = 1.0 + noise * 0.03 * grainStrength
+                        * shadowWeight * highlightWeight;
+
+        float gain = vignetteGain * grainGain;
+        float largestChannel = max(max(abs(color.r), abs(color.g)), abs(color.b));
+        if (largestChannel > 0.0 && gain > 0.0) {
+            gain = min(gain, 65504.0 / largestChannel);
+        }
+        return vec4(color * gain * alpha, alpha);
+    }
+    """)
+
+    static func validate(_ settings: CreativeEffectsSettings) throws {
+        let values = [settings.bloom, settings.vignette, settings.grain]
+        let names = ["柔光", "暗角", "颗粒"]
+        for (index, value) in values.enumerated() {
+            guard value.isFinite, (0...1).contains(value) else {
+                throw AtelierError.invalidConfiguration(
+                    "创意效果\(names[index])强度必须是 0...1 的有限数值。")
+            }
+        }
+    }
+
+    static func apply(_ settings: CreativeEffectsSettings, to image: CIImage,
+                      context: CIContext, cancellation: CancellationToken? = nil) throws -> CIImage {
+        try cancellation?.check()
+        try validate(settings)
+        guard !settings.isNeutral else { return image }
+
+        let extent = image.extent
+        guard !extent.isNull, !extent.isInfinite,
+              extent.minX.isFinite, extent.minY.isFinite,
+              extent.width.isFinite, extent.height.isFinite,
+              extent.width > 0, extent.height > 0 else {
+            throw AtelierError.invalidConfiguration("创意效果需要有限且非空的图像范围。")
+        }
+
+        var output = image
+        if settings.bloom > 0 {
+            try cancellation?.check()
+            guard let extractionKernel = Self.highlightExtractionKernel,
+                  let emission = extractionKernel.apply(extent: extent, arguments: [image]) else {
+                throw AtelierError.invalidConfiguration("Core Image 高光提取 kernel 无法生成输出。")
+            }
+
+            // Relative radius gives a matching composition at preview and export
+            // sizes. A one-pixel floor keeps small previews visibly soft.
+            let radius = max(1.0, min(extent.width, extent.height) * 0.012)
+            guard let blurred = CIFilter(name: "CIGaussianBlur", parameters: [
+                kCIInputImageKey: emission,
+                kCIInputRadiusKey: radius
+            ])?.outputImage?.cropped(to: extent) else {
+                throw AtelierError.invalidConfiguration("Core Image 高光辉光模糊无法生成输出。")
+            }
+            guard let compositeKernel = Self.bloomCompositeKernel,
+                  let composite = compositeKernel.apply(extent: extent, arguments: [
+                    image, blurred, NSNumber(value: settings.bloom)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 高光辉光合成 kernel 无法生成输出。")
+            }
+            output = composite.cropped(to: extent)
+        }
+
+        if settings.vignette > 0 || settings.grain > 0 {
+            try cancellation?.check()
+            guard let finishKernel = Self.finishKernel,
+                  let finished = finishKernel.apply(extent: extent, arguments: [
+                    output,
+                    CIVector(x: extent.minX, y: extent.minY,
+                             z: extent.width, w: extent.height),
+                    NSNumber(value: settings.vignette),
+                    NSNumber(value: settings.grain)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 暗角/颗粒 kernel 无法生成输出。")
+            }
+            output = finished.cropped(to: extent)
+        }
+
+        try cancellation?.check()
+        // The argument documents the context used by PhotoEngine to evaluate
+        // the returned lazy graph; rendering here would defeat cancellation and tiling.
+        _ = context
+        return output
+    }
+}

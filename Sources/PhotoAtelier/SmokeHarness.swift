@@ -11,8 +11,18 @@ enum SmokeHarness {
     private static var session: SmokeSession?
     private static var portraitSession: PortraitSmokeSession?
     private static var nativeSession: NativeInspectionSmokeSession?
+    private static var styleSession: StyleWorkflowSmokeSession?
     static func startIfRequested(model: AppModel) {
         let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--style-self-test"), args.count > index + 3 {
+            guard styleSession == nil else { return }
+            let evidence = URL(fileURLWithPath: args[index + 3])
+            let isolated = AppModel(libraryRoot: evidence.appendingPathComponent("library"),
+                                   preferences: UserDefaults(suiteName: "PhotoAtelier.StyleTest.\(UUID())")!)
+            let task = StyleWorkflowSmokeSession(model: isolated, input: URL(fileURLWithPath: args[index + 1]),
+                output: URL(fileURLWithPath: args[index + 2]), evidence: evidence)
+            styleSession = task; task.start(); return
+        }
         if let index = args.firstIndex(of: "--native-inspection-self-test"), args.count > index + 3 {
             guard nativeSession == nil else { return }
             let task = NativeInspectionSmokeSession(model: model, input: URL(fileURLWithPath: args[index + 1]),
@@ -190,7 +200,7 @@ private final class SmokeSession {
                     \.blacksEV, \.shadowsEV, \.midtonesEV, \.highlightsEV, \.whitesEV
                 ]
                 guard abs(curve.shadowsEV - 0.35) < 1e-8, abs(curve.midtonesEV - 0.07) < 1e-8,
-                      restored.version == 7, let decoded = restored.adjustments.tonalCurve,
+                      restored.version == 8, let decoded = restored.adjustments.tonalCurve,
                       fields.allSatisfy({ abs(decoded[keyPath: $0] - curve[keyPath: $0]) < 1e-12 }) else {
                     throw AtelierError.invalidConfiguration("五区手动微调或配方 v7 读写没有保留实际值")
                 }
@@ -310,7 +320,7 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 7,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 8,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]

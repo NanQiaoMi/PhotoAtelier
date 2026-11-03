@@ -55,7 +55,7 @@ struct PhotoAtelierApp: App {
                 Button("打开照片文件夹…") { model.chooseInput() }.keyboardShortcut("o")
                     .disabled(model.batchRunning)
                 Button("导入 LUT…") { model.importLUT() }.keyboardShortcut("l", modifiers: [.command, .shift])
-                    .disabled(model.batchRunning)
+                    .disabled(model.batchRunning || model.lutLibraryBusy)
                 Divider()
                 Button("保存配方…") { model.saveRecipe() }.keyboardShortcut("s")
                 Button("载入配方…") { model.loadRecipe() }.keyboardShortcut("o", modifiers: [.command, .shift])

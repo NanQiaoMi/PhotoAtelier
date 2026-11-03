@@ -1,16 +1,44 @@
 import Foundation
 
+public enum LUTPresetGroup: String, Codable, CaseIterable, Equatable {
+    case natural
+    case portrait
+    case cinematic
+    case landscape
+    case monochrome
+
+    public var title: String {
+        switch self {
+        case .natural: return "自然"
+        case .portrait: return "人像"
+        case .cinematic: return "电影"
+        case .landscape: return "风光"
+        case .monochrome: return "黑白"
+        }
+    }
+}
+
 public struct LUTPreset: Identifiable {
     public let id: String
     public let name: String
     public let detail: String
     public let cube: LUTCube
+    public let group: LUTPresetGroup
+    public let recommendedIntensity: Double
+    public let tags: [String]
 
-    public init(id: String, name: String, detail: String, cube: LUTCube) {
+    public init(id: String, name: String, detail: String, cube: LUTCube,
+                group: LUTPresetGroup = .natural,
+                recommendedIntensity: Double = 0.35,
+                tags: [String] = []) {
         self.id = id
         self.name = name
         self.detail = detail
         self.cube = cube
+        self.group = group
+        self.recommendedIntensity = recommendedIntensity.isFinite
+            ? min(max(recommendedIntensity, 0), 1) : 0.35
+        self.tags = tags
     }
 }
 
@@ -297,18 +325,41 @@ public struct LUTCube {
     }
 
     private static let builtInStorage: [LUTPreset] = [
-        makePreset(id: "neutral", name: "自然", detail: "轻微柔和反差，保留中性色", style: .neutral),
-        makePreset(id: "soft-film", name: "柔和电影", detail: "抬起暗部并压低高光", style: .softFilm),
-        makePreset(id: "warm-light", name: "暖光", detail: "温暖的中高光与自然肤色", style: .warmLight),
-        makePreset(id: "cool-clear", name: "冷静清透", detail: "微冷阴影与克制饱和度", style: .coolClear),
-        makePreset(id: "golden-hour", name: "金色时刻", detail: "柔和的琥珀高光", style: .goldenHour)
+        makePreset(id: "neutral", name: "自然", detail: "轻微柔和反差，保留中性色", style: .neutral,
+                   group: .natural, recommendedIntensity: 0.35, tags: ["中性", "柔和", "通用"]),
+        makePreset(id: "soft-film", name: "柔和电影", detail: "抬起暗部并压低高光", style: .softFilm,
+                   group: .cinematic, recommendedIntensity: 0.35, tags: ["低反差", "抬黑", "柔和"]),
+        makePreset(id: "warm-light", name: "暖光", detail: "温暖的中高光与自然肤色", style: .warmLight,
+                   group: .portrait, recommendedIntensity: 0.32, tags: ["暖调", "肤色", "柔光"]),
+        makePreset(id: "cool-clear", name: "冷静清透", detail: "微冷阴影与克制饱和度", style: .coolClear,
+                   group: .natural, recommendedIntensity: 0.30, tags: ["微冷", "清透", "克制"]),
+        makePreset(id: "golden-hour", name: "金色时刻", detail: "柔和的琥珀高光", style: .goldenHour,
+                   group: .landscape, recommendedIntensity: 0.30, tags: ["暖光", "日落", "高光"]),
+        makeCreativePreset(id: "fresh-portrait", name: "清新人像", detail: "轻提通透感，温和照顾肤色", look: .freshPortrait,
+                           group: .portrait, recommendedIntensity: 0.34, tags: ["肤色", "清透", "轻柔"]),
+        makeCreativePreset(id: "creamy-soft", name: "奶油柔光", detail: "柔化反差并收住亮部，带少量暖意", look: .creamySoft,
+                           group: .portrait, recommendedIntensity: 0.32, tags: ["柔光", "低反差", "暖调"]),
+        makeCreativePreset(id: "teal-orange-film", name: "青橙电影", detail: "阴影微青、亮部微暖，保持克制", look: .tealOrange,
+                           group: .cinematic, recommendedIntensity: 0.30, tags: ["青橙", "电影", "色彩分离"]),
+        makeCreativePreset(id: "faded-vintage", name: "复古褪色", detail: "抬起黑位、收低饱和并柔和暖调", look: .fadedVintage,
+                           group: .cinematic, recommendedIntensity: 0.30, tags: ["复古", "褪色", "低饱和"]),
+        makeCreativePreset(id: "quiet-forest", name: "静谧森林", detail: "轻柔强调绿植色相，压低过亮反差", look: .quietForest,
+                           group: .landscape, recommendedIntensity: 0.34, tags: ["森林", "自然绿", "风光"]),
+        makeCreativePreset(id: "coastal-light", name: "海岸微光", detail: "清理蓝青色层次并为日照添一点暖意", look: .coastalLight,
+                           group: .landscape, recommendedIntensity: 0.32, tags: ["海岸", "蓝青", "日照"]),
+        makeCreativePreset(id: "silver-salt", name: "银盐黑白", detail: "清晰的灰阶基底，可与原色按强度混合", look: .silverSalt,
+                           group: .monochrome, recommendedIntensity: 0.38, tags: ["黑白", "银盐", "中间调"]),
+        makeCreativePreset(id: "soft-monochrome", name: "柔和黑白", detail: "柔和的灰阶基底，轻抬黑位并收住高光", look: .softMonochrome,
+                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "柔和", "抬黑"])
     ]
 
     public static var builtIns: [LUTPreset] { builtInStorage }
 
     private enum PresetStyle { case neutral, softFilm, warmLight, coolClear, goldenHour }
 
-    private static func makePreset(id: String, name: String, detail: String, style: PresetStyle) -> LUTPreset {
+    private static func makePreset(id: String, name: String, detail: String, style: PresetStyle,
+                                   group: LUTPresetGroup, recommendedIntensity: Double,
+                                   tags: [String]) -> LUTPreset {
         let dimension = 17
         let denominator = Float(dimension - 1)
         var table: [Float] = []
@@ -355,6 +406,113 @@ public struct LUTCube {
 
         let cube = LUTCube(title: name, size: dimension, domainMin: .zero,
                            domainMax: SIMD3<Float>(repeating: 1), rgba: table)
-        return LUTPreset(id: id, name: name, detail: detail, cube: cube)
+        return LUTPreset(id: id, name: name, detail: detail, cube: cube, group: group,
+                         recommendedIntensity: recommendedIntensity, tags: tags)
+    }
+
+    private enum CreativeLook {
+        case freshPortrait
+        case creamySoft
+        case tealOrange
+        case fadedVintage
+        case quietForest
+        case coastalLight
+        case silverSalt
+        case softMonochrome
+    }
+
+    /// Original creative looks authored for normalized sRGB code values. This
+    /// generator is separate from the five legacy recipes so their table values
+    /// remain unchanged.
+    private static func makeCreativePreset(id: String, name: String, detail: String,
+                                           look: CreativeLook, group: LUTPresetGroup,
+                                           recommendedIntensity: Double, tags: [String]) -> LUTPreset {
+        let dimension = 17
+        let denominator = Float(dimension - 1)
+        var table: [Float] = []
+        table.reserveCapacity(dimension * dimension * dimension * 4)
+
+        for blueIndex in 0..<dimension {
+            let blue = Float(blueIndex) / denominator
+            for greenIndex in 0..<dimension {
+                let green = Float(greenIndex) / denominator
+                for redIndex in 0..<dimension {
+                    let red = Float(redIndex) / denominator
+                    let input = SIMD3(red, green, blue)
+                    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                    let gray = SIMD3<Float>(repeating: luminance)
+                    var color = input
+
+                    switch look {
+                    case .freshPortrait:
+                        color = gray + (color - gray) * 1.015
+                        let midtone = max(0, 1 - abs(luminance - 0.62) / 0.62)
+                        let warmth = 0.007 * midtone
+                        color += SIMD3<Float>(warmth, warmth * 0.1, -warmth * 0.75)
+
+                    case .creamySoft:
+                        color = gray + (color - gray) * 0.93
+                        let toe = 0.026 * (1 - luminance) * (1 - luminance)
+                        let shoulder = 0.038 * luminance * luminance
+                        color += SIMD3<Float>(repeating: toe - shoulder)
+                        let warmth = 0.009 * luminance
+                        color += SIMD3<Float>(warmth, warmth * 0.2, -warmth * 0.65)
+
+                    case .tealOrange:
+                        color = gray + (color - gray) * 1.02
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.035
+                            + SIMD3<Float>(repeating: 0.5)
+                        let shadow = 4 * luminance * (1 - luminance) * (1 - luminance)
+                        let highlight = 3 * luminance * luminance * (1 - luminance)
+                        color += SIMD3<Float>(-0.018 * shadow + 0.002 * highlight,
+                                              0.006 * shadow + 0.003 * highlight,
+                                              0.018 * shadow - 0.010 * highlight)
+
+                    case .fadedVintage:
+                        let fadedLuminance = 0.045 + 0.91 * luminance
+                        color = SIMD3<Float>(repeating: fadedLuminance)
+                            + (color - gray) * 0.88
+                        let warmth = 0.012 * luminance
+                        color += SIMD3<Float>(warmth, warmth * 0.25, -warmth * 0.7)
+
+                    case .quietForest:
+                        color = gray + (color - gray) * 1.035
+                        let greenAffinity = max(green - max(red, blue), 0)
+                        color += SIMD3<Float>(-0.008 * greenAffinity,
+                                              0.045 * greenAffinity,
+                                              0.003 * greenAffinity)
+
+                    case .coastalLight:
+                        color = gray + (color - gray) * 1.025
+                        let blueAffinity = max(blue - max(red, green), 0)
+                        color += SIMD3<Float>(-0.006 * blueAffinity,
+                                              0.009 * blueAffinity,
+                                              0.045 * blueAffinity)
+                        let sun = max((luminance - 0.48) / 0.52, 0)
+                        let warmth = 0.015 * sun * sun
+                        color += SIMD3<Float>(warmth, warmth * 0.32, -warmth * 0.8)
+
+                    case .silverSalt:
+                        let monochrome = 0.012 + 0.98 * luminance
+                        color = SIMD3<Float>(repeating: monochrome)
+
+                    case .softMonochrome:
+                        let monochrome = 0.035 + 0.90 * luminance
+                            + 0.02 * luminance * (1 - luminance)
+                        color = SIMD3<Float>(repeating: monochrome)
+                    }
+
+                    table.append(min(max(color.x, 0), 1))
+                    table.append(min(max(color.y, 0), 1))
+                    table.append(min(max(color.z, 0), 1))
+                    table.append(1)
+                }
+            }
+        }
+
+        let cube = LUTCube(title: name, size: dimension, domainMin: .zero,
+                           domainMax: SIMD3<Float>(repeating: 1), rgba: table)
+        return LUTPreset(id: id, name: name, detail: detail, cube: cube, group: group,
+                         recommendedIntensity: recommendedIntensity, tags: tags)
     }
 }

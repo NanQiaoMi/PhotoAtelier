@@ -67,6 +67,7 @@ struct ContentView: View {
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $showLog) { logSheet }
         .sheet(isPresented: $showLensPicker) { LensPicker(model: model) }
+        .sheet(isPresented: $model.showStyleBrowser) { StyleBrowserView(model: model, previews: model.stylePreviews) }
         .sheet(isPresented: $model.showNativeInspection, onDismiss: {
             if !model.showNativeInspection { model.nativeInspection.cancel() }
         }) {
@@ -87,7 +88,8 @@ struct ContentView: View {
             Spacer()
             toolButton("保存配方", icon: "square.and.arrow.down") { model.saveRecipe() }
             toolButton("载入配方", icon: "slider.horizontal.3") { model.loadRecipe() }.disabled(model.batchRunning)
-            toolButton("导入 LUT", icon: "plus") { model.importLUT() }.disabled(model.batchRunning)
+            toolButton("风格库", icon: "square.grid.2x2") { model.showStyleBrowser = true }
+            toolButton("导入 LUT", icon: "plus") { model.importLUT() }.disabled(model.batchRunning || model.lutLibraryBusy)
             Button(action: { model.chooseInput() }) {
                 Label("打开文件夹", systemImage: "folder").font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 15).padding(.vertical, 10)
@@ -194,7 +196,8 @@ struct ContentView: View {
                 sectionLabel("色彩风格")
                 Text("LUT COLLECTION").font(.system(size: 8, weight: .medium)).tracking(1.5).foregroundColor(AtelierPalette.muted)
                 Spacer()
-                Text("\(model.lutOptions.count) 种风格").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                Button("比较全部 \(model.lutOptions.count) 种风格") { model.showStyleBrowser = true }
+                    .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(AtelierPalette.accent)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
@@ -202,8 +205,7 @@ struct ContentView: View {
                         Button { model.selectLUT(option.id) } label: {
                             VStack(alignment: .leading, spacing: 7) {
                                 ZStack(alignment: .bottomLeading) {
-                                    LinearGradient(colors: presetColors(index), startPoint: .topLeading, endPoint: .bottomTrailing)
-                                    Circle().fill(Color.white.opacity(0.16)).frame(width: 42).offset(x: 47, y: -16)
+                                    AtelierPalette.raised
                                     Image(systemName: option.id == "none" ? "circle.lefthalf.filled" : "camera.filters")
                                         .font(.system(size: 17, weight: .ultraLight)).foregroundColor(Color.white.opacity(0.8)).padding(10)
                                     if model.selectedLUT == option.id {
@@ -283,6 +285,10 @@ struct ContentView: View {
             Group {
             panelHeading("风格适配", icon: "circle.hexagongrid")
             Text(model.selectedOption?.name ?? "原色").font(.system(size: 11, weight: .medium)).foregroundColor(AtelierPalette.accent).padding(.bottom, 13)
+            if let recommended = model.selectedOption?.recommendedIntensity {
+                Button("采用推荐强度 \(Int((recommended * 100).rounded()))%") { model.adoptRecommendedLUTIntensity() }
+                    .font(.system(size: 10)).padding(.bottom, 10)
+            }
             Group {
                 AdjustmentSlider(title: "LUT 强度", value: $model.adjustments.lutIntensity, range: 0...1, percent: true)
                 Picker("LUT 色彩空间", selection: $model.adjustments.lutColorSpace) {
@@ -301,7 +307,11 @@ struct ContentView: View {
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             }
             separator
-            ColorHarmonyPanel(model: model)
+            Group {
+                CreativeEffectsPanel(model: model)
+                separator
+                ColorHarmonyPanel(model: model)
+            }
             separator
             Group {
             panelHeading("镜头与几何", icon: "viewfinder")
@@ -413,7 +423,7 @@ struct ContentView: View {
                         }.font(.system(size: 12, weight: .semibold)).padding(.horizontal, 19).padding(.vertical, 12)
                             .foregroundColor(AtelierPalette.background).background(AtelierPalette.accent)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }.buttonStyle(.plain).disabled(model.photos.isEmpty || model.previewBusy || model.scanning || (model.automaticRecipe != nil && model.analysisBusy))
+                    }.buttonStyle(.plain).disabled(model.photos.isEmpty || model.previewBusy || model.scanning || model.lutLibraryBusy || (model.automaticRecipe != nil && model.analysisBusy))
                 }
             }.padding(.horizontal, 22).frame(height: 77)
         }.background(AtelierPalette.panel)

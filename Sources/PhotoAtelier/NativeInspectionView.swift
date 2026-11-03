@@ -45,7 +45,7 @@ struct NativeInspectionView: View {
                     adaptationStrengthControls
                     comparison.frame(height: 330).background(Color.black.opacity(0.25))
                     HStack {
-                        Text("基础调整后（无局部 / LUT）")
+                        Text("基础调整后（无局部 / LUT / 滤镜）")
                         Slider(value: $split, in: 0...1).frame(maxWidth: 350)
                         Text("当前完整效果")
                     }.font(.system(size: 10)).disabled(controller.frame == nil)
