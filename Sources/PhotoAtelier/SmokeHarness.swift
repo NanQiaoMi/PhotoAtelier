@@ -10,8 +10,15 @@ import SwiftUI
 enum SmokeHarness {
     private static var session: SmokeSession?
     private static var portraitSession: PortraitSmokeSession?
+    private static var nativeSession: NativeInspectionSmokeSession?
     static func startIfRequested(model: AppModel) {
         let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--native-inspection-self-test"), args.count > index + 3 {
+            guard nativeSession == nil else { return }
+            let task = NativeInspectionSmokeSession(model: model, input: URL(fileURLWithPath: args[index + 1]),
+                output: URL(fileURLWithPath: args[index + 2]), evidence: URL(fileURLWithPath: args[index + 3]))
+            nativeSession = task; task.start(); return
+        }
         if let index = args.firstIndex(of: "--portrait-self-test"), args.count > index + 3 {
             guard portraitSession == nil else { return }
             let task = PortraitSmokeSession(model: model, input: URL(fileURLWithPath: args[index + 1]),

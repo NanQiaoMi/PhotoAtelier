@@ -67,6 +67,11 @@ struct ContentView: View {
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $showLog) { logSheet }
         .sheet(isPresented: $showLensPicker) { LensPicker(model: model) }
+        .sheet(isPresented: $model.showNativeInspection, onDismiss: {
+            if !model.showNativeInspection { model.nativeInspection.cancel() }
+        }) {
+            NativeInspectionView(model: model, controller: model.nativeInspection)
+        }
     }
 
     private var header: some View {
@@ -170,6 +175,11 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: .medium)).lineLimit(1)
             Spacer(minLength: 0)
             if model.previewBusy { ProgressView().controlSize(.mini) }
+            Button { model.openNativeInspection() } label: {
+                Label("原尺寸检查", systemImage: "viewfinder")
+                    .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+            }.buttonStyle(.plain)
+                .disabled(model.afterImage == nil || model.previewBusy || model.analysisBusy || model.scanning || model.batchRunning)
             Button { compare.toggle() } label: {
                 Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
                     .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)

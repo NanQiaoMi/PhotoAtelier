@@ -50,10 +50,19 @@ final class AppModel: ObservableObject {
     @Published var outputRoot: URL?
     @Published var photos: [PhotoItem] = []
     @Published var selectedID: String?
-    @Published var adjustments = AdjustmentSettings()
-    @Published var exportSettings = ExportSettings()
+    @Published var adjustments = AdjustmentSettings() {
+        didSet { refreshNativeInspection() }
+    }
+    @Published var exportSettings = ExportSettings() {
+        didSet { if oldValue.colorSpace != exportSettings.colorSpace { refreshNativeInspection() } }
+    }
     @Published var lutOptions: [LUTOption] = []
-    @Published var selectedLUT = "none"
+    @Published var selectedLUT = "none" {
+        didSet { refreshNativeInspection() }
+    }
+    @Published var showNativeInspection = false
+    @Published private(set) var nativeInspectionRegion = NativeInspectionRegion()
+    let nativeInspection: NativeInspectionController
     @Published var beforeImage: NSImage?
     @Published var afterImage: NSImage?
     @Published var histogram = Array(repeating: 0.0, count: 64)
@@ -90,8 +99,9 @@ final class AppModel: ObservableObject {
     @Published var proposalPreviews: [String: NSImage] = [:]
     @Published private(set) var automaticRecipe: AutomaticBatchRecipe?
     @Published private(set) var sceneIntent: PhotoSceneIntent = .automatic
-    private let previewQueue = DispatchQueue(label: "atelier.preview", qos: .userInitiated)
-    private let batchQueue = DispatchQueue(label: "atelier.batch", qos: .userInitiated)
+    // Full-source decode/inspection/export share one serial resource queue.
+    // A cancelled synchronous RAW stage must finish before the next decode.
+    private let previewQueue = DispatchQueue(label: "atelier.photo-processing", qos: .userInitiated)
     private let scanQueue = DispatchQueue(label: "atelier.scan", qos: .utility)
     private let analysisQueue = DispatchQueue(label: "atelier.analysis", qos: .userInitiated)
     private var analysisSourceKey: String?
@@ -147,6 +157,7 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        nativeInspection = NativeInspectionController(queue: previewQueue)
         lutOptions = [LUTOption(id: "none", name: "原色", detail: "只做基础调整", cube: nil, path: nil)]
             + LUTCube.builtIns.map { LUTOption(id: $0.id, name: $0.name, detail: $0.detail, cube: $0.cube, path: nil) }
         let library = supportRoot.appendingPathComponent("LUTs", isDirectory: true)
@@ -170,6 +181,8 @@ final class AppModel: ObservableObject {
 
     func loadFolder(_ url: URL) {
         guard !batchRunning else { return }
+        closeNativeInspection()
+        nativeInspectionRegion = .init()
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
         regionalSuggestions = []
@@ -183,6 +196,7 @@ final class AppModel: ObservableObject {
 
     func reloadFolder() {
         guard let root = inputRoot, !batchRunning else { return }
+        nativeInspection.cancel()
         regionalSuggestions = []
         let generation = UUID(); scanGeneration = generation
         let recursive = exportSettings.recursive
@@ -250,6 +264,8 @@ final class AppModel: ObservableObject {
 
     func selectPhoto(_ photo: PhotoItem) {
         guard selectedID != photo.id else { return }
+        nativeInspection.cancel()
+        nativeInspectionRegion.center = .init(x: 0.5, y: 0.5)
         cancelMaskInteraction()
         maskOverlayImage = nil; maskInspection = nil
         selectedID = photo.id
@@ -276,6 +292,7 @@ final class AppModel: ObservableObject {
     }
 
     func requestPreview(immediate: Bool = false) {
+        refreshNativeInspection()
         pendingPreview?.cancel(); previewToken?.cancel()
         let generation = UUID(); previewGeneration = generation
         maskOverlayImage = nil; maskInspection = nil
@@ -604,13 +621,14 @@ final class AppModel: ObservableObject {
         guard !batchRunning, let input = inputRoot, !photos.isEmpty else { return }
         if outputRoot == nil { chooseOutput() }
         guard let output = outputRoot else { return }
+        closeNativeInspection()
         cancelMaskInteraction()
         // Freeze the recipe and selection before moving work off the UI thread.
         let snapshot = recipe; let items = photos; let cube = selectedOption?.cube
         let token = CancellationToken(); batchToken = token
         batchRunning = true; processed = 0; succeeded = 0; failed = 0; lastManifest = nil
         batchMessages = []; currentFile = "准备导出…"; status = "批量处理中 · 使用当前统一配方"
-        batchQueue.async { [weak self] in
+        previewQueue.async { [weak self] in
             do {
                 let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
                                                       recipe: snapshot, lut: cube, cancellation: token) { event in
@@ -643,6 +661,37 @@ final class AppModel: ObservableObject {
     }
 
     func cancelBatch() { batchToken?.cancel(); status = "正在安全停止；已完成的照片保留。" }
+
+    func openNativeInspection() {
+        guard !batchRunning, !scanning, selectedPhoto != nil else { return }
+        cancelMaskInteraction()
+        showNativeInspection = true
+        refreshNativeInspection(immediate: true)
+    }
+
+    func closeNativeInspection() {
+        showNativeInspection = false
+        nativeInspection.cancel()
+    }
+
+    func updateNativeInspection(center: MaskPoint? = nil, pixelSize: Int? = nil) {
+        guard !batchRunning else { return }
+        var region = nativeInspectionRegion
+        if let center { region.center = center }
+        if let pixelSize { region.pixelSize = pixelSize }
+        do { try region.validate() } catch { return }
+        guard region != nativeInspectionRegion else { return }
+        nativeInspectionRegion = region
+        refreshNativeInspection()
+    }
+
+    func refreshNativeInspection(immediate: Bool = false, force: Bool = false) {
+        guard showNativeInspection, !batchRunning, !scanning, let photo = selectedPhoto else {
+            nativeInspection.cancel(); return
+        }
+        nativeInspection.request(photo: photo, recipe: recipe, lut: selectedOption?.cube,
+            lutID: selectedLUT, region: nativeInspectionRegion, immediate: immediate, force: force)
+    }
 
     func resetAdjustments() {
         sceneIntent = .automatic
