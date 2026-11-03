@@ -406,8 +406,8 @@ final class SceneAdaptiveTests: XCTestCase {
         XCTAssertNil(oldAutomatic.sceneIntent, "Missing legacy intent means automatic scene selection.")
 
         let defaultRecipe = Recipe(automatic: selected)
-        XCTAssertEqual(defaultRecipe.version, 6)
-        for version in 1...6 {
+        XCTAssertEqual(defaultRecipe.version, 7)
+        for version in 1...7 {
             var recipe = Recipe(automatic: oldAutomatic)
             recipe.version = version
             XCTAssertEqual(try JSONDecoder().decode(Recipe.self,
@@ -419,7 +419,7 @@ final class SceneAdaptiveTests: XCTestCase {
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for version in 1...6 {
+        for version in 1...7 {
             var recipe = Recipe()
             recipe.version = version
             XCTAssertNoThrow(try BatchProcessor().run(items: [], inputRoot: input,
@@ -427,8 +427,8 @@ final class SceneAdaptiveTests: XCTestCase {
                 lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))
         }
         var unsupported = Recipe()
-        unsupported.version = 7
-        let rejectedOutput = root.appendingPathComponent("version-7")
+        unsupported.version = 8
+        let rejectedOutput = root.appendingPathComponent("version-8")
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: rejectedOutput, recipe: unsupported, lut: nil,
             cancellation: CancellationToken(), onEvent: { _ in }))

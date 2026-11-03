@@ -280,6 +280,7 @@ final class AppModel: ObservableObject {
         let generation = UUID(); previewGeneration = generation
         maskOverlayImage = nil; maskInspection = nil
         previewReport.contentSelection = nil
+        previewReport.localDetails = nil
         guard let photo = selectedPhoto else {
             regionalSuggestions = []; previewBusy = false
             return
@@ -699,7 +700,20 @@ final class AppModel: ObservableObject {
               maskInspection?.coverage ?? 0 > 0.0005 else { return }
         adjustments.masks[index].detail = LocalDetailSettings(smoothing: 0.25,
                                                              textureRetention: 0.9, toneUniformity: 0.12)
+        adjustments.masks[index].detailAdaptation = nil
         status = "已采用轻度细节起点；请放大检查，其他局部光色参数保留。"
+        requestPreview(immediate: true)
+    }
+
+    func addAdaptiveDetailMask() {
+        guard !batchRunning, !scanning, selectedPhoto != nil, adjustments.masks.count < 16 else { return }
+        cancelMaskInteraction()
+        let mask = LocalMask(name: "整图 · 逐图细节", kind: .luminance, exposureEV: 0,
+                             highlightProtection: 0.65, colorProtection: 0.8,
+                             detailAdaptation: LocalDetailAdaptation())
+        adjustments.masks.append(mask); selectedMask = mask.id
+        showMaskCoverage = true; showMaskOverlay = true
+        status = "已启用逐图细节；请查看本图方向与依据，人物皮肤需另建面部候选。"
         requestPreview(immediate: true)
     }
 
@@ -810,6 +824,7 @@ final class AppModel: ObservableObject {
         mask.exposureEV = 0; mask.highlights = 0; mask.shadows = 0; mask.contrast = 1
         mask.saturation = 1; mask.warmth = 0; mask.tint = 0; mask.sharpness = 0
         mask.detail = nil
+        mask.detailAdaptation = nil
         adjustments.masks[index] = mask
         requestPreview()
     }

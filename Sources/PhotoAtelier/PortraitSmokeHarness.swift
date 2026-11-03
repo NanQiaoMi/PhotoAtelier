@@ -78,14 +78,38 @@ final class PortraitSmokeSession {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let data = try encoder.encode(recipe)
                 try data.write(to: evidence.appendingPathComponent("portrait-recipe.json"))
-                try require(try JSONDecoder().decode(Recipe.self, from: data) == recipe && recipe.version == 6,
-                            "Portrait recipe version six round-trips all three semantic targets and detail")
+                try require(try JSONDecoder().decode(Recipe.self, from: data) == recipe && recipe.version == 7,
+                            "Portrait recipe version seven round-trips all three semantic targets and detail")
                 recipe.version = 5
                 var rejected = false
                 do { try recipe.validateVersion() } catch { rejected = true }
                 try require(rejected, "Version five cannot silently carry new portrait operations")
                 try snapshot("portrait-face-detail.png")
                 if let index = model.activeMaskIndex { model.adjustments.masks[index].detail?.smoothing = 0.4 }
+                if let index = model.activeMaskIndex {
+                    model.adjustments.masks[index].detailAdaptation = LocalDetailAdaptation()
+                }
+                model.requestPreview(immediate: true); phase = 40
+            case 40:
+                guard ready, let plan = model.previewReport.localDetails?.first else { return }
+                try require(plan.maskID == model.selectedMask && plan.resolvedIntent == .portrait
+                            && plan.measurements.sampleCount >= 128,
+                            "Adaptive face detail uses measured current coverage and chooses portrait intent")
+                try require((model.selectedLocalMask?.detail?.smoothing ?? 0) == 0.4,
+                            "Adaptive mode preserves the stored manual detail settings")
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(model.recipe).write(to: evidence.appendingPathComponent("adaptive-recipe.json"))
+                var oldVersion = model.recipe; oldVersion.version = 6
+                var rejected = false
+                do { try oldVersion.validateVersion() } catch { rejected = true }
+                try require(rejected, "Version six rejects adaptive detail instead of silently ignoring it")
+                try adaptiveSnapshot()
+                if let index = model.activeMaskIndex { model.adjustments.masks[index].detailAdaptation?.strength = 0 }
+                model.requestPreview(immediate: true); phase = 41
+            case 41:
+                guard ready, let plan = model.previewReport.localDetails?.first else { return }
+                try require(plan.settings.isNeutral, "Zero adaptive strength yields neutral detail without applying manual detail twice")
+                if let index = model.activeMaskIndex { model.adjustments.masks[index].detailAdaptation?.strength = 0.6 }
                 model.requestPreview(immediate: true); phase = 5
             case 5:
                 guard ready else { return }
@@ -94,19 +118,23 @@ final class PortraitSmokeSession {
                 guard let next = model.photos.first(where: { $0.id != firstID }) else { return }
                 model.selectPhoto(next)
                 try require(model.maskOverlayImage == nil && model.maskInspection == nil
-                            && model.previewReport.contentSelection == nil,
+                            && model.previewReport.contentSelection == nil && model.previewReport.localDetails == nil,
                             "Switching photos immediately clears old overlay, measurements and detection status")
                 phase = 6
             case 6:
                 guard ready, let report = model.previewReport.contentSelection else { return }
                 try require(report.personStatus == "available" && report.coverage["people"] != firstCoverage,
                             "The next portrait recomputes its content instead of reusing earlier geometry")
+                try require(model.previewReport.localDetails?.first?.maskID == model.selectedMask,
+                            "The next portrait recomputes and exposes its own local detail plan")
                 try snapshot("portrait-next-photo.png")
                 model.resetSelectedMaskAdjustments(); phase = 7
             case 7:
                 guard ready else { return }
-                try require(model.selectedLocalMask?.detail == nil && model.selectedLocalMask?.contentSelection == .faceSkin,
+                try require(model.selectedLocalMask?.detail == nil && model.selectedLocalMask?.detailAdaptation == nil
+                            && model.selectedLocalMask?.contentSelection == .faceSkin,
                             "Reset removes local detail without discarding its semantic selection")
+                if let index = model.activeMaskIndex { model.adjustments.masks[index].detailAdaptation = LocalDetailAdaptation() }
                 model.outputRoot = output; model.exportSettings.format = .tiff
                 model.exportSettings.colorSpace = .displayP3
                 model.startBatch(); phase = 8
@@ -118,6 +146,9 @@ final class PortraitSmokeSession {
                 let coverages = manifest.entries.compactMap { $0.report?.contentSelection?.coverage["people"] }
                 try require(coverages.count == model.photos.count && Set(coverages).count > 1,
                             "Batch reports contain distinct per-photo semantic coverage")
+                let plans = manifest.entries.compactMap { $0.report?.localDetails?.first }
+                try require(plans.count == model.photos.count && Set(plans.map { $0.measurements.sampleCount }).count > 1,
+                            "Full-size portrait exports contain independently measured adaptive detail plans")
                 try require(try sourceHashes() == hashes, "All local original hashes remain unchanged")
                 finish(nil)
             default: break
@@ -149,6 +180,27 @@ final class PortraitSmokeSession {
             throw AtelierError.imageWrite("无法编码人像界面快照")
         }
         try data.write(to: evidence.appendingPathComponent(name), options: .atomic)
+        window.contentView = nil
+    }
+
+    private func adaptiveSnapshot() throws {
+        guard let mask = model.selectedLocalMask else { return }
+        let view = AdaptiveDetailControls(model: model, mask: mask).padding(20)
+            .frame(width: 430, height: 560).background(AtelierPalette.panel)
+            .preferredColorScheme(.dark)
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 430, height: 560)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = host; host.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            throw AtelierError.imageWrite("无法创建逐图细节面板快照")
+        }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw AtelierError.imageWrite("无法编码逐图细节面板快照")
+        }
+        try data.write(to: evidence.appendingPathComponent("adaptive-detail-panel.png"))
         window.contentView = nil
     }
 

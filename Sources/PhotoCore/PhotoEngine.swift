@@ -423,6 +423,27 @@ public final class PhotoEngine {
         }
         report.contentSelection = contentSelections?.report
         if let contentSelections { report.warnings.append(contentsOf: contentSelections.report.warnings) }
+        var detailPlans: [UUID: LocalDetailPlan] = [:]
+        report.localDetails = nil
+        for mask in settings.masks where mask.enabled && mask.opacity > 0 {
+            guard let adaptation = mask.detailAdaptation else { continue }
+            try cancellation?.check()
+            let coverage = try localMaskImage(mask, reference: localMaskReference,
+                                              contentSelections: contentSelections)
+            // Inversion/additions no longer establish that the effective area
+            // is skin, even when its base selection came from face landmarks.
+            let retainsSkinMeaning = !mask.inverted && !mask.components.contains { $0.operation == .add }
+            let detailTarget = mask.contentSelection == .faceSkin && !retainsSkinMeaning ? nil : mask.contentSelection
+            detailPlans[mask.id] = try AdaptiveLocalDetailAnalyzer.analyze(reference: localMaskReference,
+                coverage: coverage, maskID: mask.id, target: detailTarget,
+                adaptation: adaptation, context: context, cancellation: cancellation,
+                isSpatiallyLimited: !mask.inverted && (mask.kind == .brush || mask.kind == .radial))
+        }
+        if !detailPlans.isEmpty {
+            report.localDetails = settings.masks.compactMap { detailPlans[$0.id] }
+            working = try AdaptiveDetailRenderer.apply(reference: localMaskReference, masks: settings.masks,
+                plans: detailPlans, context: context, contentSelections: contentSelections, cancellation: cancellation)
+        }
         for mask in settings.masks where mask.enabled && mask.stage == .beforeLook {
             try cancellation?.check()
             if mask.kind == .brush, mask.points.isEmpty, mask.components.isEmpty {

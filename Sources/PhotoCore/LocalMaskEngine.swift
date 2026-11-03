@@ -125,6 +125,7 @@ enum LocalMaskValidator {
         try require(mask.colorTolerance, 0...1, "颜色容差")
         try require(mask.colorSoftness, 0...1, "颜色范围羽化")
         if let detail = mask.detail { try LocalDetailEngine.validate(detail) }
+        if let adaptation = mask.detailAdaptation { try AdaptiveLocalDetailAnalyzer.validate(adaptation) }
         guard mask.contentSelection == nil || mask.kind == .luminance else {
             throw AtelierError.invalidConfiguration("内容感知选区必须使用全范围亮度基础，再通过修边限定。")
         }
@@ -290,7 +291,7 @@ enum LocalMaskEngine {
 
     static func isLegacyCompatibleAfterLook(_ mask: LocalMask) -> Bool {
         mask.stage == .afterLook && mask.components.isEmpty && mask.opacity == 1 &&
-        mask.contentSelection == nil && (mask.detail?.isNeutral ?? true) &&
+        mask.contentSelection == nil && mask.detailAdaptation == nil && (mask.detail?.isNeutral ?? true) &&
         mask.tint == 0 && mask.contrast == 1 && mask.highlights == 0 && mask.shadows == 0 &&
         mask.sharpness == 0 && mask.highlightProtection == 0 && mask.colorProtection == 0 &&
         !mask.restrictLuminance && !mask.restrictColor && mask.kind != .luminance && mask.kind != .color
@@ -418,7 +419,7 @@ enum LocalMaskEngine {
             }
             adjusted = output.cropped(to: extent)
         }
-        if let detail = mask.detail, !detail.isNeutral {
+        if mask.detailAdaptation == nil, let detail = mask.detail, !detail.isNeutral {
             adjusted = try LocalDetailEngine.apply(adjusted, settings: detail)
         }
         if mask.sharpness > 0.0001 {
@@ -440,6 +441,20 @@ enum LocalMaskEngine {
             throw AtelierError.invalidConfiguration("局部调整保护合成失败。")
         }
         return output.cropped(to: extent)
+    }
+
+    /// Candidate is generated from this same reference before local light/color
+    /// and LUT. The returned candidate is mixed with the reference by coverage.
+    static func protectAdaptiveCandidate(_ candidate: CIImage, reference: CIImage,
+                                         coverage: CIImage, mask: LocalMask) throws -> CIImage {
+        guard let kernel = protectionBlendKernel,
+              let output = kernel.apply(extent: reference.extent, arguments: [
+                reference, candidate, coverage,
+                NSNumber(value: mask.highlightProtection), NSNumber(value: mask.colorProtection)
+              ]) else {
+            throw AtelierError.invalidConfiguration("逐图细节保护合成失败。")
+        }
+        return output.cropped(to: reference.extent)
     }
 
     static func sampleColor(at point: MaskPoint, reference: CIImage,

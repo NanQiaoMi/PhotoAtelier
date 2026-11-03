@@ -40,6 +40,7 @@ struct MaskInspector: View {
                 Button("背景选区") { model.addContentMask(.background) }
             }
             Button("面部皮肤候选") { model.addContentMask(.faceSkin) }
+            Button("整图细节适配") { model.addAdaptiveDetailMask() }
             Text("本机检测，每张重新定位；先检查粉色覆盖，再调节光色或细节。面部候选依据关键点和颜色，眼眉嘴会避让，仍需修边。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             if let report = model.previewReport.contentSelection {
@@ -69,11 +70,18 @@ struct MaskInspector: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("纹理与肤色细修", systemImage: "slider.horizontal.3")
                 .font(.system(size: 11, weight: .medium))
-            Button("轻度精修起点") { model.applyNaturalDetailStartingPoint() }
-                .disabled(model.previewBusy || model.scanning || (model.maskInspection?.coverage ?? 0) <= 0.0005)
-            AdjustmentSlider(title: "光影平整", value: detailBinding(mask, \.smoothing), range: 0...1, percent: true)
-            AdjustmentSlider(title: "细纹理保留", value: detailBinding(mask, \.textureRetention), range: 0...1, percent: true)
-            AdjustmentSlider(title: "邻域色彩均匀", value: detailBinding(mask, \.toneUniformity), range: 0...1, percent: true)
+            AdaptiveDetailControls(model: model, mask: mask)
+            DisclosureGroup("手动细节参数") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Button("轻度精修起点") { model.applyNaturalDetailStartingPoint() }
+                        .disabled(model.previewBusy || model.scanning || (model.maskInspection?.coverage ?? 0) <= 0.0005)
+                    AdjustmentSlider(title: "光影平整", value: detailBinding(mask, \.smoothing), range: 0...1, percent: true)
+                    AdjustmentSlider(title: "细纹理保留", value: detailBinding(mask, \.textureRetention), range: 0...1, percent: true)
+                    AdjustmentSlider(title: "邻域色彩均匀", value: detailBinding(mask, \.toneUniformity), range: 0...1, percent: true)
+                    AdjustmentSlider(title: "噪点减弱", value: detailBinding(mask, \.noiseReduction), range: 0...1, percent: true)
+                    AdjustmentSlider(title: "真实纹理增强", value: detailBinding(mask, \.detailRecovery), range: 0...1, percent: true)
+                }.disabled(mask.detailAdaptation != nil)
+            }
             Text("只作用于当前覆盖；平整中尺度明暗，保留细节，不设统一肤色或美白目标。请放大检查，无法判断痘痣与需要保留的特征。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             if mask.contentSelection != nil && !mask.components.isEmpty {

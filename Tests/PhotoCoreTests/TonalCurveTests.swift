@@ -265,7 +265,7 @@ final class TonalCurveTests: XCTestCase {
     }
 
     func testLegacyJSONWithoutCurveRemainsReadableAndOldRecipeCannotCarryNewCurve() throws {
-        XCTAssertEqual(Recipe().version, 6)
+        XCTAssertEqual(Recipe().version, 7)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(Recipe()))
                                    as? [String: Any])
         object["version"] = 4

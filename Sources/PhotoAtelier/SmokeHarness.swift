@@ -183,9 +183,9 @@ private final class SmokeSession {
                     \.blacksEV, \.shadowsEV, \.midtonesEV, \.highlightsEV, \.whitesEV
                 ]
                 guard abs(curve.shadowsEV - 0.35) < 1e-8, abs(curve.midtonesEV - 0.07) < 1e-8,
-                      restored.version == 6, let decoded = restored.adjustments.tonalCurve,
+                      restored.version == 7, let decoded = restored.adjustments.tonalCurve,
                       fields.allSatisfy({ abs(decoded[keyPath: $0] - curve[keyPath: $0]) < 1e-12 }) else {
-                    throw AtelierError.invalidConfiguration("五区手动微调或配方 v6 读写没有保留实际值")
+                    throw AtelierError.invalidConfiguration("五区手动微调或配方 v7 读写没有保留实际值")
                 }
                 assertions.append("Manual five-zone EV edits refresh preview and survive recipe v6 round-trip")
                 try snapshotView("03-tonal-controls.png", width: 420, height: 430,
@@ -303,7 +303,7 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 6,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 7,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]

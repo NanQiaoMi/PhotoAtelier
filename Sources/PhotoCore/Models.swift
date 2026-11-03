@@ -99,6 +99,9 @@ public struct LocalMask: Codable, Identifiable, Equatable {
     /// A semantic selection is recalculated per image, never stored as face coordinates.
     public var contentSelection: ContentSelectionTarget?
     public var detail: LocalDetailSettings?
+    /// When present, remeasure this effective region on every photograph.
+    /// Manual detail values remain stored and resume when adaptation is disabled.
+    public var detailAdaptation: LocalDetailAdaptation?
 
     public init(id: UUID = UUID(), name: String = "局部调整", kind: MaskKind = .radial,
                 start: MaskPoint = .init(x: 0.5, y: 0.5), end: MaskPoint = .init(x: 0.75, y: 0.75),
@@ -113,7 +116,8 @@ public struct LocalMask: Codable, Identifiable, Equatable {
                 luminanceMax: Double = 1, rangeSoftness: Double = 0.15,
                 restrictColor: Bool = false, color: MaskColor = .init(red: 0.5, green: 0.5, blue: 0.5),
                 colorTolerance: Double = 0.2, colorSoftness: Double = 0.15,
-                contentSelection: ContentSelectionTarget? = nil, detail: LocalDetailSettings? = nil) {
+                contentSelection: ContentSelectionTarget? = nil, detail: LocalDetailSettings? = nil,
+                detailAdaptation: LocalDetailAdaptation? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.start = start; self.end = end
         self.points = points; self.radius = radius; self.feather = feather
         self.inverted = inverted; self.enabled = enabled; self.exposureEV = exposureEV
@@ -127,6 +131,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         self.restrictColor = restrictColor; self.color = color
         self.colorTolerance = colorTolerance; self.colorSoftness = colorSoftness
         self.contentSelection = contentSelection; self.detail = detail
+        self.detailAdaptation = detailAdaptation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -136,7 +141,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         case highlightProtection, colorProtection, stage, restrictLuminance
         case luminanceMin, luminanceMax, rangeSoftness, restrictColor, color
         case colorTolerance, colorSoftness
-        case contentSelection, detail
+        case contentSelection, detail, detailAdaptation
     }
 
     public init(from decoder: Decoder) throws {
@@ -175,6 +180,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         colorSoftness = try container.decodeIfPresent(Double.self, forKey: .colorSoftness) ?? 0.15
         contentSelection = try container.decodeIfPresent(ContentSelectionTarget.self, forKey: .contentSelection)
         detail = try container.decodeIfPresent(LocalDetailSettings.self, forKey: .detail)
+        detailAdaptation = try container.decodeIfPresent(LocalDetailAdaptation.self, forKey: .detailAdaptation)
         try LocalMaskValidator.validate(self)
     }
 
@@ -214,6 +220,7 @@ public struct LocalMask: Codable, Identifiable, Equatable {
         try container.encode(colorSoftness, forKey: .colorSoftness)
         try container.encodeIfPresent(contentSelection, forKey: .contentSelection)
         try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encodeIfPresent(detailAdaptation, forKey: .detailAdaptation)
     }
 }
 
@@ -264,8 +271,8 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 6 adds per-photo content selections and local texture processing.
-    public var version = 6
+    /// Version 7 adds measured local detail adaptation, noise and texture controls.
+    public var version = 7
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -280,7 +287,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...6).contains(version) else {
+        guard (1...7).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
@@ -293,6 +300,11 @@ public struct Recipe: Codable, Equatable {
         }
         let maskGroups = [adjustments.masks, automatic?.baseline.masks ?? [],
                           automatic?.referenceSettings.masks ?? []]
+        guard version >= 7 || maskGroups.joined().allSatisfy({
+            $0.detailAdaptation == nil && ($0.detail?.noiseReduction ?? 0) == 0 && ($0.detail?.detailRecovery ?? 0) == 0
+        }) else {
+            throw AtelierError.invalidConfiguration("逐图细节适配、降噪与纹理增强需要配方版本 7，不能静默降级。")
+        }
         guard version >= 6 || maskGroups.joined().allSatisfy({
             $0.contentSelection == nil && ($0.detail?.isNeutral ?? true)
         }) else {
@@ -320,6 +332,7 @@ public struct ProcessingReport: Codable, Equatable {
     public var colorQuality: ColorQualityReport?
     public var lutCompatibility: LUTCompatibilityReport?
     public var contentSelection: ContentSelectionReport?
+    public var localDetails: [LocalDetailPlan]?
     public init() {}
 }
 
