@@ -259,7 +259,7 @@ private func validateRecipeLUT(_ recipe: Recipe, supplied: LUTCube?) throws {
 
     if let identifier = recipe.lutIdentifier {
         guard !identifier.isEmpty,
-              let preset = LUTCube.builtIns.first(where: { $0.id == identifier }) else {
+              let preset = LUTCube.builtIns.first(where: { $0.id == identifier }) ?? FilmLUTCatalog.preset(id: identifier) else {
             throw AtelierError.invalidConfiguration("配方引用了未知的内置 LUT：\(identifier)")
         }
         guard cubesMatch(preset.cube, supplied) else {

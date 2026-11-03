@@ -408,7 +408,11 @@ public enum PhotoExporter {
             outputFormat = .RGBA16
         }
 
-        guard let cgImage = context.createCGImage(outputImage, from: bounds, format: outputFormat, colorSpace: colorSpace) else {
+        // Materialize the complete render before handing it to ImageIO. A lazy
+        // CGImage lets the encoder choose tiled evaluation of a RAW/filter graph,
+        // which can differ from the inspected raster even with the same ICC.
+        guard let cgImage = context.createCGImage(outputImage, from: bounds, format: outputFormat,
+                                                colorSpace: colorSpace, deferred: false) else {
             throw AtelierError.imageWrite("无法将图像转换为目标色彩空间")
         }
 

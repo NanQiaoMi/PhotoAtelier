@@ -14,6 +14,15 @@ have been copied into this application.
 | GLib | GLib/GNOME contributors, [source](https://gitlab.gnome.org/GNOME/glib) | LGPL-2.1-or-later |
 | PCRE2 | University of Cambridge, Philip Hazel, Zoltan Herczeg and PCRE2 contributors, [source](https://github.com/PCRE2Project/pcre2) | BSD-3-Clause with PCRE2 exception |
 | GNU gettext libintl | Free Software Foundation and gettext contributors, [source](https://www.gnu.org/software/gettext/) | LGPL-2.1-or-later |
+| Five Fuji-style look approximations | Copyright (c) 2026 Sadziu and contributors, [pinned source](https://github.com/sadziu/Fuji-Recipe-Converter/tree/a6691ea0e880ddd5fd19d7ca2d48a502fb0e7e07) | MIT |
+
+The five film looks adapt the hand-tuned parameters and gamma-sRGB color
+algorithm in `js/data.js` and `js/engine.js` into Swift. They are independent
+approximations, not Fujifilm official LUTs, Adobe profiles, or measured camera
+reproductions. Their tables are generated in memory. Source hashes and the
+complete upstream MIT notice are in `ThirdParty/FilmLUTs/` and the app's
+`Contents/Resources/FilmLUTs/`. Ricoh/ColorReps downloads are not bundled or
+redistributed; the style browser links to the author's pages for user import.
 
 Native dylibs and the exact, unmodified database XML snapshot are extracted from the
 SHA-256 pinned [lensfunpy 1.18.0 macOS x86_64 wheel](https://pypi.org/project/lensfunpy/1.18.0/).

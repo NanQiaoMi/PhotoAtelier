@@ -13,6 +13,7 @@ struct LUTOption: Identifiable {
     var group: LUTPresetGroup? = nil
     var recommendedIntensity: Double? = nil
     var tags: [String] = []
+    var provenance: LUTProvenance? = nil
 }
 
 enum MaskDrawMode: String, CaseIterable {
@@ -146,14 +147,15 @@ final class AppModel: ObservableObject {
     private var cachedContentTargets = Set<ContentSelectionTarget>()
     private var cachedContentSelections: ContentSelectionResult?
     private var cachedRegionalSuggestions: [RegionalAdjustmentSuggestion]?
+    private var cachedLUTContext: LUTSemanticContext?
     private let libraryRootOverride: URL?
     private let preferences: UserDefaults
     private var rememberedSpaces: [String: String]
     var lutColorContracts: [String: String] {
-        var spaces = rememberedSpaces
-        if selectedOption?.path != nil { spaces[selectedLUT] = adjustments.lutColorSpace.rawValue }
-        return spaces
+        rememberedSpaces
     }
+    var lutSpaceConfirmed: Bool { selectedOption?.path == nil || rememberedSpaces[selectedLUT] != nil }
+    private var lutContractReady: Bool { lutSpaceConfirmed }
 
     var selectedPhoto: PhotoItem? { photos.first { $0.id == selectedID } }
     var selectedOption: LUTOption? { lutOptions.first { $0.id == selectedLUT } }
@@ -191,7 +193,10 @@ final class AppModel: ObservableObject {
         let library = supportRoot.appendingPathComponent("LUTs", isDirectory: true)
         lutLibraryBusy = true
         lutQueue.async { [weak self] in
-            var options: [LUTOption] = []
+            var options: [LUTOption] = FilmLUTCatalog.presets.map {
+                LUTOption(id: $0.id, name: $0.name, detail: $0.detail, cube: $0.cube, path: nil,
+                    group: $0.group, recommendedIntensity: $0.recommendedIntensity, tags: $0.tags, provenance: $0.provenance)
+            }
             var failures = 0
             if let urls = try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil) {
                 for url in urls.filter({ $0.pathExtension.lowercased() == "cube" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
@@ -334,12 +339,22 @@ final class AppModel: ObservableObject {
         selectedLUT = id
         if selectedOption?.path == nil { adjustments.lutColorSpace = .sRGB }
         else { adjustments.lutColorSpace = LUTColorSpace(rawValue: rememberedSpaces[id] ?? "") ?? .sRGB }
+        if selectedOption?.provenance != nil, adjustments.adaptiveLUT == nil {
+            adjustments.adaptiveLUT = .init()
+            status = "已启用逐图胶片适配；LUT 强度作为上限，每张照片分别评估。"
+        }
     }
 
     func rememberLUTSpace() {
         guard selectedOption?.path != nil else { return }
         rememberedSpaces[selectedLUT] = adjustments.lutColorSpace.rawValue
         preferences.set(rememberedSpaces, forKey: "lutColorSpaces")
+        requestPreview(immediate: true)
+    }
+
+    func setLUTColorSpace(_ space: LUTColorSpace) {
+        adjustments.lutColorSpace = space
+        rememberLUTSpace()
     }
 
     func selectPhoto(_ photo: PhotoItem) {
@@ -383,6 +398,11 @@ final class AppModel: ObservableObject {
             regionalSuggestions = []; previewBusy = false
             return
         }
+        guard lutContractReady else {
+            afterImage = nil; previewBusy = false; previewReport = .init()
+            status = "先依作者说明确认此自定义 LUT 的输入／输出空间，再进行逐图适配。"
+            return
+        }
         let settings = adjustments; let cube = selectedOption?.cube
         let outputSpace = exportSettings.colorSpace
         let selectedMask = selectedLocalMask
@@ -422,6 +442,7 @@ final class AppModel: ObservableObject {
                 var referenceSettings = settings
                 referenceSettings.masks = []
                 referenceSettings.creativeEffects = nil
+                referenceSettings.adaptiveLUT = nil
                 // These fields cannot affect a LUT-free, output-free reference.
                 // Canonicalize them so changing a look reuses measurements.
                 let defaults = AdjustmentSettings()
@@ -446,10 +467,13 @@ final class AppModel: ObservableObject {
                     self.cachedContentTargets = []
                     self.cachedContentSelections = nil
                     self.cachedRegionalSuggestions = nil
+                    self.cachedLUTContext = nil
                 }
                 try token.check()
-                let contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
+                var contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
                     .compactMap(\.contentSelection))
+                let adaptive = settings.adaptiveLUT?.enabled == true && cube != nil && settings.lutIntensity > 0
+                if adaptive { contentTargets.insert(.faceSkin) }
                 let contentSelections: ContentSelectionResult?
                 if contentTargets.isEmpty {
                     contentSelections = nil
@@ -463,9 +487,17 @@ final class AppModel: ObservableObject {
                     self.cachedContentTargets = contentTargets
                     self.cachedContentSelections = contentSelections
                 }
+                let lutContext: LUTSemanticContext?
+                if adaptive {
+                    if let cached = self.cachedLUTContext { lutContext = cached }
+                    else {
+                        let measured = try LUTSemanticContext.analyze(reference, cancellation: token)
+                        self.cachedLUTContext = measured; lutContext = measured
+                    }
+                } else { lutContext = nil }
                 let output = try self.engine.process(small, settings: settings, lut: cube, initialReport: loaded.report,
                                                      outputColorSpace: outputSpace, cancellation: token,
-                                                     preparedContentSelections: contentSelections)
+                                                     preparedContentSelections: contentSelections, preparedLUTContext: lutContext)
                 let space = outputSpace.cgColorSpace
                 let before = try PreviewRaster.make(small, context: self.engine.context, colorSpace: space)
                 let after = try PreviewRaster.make(output.image, context: self.engine.context, colorSpace: space)
@@ -712,6 +744,7 @@ final class AppModel: ObservableObject {
 
     func startBatch() {
         guard !batchRunning, !lutLibraryBusy, let input = inputRoot, !photos.isEmpty else { return }
+        guard lutContractReady else { status = "请先确认自定义 LUT 的输入／输出空间，再开始批处理。"; return }
         if outputRoot == nil { chooseOutput() }
         guard let output = outputRoot else { return }
         closeNativeInspection()
@@ -758,6 +791,7 @@ final class AppModel: ObservableObject {
 
     func openNativeInspection() {
         guard !batchRunning, !scanning, selectedPhoto != nil else { return }
+        guard lutContractReady else { status = "请先确认自定义 LUT 空间，再做原尺寸检查。"; return }
         cancelMaskInteraction()
         showNativeInspection = true
         refreshNativeInspection(immediate: true)
@@ -780,7 +814,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshNativeInspection(immediate: Bool = false, force: Bool = false) {
-        guard showNativeInspection, !batchRunning, !scanning, let photo = selectedPhoto else {
+        guard showNativeInspection, !batchRunning, !scanning, lutContractReady, let photo = selectedPhoto else {
             nativeInspection.cancel(); return
         }
         nativeInspection.request(photo: photo, recipe: recipe, lut: selectedOption?.cube,
@@ -1013,6 +1047,7 @@ final class AppModel: ObservableObject {
     }
 
     func saveRecipe() {
+        guard lutContractReady else { status = "先确认自定义 LUT 空间，再保存逐图适配配方。"; return }
         let panel = NSSavePanel(); panel.title = "保存调色配方"
         panel.nameFieldStringValue = "光屿配方.json"; panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -1047,6 +1082,7 @@ final class AppModel: ObservableObject {
                 target = id
             }
             adjustments = saved.adjustments; exportSettings = saved.export; selectedLUT = target
+            if saved.lutPath != nil { rememberLUTSpace() }
             automaticRecipe = saved.automatic; invalidateAnalysis()
             sceneIntent = saved.automatic?.sceneIntent ?? .automatic
             selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil

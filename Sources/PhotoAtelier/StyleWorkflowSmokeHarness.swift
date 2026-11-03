@@ -78,14 +78,21 @@ final class StyleWorkflowSmokeSession {
             switch phase {
             case 0:
                 guard ready, !model.lutLibraryBusy, model.proposalPreviews.count == 3 else { return }
-                try require(model.lutOptions.count == 14, "Thirteen built-in LUTs plus original color are available")
+                try require(model.lutOptions.count == 19, "Thirteen original and five attributed film LUTs plus original color are available")
                 countBeforeImport = model.lutOptions.count
                 model.importLUTFiles([evidence.appendingPathComponent("valid.cube"), evidence.appendingPathComponent("invalid.cube")])
                 model.outputRoot = output; model.startBatch()
                 try require(!model.batchRunning, "Batch start waits for the LUT library mutation to finish")
                 heartbeat = now; phaseStarted = now; phase = 1
             case 1:
-                guard !model.lutLibraryBusy, ready else { return }
+                guard !model.lutLibraryBusy else { return }
+                if !model.lutSpaceConfirmed {
+                    try require(model.afterImage == nil, "Unknown custom LUT space blocks a rendered main result")
+                    model.startBatch()
+                    try require(!model.batchRunning, "Unknown custom LUT space blocks batch export")
+                    model.rememberLUTSpace(); return
+                }
+                guard ready else { return }
                 timings["importSeconds"] = now.timeIntervalSince(phaseStarted)
                 try require(model.lutOptions.count == countBeforeImport + 1 && model.lutLibraryMessages.count == 1,
                             "Multi-file LUT import isolates a corrupt file and retains the valid file")
@@ -160,8 +167,8 @@ final class StyleWorkflowSmokeSession {
                 try snapshot(ContentView(model: model, initialTab: 1), name: "effects-workbench.png", size: .init(width: 1400, height: 900))
                 let encoded = try JSONEncoder().encode(model.recipe)
                 let restored = try JSONDecoder().decode(Recipe.self, from: encoded)
-                try require(restored.version == 8 && restored.adjustments.creativeEffects == model.adjustments.creativeEffects,
-                            "Recipe v8 round-trips selected effects")
+                try require(restored.version == 9 && restored.adjustments.creativeEffects == model.adjustments.creativeEffects,
+                            "Recipe v9 round-trips selected effects")
                 model.closeNativeInspection()
                 model.exportSettings.format = .tiff; model.exportSettings.colorSpace = .displayP3
                 model.outputRoot = output; model.startBatch(); phase = 8
@@ -172,8 +179,44 @@ final class StyleWorkflowSmokeSession {
                 let json = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any]
                 let recipe = json?["recipe"] as? [String: Any]
                 let adjustments = recipe?["adjustments"] as? [String: Any]
-                try require(recipe?["version"] as? Int == 8 && adjustments?["creativeEffects"] != nil,
-                            "Batch manifest freezes the v8 creative settings")
+                try require(recipe?["version"] as? Int == 9 && adjustments?["creativeEffects"] != nil,
+                            "Batch manifest freezes the v9 creative settings")
+                model.selectLUT("film-fuji-classic-neg")
+                model.requestPreview(immediate: true); phaseStarted = now; phase = 90
+            case 90:
+                guard ready, let report = model.previewReport.lutAdaptation else { return }
+                timings["filmPreviewSeconds"] = now.timeIntervalSince(phaseStarted)
+                try require(model.adjustments.adaptiveLUT?.enabled == true && model.lutSpaceConfirmed,
+                            "Selecting an attributed film enables per-photo adaptation with its known sRGB contract")
+                try require(report.candidates.count == 9 && report.requestedIntensity == model.adjustments.lutIntensity,
+                            "Main preview evaluates nine candidates without changing the requested strength")
+                try require(report.nativeIntroducedHighlights == 0 && report.nativeIntroducedShadows == 0,
+                            "Adaptive preview reports no introduced clipping at its input resolution")
+                let filmOptions = model.lutOptions.filter { $0.provenance != nil }
+                requestStyles(filmOptions); phaseStarted = now; phase = 91
+            case 91:
+                guard !model.stylePreviews.busy, model.stylePreviews.completed == 5 else { return }
+                timings["filmComparisonSeconds"] = now.timeIntervalSince(phaseStarted)
+                try require(model.stylePreviews.images.count == 5 && model.stylePreviews.cardErrors.isEmpty,
+                            "All five film comparisons render through the adaptive path")
+                model.openNativeInspection(); model.updateNativeInspection(pixelSize: 512); phase = 92
+            case 92:
+                guard !model.nativeInspection.busy, let frame = model.nativeInspection.frame else { return }
+                try require(frame.image.report.lutAdaptation?.candidates.count == 9,
+                            "Native inspection uses full-frame adaptive LUT evaluation")
+                try snapshot(ContentView(model: model, initialTab: 1), name: "film-workbench.png", size: .init(width: 1400, height: 900))
+                model.closeNativeInspection()
+                model.outputRoot = output.appendingPathComponent("adaptive-film", isDirectory: true)
+                model.startBatch(); phase = 93
+            case 93:
+                guard !model.batchRunning, let manifest = model.lastManifest else { return }
+                try require(model.succeeded == model.photos.count && model.failed == 0,
+                            "Attributed film identifier validates and all application inputs export")
+                let json = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any]
+                let entries = json?["entries"] as? [[String: Any]] ?? []
+                let records = entries.compactMap { ($0["report"] as? [String: Any])?["lutAdaptation"] as? [String: Any] }
+                try require(records.count == model.photos.count && records.allSatisfy { ($0["candidates"] as? [Any])?.count == 9 },
+                            "Each batch output keeps its own adaptive candidate evidence")
                 phase = 9
                 DispatchQueue.global(qos: .utility).async { [self] in
                     let result = Result { try hashes() }

@@ -771,7 +771,7 @@ final class AdaptiveDetailTests: XCTestCase {
             smoothing: 0.3, textureRetention: 0.85, toneUniformity: 0.1,
             noiseReduction: 0.2, detailRecovery: 0.1)
 
-        XCTAssertEqual(current.version, 8)
+        XCTAssertEqual(current.version, 9)
         current.version = 7
         XCTAssertNoThrow(try current.validateVersion())
         XCTAssertEqual(try JSONDecoder().decode(Recipe.self, from: JSONEncoder().encode(current)), current)

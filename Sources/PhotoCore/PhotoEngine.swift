@@ -276,6 +276,7 @@ public final class PhotoEngine {
         try require(settings.gamutCompression, within: 0...1, named: "色域压缩")
         if let harmony = settings.colorHarmony { try ColorHarmonyEngine.validate(harmony) }
         if let effects = settings.creativeEffects { try CreativeEffectsEngine.validate(effects) }
+        if let adaptation = settings.adaptiveLUT { try LUTAdaptationEngine.validate(adaptation) }
         try require(settings.rotationDegrees, within: -45...45, named: "旋转")
         try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
         try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
@@ -321,7 +322,8 @@ public final class PhotoEngine {
                         initialReport: ProcessingReport = .init(),
                         outputColorSpace: OutputColorSpace? = nil,
                         cancellation: CancellationToken? = nil,
-                        preparedContentSelections: ContentSelectionResult? = nil) throws -> ProcessedPhoto {
+                        preparedContentSelections: ContentSelectionResult? = nil,
+                        preparedLUTContext: LUTSemanticContext? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -408,8 +410,11 @@ public final class PhotoEngine {
         // The range/protection reference remains the global-only image throughout
         // both mask stages, avoiding feedback from preceding local adjustments.
         let localMaskReference = working
-        let contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
+        var contentTargets = Set(settings.masks.filter { $0.enabled && $0.opacity > 0 }
             .compactMap(\.contentSelection))
+        let adaptiveLUTActive = settings.adaptiveLUT?.enabled == true && lut != nil && settings.lutIntensity > 0
+        if adaptiveLUTActive { contentTargets.insert(.faceSkin) }
+        report.lutAdaptation = nil
         // A preview caller may reuse one result only while its source, global
         // reference and requested targets are unchanged. Batch callers leave
         // this nil so each still image receives fresh Vision requests.
@@ -461,6 +466,7 @@ public final class PhotoEngine {
             report.warnings.append(".cube 文件不包含输入传递函数标记，已按“\(settings.lutColorSpace.title)”解释输入和输出；Log 曲线 LUT 尚不支持自动识别。")
             let lutResult = try applyLUT(lut, to: working, colorSpace: settings.lutColorSpace,
                                          preciseSampling: settings.colorHarmony != nil
+                                            || adaptiveLUTActive
                                             || settings.lutColorSpace == .displayP3
                                             || settings.lutColorSpace == .rec709OETF)
             let outsideFraction = try fractionOutsideLUTDomain(lutResult.coverage, extent: working.extent)
@@ -470,21 +476,28 @@ public final class PhotoEngine {
             guard let kernel = Self.lookKernel else {
                 throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 编译失败。")
             }
-            guard let protected = kernel.apply(extent: working.extent, arguments: [
-                working,
-                lutResult.graded,
-                lutResult.coverage,
-                NSNumber(value: settings.lutIntensity),
-                NSNumber(value: settings.preserveLuminance),
-                NSNumber(value: settings.protectSkin),
-                NSNumber(value: settings.protectNeutrals),
-                // A P3 or target-aware pipeline must not first squeeze into sRGB.
-                NSNumber(value: settings.colorHarmony != nil || settings.lutColorSpace == .displayP3
-                         ? 0 : settings.gamutCompression)
-            ]) else {
-                throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 无法生成输出。")
+            let lutReference = working
+            func renderLook(_ intensity: Double, _ luminance: Double, _ skin: Double, _ neutral: Double) throws -> CIImage {
+                guard let protected = kernel.apply(extent: lutReference.extent, arguments: [
+                    lutReference, lutResult.graded, lutResult.coverage,
+                    NSNumber(value: intensity), NSNumber(value: luminance),
+                    NSNumber(value: skin), NSNumber(value: neutral),
+                    // A P3 or target-aware pipeline must not first squeeze into sRGB.
+                    NSNumber(value: settings.colorHarmony != nil || adaptiveLUTActive || settings.lutColorSpace == .displayP3
+                             ? 0 : settings.gamutCompression)
+                ]) else { throw AtelierError.invalidConfiguration("Core Image LUT 保护 kernel 无法生成输出。") }
+                return protected
             }
-            working = protected
+            if adaptiveLUTActive {
+                let semantics = try preparedLUTContext ?? LUTSemanticContext.analyze(localMaskReference, cancellation: cancellation)
+                let adapted = try LUTAdaptationEngine.apply(reference: lutReference, cube: lut, settings: settings,
+                    selections: contentSelections, semantics: semantics, target: outputColorSpace,
+                    context: context, cancellation: cancellation, render: renderLook)
+                working = adapted.image; report.lutAdaptation = adapted.report
+            } else {
+                working = try renderLook(settings.lutIntensity, settings.preserveLuminance,
+                                         settings.protectSkin, settings.protectNeutrals)
+            }
         }
         try cancellation?.check()
 
@@ -518,7 +531,7 @@ public final class PhotoEngine {
                                                         settings: harmony, scene: scene, context: context)
             }
             try cancellation?.check()
-            if let target = outputColorSpace, settings.colorHarmony != nil || hasCreativeEffects {
+            if let target = outputColorSpace, settings.colorHarmony != nil || hasCreativeEffects || adaptiveLUTActive {
                 working = try OutputGamutMapper.map(working, to: target, context: context)
             }
             report.colorQuality = try ColorQualityInspector.inspect(reference: localMaskReference,
@@ -555,6 +568,7 @@ public final class PhotoEngine {
         var base = settings
         base.masks = []
         base.creativeEffects = nil
+        base.adaptiveLUT = nil
         return try process(image, settings: base, lut: nil, cancellation: cancellation).image
     }
 

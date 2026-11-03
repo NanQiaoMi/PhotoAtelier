@@ -149,6 +149,11 @@ def verify_resource_payloads(resources, source):
 
     regular_file(resources / "THIRD_PARTY_NOTICES.md", "third-party notices")
     regular_file(resources / "LICENSE-MIT.txt", "application license")
+    film_license = resources / "FilmLUTs" / "LICENSE-MIT.txt"
+    regular_file(film_license, "film look MIT license")
+    require(digest(film_license) == "c487b0f66664fc7141ea8764edfed92b2d8969efdf50778e5bbf5f7a530e966f",
+            "Film look license differs from the pinned upstream notice")
+    regular_file(resources / "FilmLUTs" / "ATTRIBUTION.md", "film look attribution and color contract")
     regular_file(resources / "docs" / "lensfun-build.md", "bundled Lensfun build guide")
     regular_file(resources / "Scripts" / "prepare_lensfun.py", "bundled Lensfun preparation recipe")
     return len(expected_db)

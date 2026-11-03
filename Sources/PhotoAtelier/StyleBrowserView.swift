@@ -54,6 +54,21 @@ struct StyleBrowserView: View {
                 Spacer()
                 Text("切换风格保留你的强度").font(.caption2).foregroundColor(AtelierPalette.muted)
             }.disabled(model.batchRunning)
+            DisclosureGroup("理光风格与网络 LUT 来源") {
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("ColorReps：理光 GR 风格，非理光官方")
+                        HStack {
+                            Link("Positive Film", destination: URL(string: "https://colorreps.com/lut/ricoh-gr-positive-film")!)
+                            Link("Negative Film", destination: URL(string: "https://colorreps.com/lut/ricoh-gr-negative-film")!)
+                            Link("Standard", destination: URL(string: "https://colorreps.com/lut/ricoh-gr-standard")!)
+                        }
+                    }
+                    Text("从作者页面下载 .cube 后导入。作者未明确输入曲线与再分发许可，因此不随应用内置；请核实用途与空间，Log / ACES 表不能直接使用。")
+                        .foregroundColor(AtelierPalette.muted)
+                }.font(.caption2).padding(.top, 6)
+            }.font(.caption)
+            Group {
             if model.lutLibraryBusy {
                 HStack {
                     ProgressView().controlSize(.small)
@@ -73,6 +88,7 @@ struct StyleBrowserView: View {
                 Text(message + (model.lutLibraryMessages.count > 1 ? "；另有 \(model.lutLibraryMessages.count - 1) 项失败" : ""))
                     .font(.caption).foregroundColor(.orange).lineLimit(3)
             }
+            }
             if model.styleReference == nil {
                 Spacer(); Text("先打开照片，完成基础预览后即可比较风格。")
                     .foregroundColor(AtelierPalette.muted).frame(maxWidth: .infinity); Spacer()
@@ -91,7 +107,7 @@ struct StyleBrowserView: View {
             HStack {
                 Text("\(matches.count) 种风格\(matches.count > 48 ? " · 当前显示前 48 种，可搜索缩小范围" : "")")
                 Spacer()
-                Text("原创 sRGB 风格 · 自定义 LUT 请确认色彩空间")
+                Text("原创与署名胶片近似 · 自定义 LUT 请确认色彩空间")
             }.font(.caption2).foregroundColor(AtelierPalette.muted)
         }
         .padding(24).frame(width: 920, height: 700).background(AtelierPalette.background)

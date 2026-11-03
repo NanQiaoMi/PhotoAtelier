@@ -30,7 +30,7 @@ final class StyleWorkflowTests: XCTestCase {
         current.creativeEffects = .init(bloom: 0.3, vignette: 0.2, grain: 0.1)
         let automatic = AutomaticBatchRecipe(styleID: "balanced", baseline: current, referenceSettings: current)
         let recipe = Recipe(adjustments: current, automatic: automatic)
-        XCTAssertEqual(recipe.version, 8)
+        XCTAssertEqual(recipe.version, 9)
         let restored = try JSONDecoder().decode(Recipe.self, from: JSONEncoder().encode(recipe))
         XCTAssertEqual(restored, recipe)
         XCTAssertNoThrow(try restored.validateVersion())

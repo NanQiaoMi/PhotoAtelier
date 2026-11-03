@@ -28,7 +28,13 @@ enum AutomaticSafetyEvaluator {
     private static let maximumIntroducedFraction = 0.005
     private static let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
     private static let thresholdKernel = CIColorKernel(source: """
-    kernel vec4 automaticThresholds(__sample reference, __sample candidate) {
+    vec3 safetyTarget(vec3 c, float p3) {
+        if (p3 < 0.5) { return c; }
+        return vec3(0.8224619687 * c.r + 0.1775380313 * c.g,
+                    0.0331941989 * c.r + 0.9668058011 * c.g,
+                    0.0170826307 * c.r + 0.0723974407 * c.g + 0.9105199286 * c.b);
+    }
+    kernel vec4 automaticThresholds(__sample reference, __sample candidate, float p3) {
         float a = reference.a;
         // Alpha zero in this numeric mask is reserved for invalid visible data.
         // A separate minimum reduction rejects even one such pixel.
@@ -41,13 +47,14 @@ enum AutomaticSafetyEvaluator {
             && abs(c.r) <= 65504.0 && abs(c.g) <= 65504.0 && abs(c.b) <= 65504.0)) {
             return vec4(0.0);
         }
-        float high = ((c.r >= 1.0 && r.r < 1.0) || (c.g >= 1.0 && r.g < 1.0)
-                   || (c.b >= 1.0 && r.b < 1.0)) ? 1.0 : 0.0;
+        vec3 tr = safetyTarget(r, p3), tc = safetyTarget(c, p3);
+        float high = ((tc.r >= 1.0 && tr.r < 1.0) || (tc.g >= 1.0 && tr.g < 1.0)
+                   || (tc.b >= 1.0 && tr.b < 1.0)) ? 1.0 : 0.0;
         float y = dot(r, vec3(0.2126, 0.7152, 0.0722));
         float cy = dot(c, vec3(0.2126, 0.7152, 0.0722));
-        float low = ((cy <= 0.002 && y > 0.002) || (c.r < -0.0001 && r.r >= -0.0001)
-                  || (c.g < -0.0001 && r.g >= -0.0001)
-                  || (c.b < -0.0001 && r.b >= -0.0001)) ? 1.0 : 0.0;
+        float low = ((cy <= 0.002 && y > 0.002) || (tc.r < -0.0001 && tr.r >= -0.0001)
+                  || (tc.g < -0.0001 && tr.g >= -0.0001)
+                  || (tc.b < -0.0001 && tr.b >= -0.0001)) ? 1.0 : 0.0;
         float weight = clamp(a, 0.0, 1.0);
         // Alpha=1 keeps these numeric accumulators independent of premultiplication.
         return vec4(high * weight, low * weight, weight, 1.0);
@@ -102,10 +109,12 @@ enum AutomaticSafetyEvaluator {
         throw AtelierError.invalidConfiguration("自动基础调整无法通过像素安全检查，请保留原参数并手动比较。")
     }
 
-    static func areaFractions(reference: CIImage, candidate: CIImage, context: CIContext) throws
+    static func areaFractions(reference: CIImage, candidate: CIImage, context: CIContext,
+                              outputColorSpace: OutputColorSpace? = nil) throws
         -> (highlights: Double, shadows: Double) {
         guard let kernel = thresholdKernel,
-              let flags = kernel.apply(extent: reference.extent, arguments: [reference, candidate]) else {
+              let flags = kernel.apply(extent: reference.extent, arguments: [reference, candidate,
+                NSNumber(value: outputColorSpace == .displayP3 ? 1 : 0)]) else {
             throw AtelierError.invalidConfiguration("无法建立原尺寸自动基础调整阈值图。")
         }
         let region = [kCIInputExtentKey: CIVector(cgRect: reference.extent)]
@@ -140,7 +149,29 @@ enum AutomaticSafetyEvaluator {
         value.horizontalPerspective = 0
         value.masks = []
         value.creativeEffects = nil
+        value.adaptiveLUT = nil
         return value
+    }
+
+    /// Checks extrema of the native threshold map, preserving even isolated
+    /// highlights that an area-fraction tolerance would otherwise accept.
+    static func hasIntroducedClipping(reference: CIImage, candidate: CIImage, context: CIContext,
+                                       outputColorSpace: OutputColorSpace? = nil) throws -> Bool {
+        guard let kernel = thresholdKernel,
+              let flags = kernel.apply(extent: reference.extent, arguments: [reference, candidate,
+                NSNumber(value: outputColorSpace == .displayP3 ? 1 : 0)]) else {
+            throw AtelierError.invalidConfiguration("无法建立原尺寸剪切极值检查。")
+        }
+        let maximum = flags.applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: reference.extent)])
+        var values = [Float](repeating: 0, count: 4)
+        values.withUnsafeMutableBytes { buffer in
+            context.render(maximum, toBitmap: buffer.baseAddress!, rowBytes: 16,
+                bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBAf, colorSpace: nil)
+        }
+        guard values.allSatisfy(\.isFinite) else {
+            throw AtelierError.invalidConfiguration("原尺寸剪切极值检查产生异常数值。")
+        }
+        return values[0] > 0.000001 || values[1] > 0.000001
     }
 
     static func sampledSource(_ image: CIImage, limit: Int) throws -> CIImage {

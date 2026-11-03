@@ -257,6 +257,8 @@ public struct AdjustmentSettings: Codable, Equatable {
     public var colorHarmony: ColorHarmonySettings? = .init()
     /// Optional for pixel compatibility with recipes created before v8.
     public var creativeEffects: CreativeEffectsSettings? = nil
+    /// Optional for exact compatibility with recipes written before v9.
+    public var adaptiveLUT: AdaptiveLUTSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -273,8 +275,8 @@ public struct ExportSettings: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    /// Version 8 adds independently adjustable creative effects.
-    public var version = 8
+    /// Version 9 adds opt-in per-photo LUT candidate evaluation.
+    public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
     public var lutPath: String?
@@ -289,7 +291,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...8).contains(version) else {
+        guard (1...9).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
@@ -304,6 +306,11 @@ public struct Recipe: Codable, Equatable {
                           automatic?.referenceSettings.masks ?? []]
         let effects = [adjustments.creativeEffects, automatic?.baseline.creativeEffects,
                        automatic?.referenceSettings.creativeEffects]
+        let adaptations = [adjustments.adaptiveLUT, automatic?.baseline.adaptiveLUT,
+                           automatic?.referenceSettings.adaptiveLUT]
+        guard version >= 9 || adaptations.allSatisfy({ $0 == nil || $0?.enabled == false }) else {
+            throw AtelierError.invalidConfiguration("逐图 LUT 适配需要配方版本 9，不能静默降级。")
+        }
         guard version >= 8 || effects.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("辉光、暗角与颗粒需要配方版本 8，不能静默降级。")
         }
@@ -338,6 +345,7 @@ public struct ProcessingReport: Codable, Equatable {
     public var analysis: AutomaticAnalysisRecord?
     public var colorQuality: ColorQualityReport?
     public var lutCompatibility: LUTCompatibilityReport?
+    public var lutAdaptation: LUTAdaptationReport?
     public var contentSelection: ContentSelectionReport?
     public var localDetails: [LocalDetailPlan]?
     public init() {}

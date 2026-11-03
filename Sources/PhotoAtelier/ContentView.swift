@@ -46,7 +46,6 @@ struct ContentView: View {
         .tint(AtelierPalette.accent)
         .onChange(of: model.adjustments) { _ in model.requestPreview() }
         .onChange(of: model.selectedLUT) { _ in model.requestPreview() }
-        .onChange(of: model.adjustments.lutColorSpace) { _ in model.rememberLUTSpace() }
         .onChange(of: model.exportSettings.recursive) { _ in model.reloadFolder() }
         .onChange(of: model.exportSettings.colorSpace) { _ in model.requestPreview() }
         .onChange(of: model.selectedMask) { _ in model.maskSelectionChanged() }
@@ -291,10 +290,15 @@ struct ContentView: View {
             }
             Group {
                 AdjustmentSlider(title: "LUT 强度", value: $model.adjustments.lutIntensity, range: 0...1, percent: true)
-                Picker("LUT 色彩空间", selection: $model.adjustments.lutColorSpace) {
+                Picker("LUT 色彩空间", selection: Binding(get: { model.adjustments.lutColorSpace },
+                    set: { model.setLUTColorSpace($0) })) {
                     ForEach(LUTColorSpace.allCases, id: \.self) { Text($0.title).tag($0) }
                 }.font(.system(size: 10)).padding(.bottom, 12).disabled(model.selectedOption?.path == nil)
-                Text("按作者说明选择输入／输出相同的空间与曲线。P3 与 sRGB 原色不同；Rec.709 Gamma 2.4 与摄像机 OETF 分开选择。Log / HDR / ACES 需先转换。")
+                if model.selectedOption?.path != nil, !model.lutSpaceConfirmed {
+                    Button("确认使用 \(model.adjustments.lutColorSpace.title)") { model.rememberLUTSpace() }
+                        .font(.system(size: 10)).padding(.bottom, 8)
+                }
+                Text("仅支持输入／输出相同的空间与曲线。作者未声明时，选择只是你的解释，不能证明契约正确。P3、sRGB、Rec.709 曲线需区分；Log / HDR / ACES 需先转换。")
                     .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4).padding(.bottom, 16)
                 AdjustmentSlider(title: "保留原始亮度", value: $model.adjustments.preserveLuminance, range: 0...1, percent: true)
                 AdjustmentSlider(title: "肤色保护", value: $model.adjustments.protectSkin, range: 0...1, percent: true)
@@ -306,6 +310,7 @@ struct ContentView: View {
             Text("保护是可调的色彩约束，无法判断所有风格是否适合每张照片。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             }
+            AdaptiveLUTPanel(model: model)
             separator
             Group {
                 CreativeEffectsPanel(model: model)

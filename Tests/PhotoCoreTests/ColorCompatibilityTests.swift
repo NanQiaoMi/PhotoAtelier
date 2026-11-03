@@ -285,14 +285,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughSevenAndRejectsEight() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughNineAndRejectsTen() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...8 {
+        for version in 1...9 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,8 +305,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 9
-        let rejectedOutput = root.appendingPathComponent("output-9", isDirectory: true)
+        futureRecipe.version = 10
+        let rejectedOutput = root.appendingPathComponent("output-10", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))

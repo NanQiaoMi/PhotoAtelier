@@ -44,6 +44,7 @@ final class StylePreviewController: ObservableObject {
         style.gamutCompression = adjustments.gamutCompression
         style.colorHarmony = adjustments.colorHarmony
         style.creativeEffects = adjustments.creativeEffects
+        style.adaptiveLUT = adjustments.adaptiveLUT
         let key = RequestKey(source: ObjectIdentifier(source), options: options.map(\.id), settings: style,
                              outputSpace: outputSpace, spaces: remembered)
         guard lastRequest != key else { return }
@@ -67,24 +68,38 @@ final class StylePreviewController: ObservableObject {
                     try token.check()
                     return CIImage(cgImage: baked)
                 }
+                let selections: ContentSelectionResult?
+                let semantics: LUTSemanticContext?
+                if style.adaptiveLUT?.enabled == true {
+                    // Shared once per comparison request, never per LUT candidate.
+                    selections = try ContentSelectionAnalyzer.analyze(reference: small, targets: [.faceSkin],
+                        context: self.engine.context, cancellation: token)
+                    semantics = try LUTSemanticContext.analyze(small, cancellation: token)
+                } else { selections = nil; semantics = nil }
                 self.renderNext(0, source: small, options: options, settings: style,
-                                space: outputSpace, spaces: remembered, token: token, generation: generation)
+                                space: outputSpace, spaces: remembered, selections: selections,
+                                semantics: semantics, token: token, generation: generation)
             } catch { self.fail(error, token: token, generation: generation) }
         }
     }
 
     private func renderNext(_ index: Int, source: CIImage, options: [LUTOption], settings: AdjustmentSettings,
-                            space: OutputColorSpace, spaces: [String: String], token: CancellationToken, generation: UUID) {
+                            space: OutputColorSpace, spaces: [String: String], selections: ContentSelectionResult?,
+                            semantics: LUTSemanticContext?, token: CancellationToken, generation: UUID) {
         // One card per queue job lets current-photo work enter between cards.
         queue.async { [weak self] in
             guard let self = self, !token.isCancelled else { return }
             do {
                 let cg = try autoreleasepool { () throws -> CGImage in
                     var selected = settings
+                    if options[index].path != nil, spaces[options[index].id] == nil {
+                        throw AtelierError.invalidConfiguration("先选择并确认此 LUT 的输入／输出空间，再比较逐图适配效果。")
+                    }
                     selected.lutColorSpace = options[index].path == nil ? .sRGB :
                         LUTColorSpace(rawValue: spaces[options[index].id] ?? "") ?? .sRGB
                     let result = try self.engine.process(source, settings: selected, lut: options[index].cube,
-                                                         outputColorSpace: space, cancellation: token)
+                        outputColorSpace: space, cancellation: token,
+                        preparedContentSelections: selections, preparedLUTContext: semantics)
                     let raster = try PreviewRaster.make(result.image, context: self.engine.context,
                                                         colorSpace: space.cgColorSpace)
                     try token.check()
@@ -96,7 +111,8 @@ final class StylePreviewController: ObservableObject {
                     self.completed = index + 1
                     if index + 1 == options.count { self.busy = false }
                     else { self.renderNext(index + 1, source: source, options: options, settings: settings,
-                                          space: space, spaces: spaces, token: token, generation: generation) }
+                                          space: space, spaces: spaces, selections: selections,
+                                          semantics: semantics, token: token, generation: generation) }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -105,7 +121,8 @@ final class StylePreviewController: ObservableObject {
                     self.completed = index + 1
                     if index + 1 == options.count { self.busy = false }
                     else { self.renderNext(index + 1, source: source, options: options, settings: settings,
-                                          space: space, spaces: spaces, token: token, generation: generation) }
+                                          space: space, spaces: spaces, selections: selections,
+                                          semantics: semantics, token: token, generation: generation) }
                 }
             }
         }

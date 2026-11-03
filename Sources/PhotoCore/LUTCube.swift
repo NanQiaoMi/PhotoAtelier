@@ -26,11 +26,13 @@ public struct LUTPreset: Identifiable {
     public let group: LUTPresetGroup
     public let recommendedIntensity: Double
     public let tags: [String]
+    public let provenance: LUTProvenance?
 
     public init(id: String, name: String, detail: String, cube: LUTCube,
                 group: LUTPresetGroup = .natural,
                 recommendedIntensity: Double = 0.35,
-                tags: [String] = []) {
+                tags: [String] = [],
+                provenance: LUTProvenance? = nil) {
         self.id = id
         self.name = name
         self.detail = detail
@@ -39,6 +41,7 @@ public struct LUTPreset: Identifiable {
         self.recommendedIntensity = recommendedIntensity.isFinite
             ? min(max(recommendedIntensity, 0), 1) : 0.35
         self.tags = tags
+        self.provenance = provenance
     }
 }
 
@@ -56,8 +59,8 @@ public struct LUTCube {
     private static let maximumDimension = 128
     private static let maximumTextBytes = 128 * 1024 * 1024
 
-    private init(title: String, size: Int, domainMin: SIMD3<Float>,
-                 domainMax: SIMD3<Float>, rgba: [Float]) {
+    init(title: String, size: Int, domainMin: SIMD3<Float>,
+         domainMax: SIMD3<Float>, rgba: [Float]) {
         self.title = title
         self.size = size
         self.domainMin = domainMin
