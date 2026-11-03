@@ -16,3 +16,5 @@ test-output/
 .dependencies/
 .venv/
 __pycache__/
+
+.agentteam/
