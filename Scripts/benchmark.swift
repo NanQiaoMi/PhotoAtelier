@@ -14,6 +14,13 @@
 //   happens in the same process; phase RSS samples are recorded separately.
 // - Batch export runs the real BatchProcessor over the corpus, but not the app's
 //   UI batch bar; cancellation and progress UI are out of scope here.
+// - P1 capability phases are headless probes of the real PhotoCore engines:
+//   "colorToolsAndLensEffects" renders curves/HSL/grading + vignette/CA at full
+//   resolution, "liquify" uses a deterministic synthetic face-landmark geometry
+//   (not a detected real face) plus a manual push stroke, and "watermark" renders
+//   a text watermark with the system font. They measure pipeline cost only; they
+//   are not a real-photo aesthetic, face-reshaping or typography acceptance.
+// - schemaVersion 2 adds those P1 phases; the P0 phases keep their old meaning.
 //
 // Compile against already-built PhotoCore objects (same approach as
 // docs/adaptive-detail.md:62). From the repository root:
@@ -21,12 +28,12 @@
 //   BIN="$(swift build --show-bin-path)"   # e.g. .build/x86_64-apple-macosx/debug
 //   swiftc -I "$BIN" -I "$BIN/CLensfunBridge.build" Scripts/benchmark.swift \
 //     "$BIN"/PhotoCore.build/*.o "$BIN"/CLensfunBridge.build/CLensfunBridge.c.o \
-//     -o artifacts/p0-20261103/benchmark/benchmark
-//   artifacts/p0-20261103/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
+//     -o artifacts/p1-4-verify/benchmark/benchmark
+//   artifacts/p1-4-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 // The object layout is SwiftPM's standard debug layout; --show-bin-path keeps the
 // command portable across architectures and custom scratch directories.
 //
-// Output defaults to artifacts/p0-20261103/benchmark/benchmark.json and all
+// Output defaults to artifacts/p1-4-verify/benchmark/benchmark.json and all
 // generated inputs/exports stay under artifacts/ (gitignored). Input photographs
 // outside the synthetic corpus are never read.
 
@@ -48,8 +55,8 @@ guard manager.fileExists(atPath: root.appendingPathComponent("Package.swift").pa
     FileHandle.standardError.write(Data("benchmark: run from the repository root (Package.swift not found in \(root.path))\n".utf8))
     exit(2)
 }
-let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p0-20261103/benchmark/benchmark.json")
-let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p0-20261103/benchmark", isDirectory: true)
+let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1-4-verify/benchmark/benchmark.json")
+let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1-4-verify/benchmark", isDirectory: true)
 let corpusRoot = workRoot.appendingPathComponent("corpus", isDirectory: true)
 let runStamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 let exportRoot = workRoot.appendingPathComponent("export-\(runStamp)", isDirectory: true)
@@ -219,6 +226,108 @@ func previewProxy(_ loaded: LoadedPhoto, engine: PhotoEngine, settings: Adjustme
     return rendered
 }
 
+// MARK: - P1 capability probes (headless, real PhotoCore engines)
+
+/// Forces a lazy Core Image graph to execute at full resolution so timings cover
+/// real pixel work, not just graph construction.
+func renderFullResolution(_ image: CIImage, engine: PhotoEngine) throws -> CGImage {
+    let bounds = image.extent.integral
+    guard bounds.width >= 1, bounds.height >= 1,
+          bounds.width < 20_000, bounds.height < 20_000,
+          bounds.minX.isFinite, bounds.minY.isFinite else {
+        throw AtelierError.imageRead("P1 能力渲染范围无效")
+    }
+    guard let rendered = engine.context.createCGImage(image, from: bounds, format: .RGBA8,
+                                                      colorSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                                      deferred: false) else {
+        throw AtelierError.imageRead("P1 能力全分辨率渲染失败")
+    }
+    return rendered
+}
+
+/// Fixed non-neutral P1 color-tool payload (curves + HSL + grading).
+func benchmarkColorToolsSettings() -> ColorToolsSettings {
+    var curves = ColorCurveSettings()
+    curves.luminance = [CurveControlPoint(x: 0, y: 0),
+                        CurveControlPoint(x: 0.5, y: 0.58),
+                        CurveControlPoint(x: 1, y: 1)]
+    curves.red = [CurveControlPoint(x: 0, y: 0.02),
+                  CurveControlPoint(x: 1, y: 0.98)]
+    var hsl = HSLSettings()
+    hsl.orange.saturation = 0.25
+    hsl.blue.hueShiftDegrees = 8
+    var grading = ColorGradingSettings()
+    grading.shadows = ColorGradingWheel(hueDegrees: 210, saturation: 0.12, luminance: -0.02)
+    grading.highlights = ColorGradingWheel(hueDegrees: 40, saturation: 0.10, luminance: 0.02)
+    return ColorToolsSettings(curves: curves, hsl: hsl, grading: grading)
+}
+
+/// Fixed non-neutral lens-effects payload (vignette + lateral CA).
+func benchmarkLensEffectsSettings() -> LensEffectsSettings {
+    LensEffectsSettings(vignetteAmount: 0.35, vignetteMidpoint: 0.5, vignetteFeather: 0.5,
+                        vignetteRoundness: 1, chromaticAberrationRed: 0.2,
+                        chromaticAberrationBlue: -0.15)
+}
+
+/// Deterministic synthetic face geometry in normalized coordinates (bottom-left
+/// origin). This is NOT a detected real face: the liquify phase only needs a
+/// plausible landmark topology to exercise the automatic face-shape warp.
+func syntheticFaceLandmarks() -> FaceLandmarkSet {
+    func ellipse(center: CGPoint, radiusX: Double, radiusY: Double, count: Int) -> [CGPoint] {
+        (0..<count).map { index in
+            let angle = 2 * Double.pi * Double(index) / Double(count)
+            return CGPoint(x: center.x + radiusX * cos(angle),
+                           y: center.y + radiusY * sin(angle))
+        }
+    }
+    let box = CGRect(x: 0.30, y: 0.22, width: 0.40, height: 0.52)
+    var contour: [CGPoint] = []
+    for index in 0..<20 {
+        let angle = Double.pi * 0.12 + Double.pi * 1.76 * Double(index) / 19
+        contour.append(CGPoint(x: box.midX + box.width * 0.5 * cos(angle),
+                               y: box.midY + box.height * 0.5 * sin(angle)))
+    }
+    let leftEyeCenter = CGPoint(x: box.minX + box.width * 0.32, y: box.minY + box.height * 0.62)
+    let rightEyeCenter = CGPoint(x: box.minX + box.width * 0.68, y: box.minY + box.height * 0.62)
+    let leftEye = ellipse(center: leftEyeCenter, radiusX: box.width * 0.10,
+                          radiusY: box.height * 0.05, count: 8)
+    let rightEye = ellipse(center: rightEyeCenter, radiusX: box.width * 0.10,
+                           radiusY: box.height * 0.05, count: 8)
+    let nose = [CGPoint(x: box.midX, y: box.minY + box.height * 0.44),
+                CGPoint(x: box.midX - box.width * 0.06, y: box.minY + box.height * 0.50),
+                CGPoint(x: box.midX + box.width * 0.06, y: box.minY + box.height * 0.50)]
+    let outerLips = ellipse(center: CGPoint(x: box.midX, y: box.minY + box.height * 0.34),
+                            radiusX: box.width * 0.16, radiusY: box.height * 0.06, count: 10)
+    let innerLips = ellipse(center: CGPoint(x: box.midX, y: box.minY + box.height * 0.34),
+                            radiusX: box.width * 0.08, radiusY: box.height * 0.025, count: 8)
+    return FaceLandmarkSet(boundingBox: box, confidence: 0.99,
+                           faceContour: contour,
+                           leftEye: leftEye, rightEye: rightEye,
+                           leftEyebrow: [], rightEyebrow: [],
+                           nose: nose, outerLips: outerLips, innerLips: innerLips,
+                           leftPupil: leftEyeCenter, rightPupil: rightEyeCenter)
+}
+
+/// Fixed non-neutral face-reshape payload: preset + sliders + one manual stroke.
+func benchmarkFaceReshapeSettings() -> FaceReshapeSettings {
+    FaceReshapeSettings(
+        preset: .classic,
+        parameters: FaceReshapeParameters(slimFace: 0.4, enlargeEyes: 0.3),
+        strength: 1,
+        backgroundProtection: true,
+        strokes: [WarpStroke(mode: .push,
+                             points: [MaskPoint(x: 0.52, y: 0.42),
+                                      MaskPoint(x: 0.56, y: 0.44)],
+                             radius: 0.10, strength: 0.5)])
+}
+
+/// Fixed text watermark payload (system font, bottom-right anchor).
+func benchmarkWatermarkSettings() -> WatermarkSettings {
+    WatermarkSettings(kind: .text, text: "光屿 PHOTO · P1 BENCH",
+                      anchor: .bottomRight, opacity: 0.6, scale: 1.0,
+                      rotationDegrees: 0)
+}
+
 // MARK: - Run
 
 var phaseRows: [String: Any] = [:]
@@ -365,7 +474,119 @@ do {
         "note": "headless decode -> 1500px bake -> PhotoEngine.process -> RGBA8 render; not SwiftUI drawing",
     ] as [String: Any]
 
-    // 5. Batch export through the real BatchProcessor, with input hashes checked.
+    // 5. P1 color tools + lens effects at full resolution (headless).
+    let colorToolsStart = CFAbsoluteTimeGetCurrent()
+    let colorToolsSettings = benchmarkColorToolsSettings()
+    let lensEffectsSettings = benchmarkLensEffectsSettings()
+    var colorToolsRows: [[String: Any]] = []
+    var colorToolsCount = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let toolsOutput = try ColorToolsEngine.apply(colorToolsSettings, to: loaded.image)
+            let lensOutput = try LensEffectsEngine.apply(lensEffectsSettings, to: toolsOutput)
+            let rendered = try renderFullResolution(lensOutput, engine: engine)
+            colorToolsCount += 1
+            colorToolsRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "width": rendered.width,
+                "height": rendered.height,
+            ])
+        } catch {
+            failures.append("color tools phase failed for \(spec.filename): \(error.localizedDescription)")
+            colorToolsRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["colorToolsAndLensEffects"] = [
+        "milliseconds": milliseconds(since: colorToolsStart),
+        "perImage": colorToolsRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": [
+            "curves": "luminance + red PCHIP curves",
+            "hsl": "orange saturation +0.25, blue hue +8°",
+            "grading": "shadows 210°/0.12, highlights 40°/0.10",
+            "lensEffects": "vignette +0.35, CA red +0.20 / blue -0.15",
+        ] as [String: Any],
+        "note": "headless full-resolution render of the real ColorToolsEngine + LensEffectsEngine; not an aesthetic acceptance",
+    ] as [String: Any]
+
+    // 6. Liquify / face reshape on one JPEG per corpus size (headless probe).
+    let liquifyStart = CFAbsoluteTimeGetCurrent()
+    let liquifySpecs = corpusSpecs.filter { $0.format == "jpeg" }
+    let reshapeSettings = benchmarkFaceReshapeSettings()
+    let syntheticLandmarks = syntheticFaceLandmarks()
+    var liquifyRows: [[String: Any]] = []
+    var liquifyCount = 0
+    for spec in liquifySpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let output = try FaceReshapeEngine.apply(to: loaded.image,
+                                                     landmarks: syntheticLandmarks,
+                                                     settings: reshapeSettings)
+            let rendered = try renderFullResolution(output, engine: engine)
+            liquifyCount += 1
+            liquifyRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "width": rendered.width,
+                "height": rendered.height,
+            ])
+        } catch {
+            failures.append("liquify phase failed for \(spec.filename): \(error.localizedDescription)")
+            liquifyRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["liquify"] = [
+        "milliseconds": milliseconds(since: liquifyStart),
+        "perImage": liquifyRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["preset": "classic", "parameters": "slimFace 0.4, enlargeEyes 0.3",
+                     "strength": 1.0, "backgroundProtection": true,
+                     "manualStrokes": 1] as [String: Any],
+        "note": "deterministic synthetic face-landmark geometry (not a detected real face) + one manual push stroke; one JPEG per corpus size; not a beauty acceptance",
+    ] as [String: Any]
+
+    // 7. Text watermark render at full resolution (headless probe).
+    let watermarkStart = CFAbsoluteTimeGetCurrent()
+    let watermarkSettings = benchmarkWatermarkSettings()
+    var watermarkRows: [[String: Any]] = []
+    var watermarkCount = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let watermarked = try WatermarkRenderer.render(on: loaded.image,
+                                                           settings: watermarkSettings)
+            let rendered = try renderFullResolution(watermarked, engine: engine)
+            watermarkCount += 1
+            watermarkRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "width": rendered.width,
+                "height": rendered.height,
+            ])
+        } catch {
+            failures.append("watermark phase failed for \(spec.filename): \(error.localizedDescription)")
+            watermarkRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["watermark"] = [
+        "milliseconds": milliseconds(since: watermarkStart),
+        "perImage": watermarkRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["kind": "text", "text": "光屿 PHOTO · P1 BENCH",
+                     "anchor": "bottomRight", "opacity": 0.6, "scale": 1.0,
+                     "rotationDegrees": 0, "font": "system"] as [String: Any],
+        "note": "headless full-resolution text watermark with the system font; not a typography or real-photo acceptance",
+    ] as [String: Any]
+
+    // 8. Batch export through the real BatchProcessor, with input hashes checked.
     var beforeHashes: [String: String] = [:]
     for spec in corpusSpecs {
         let url = corpusRoot.appendingPathComponent(spec.filename)
@@ -443,6 +664,9 @@ do {
     if importedCount != corpusSpecs.count { failures.append("import covered \(importedCount)/\(corpusSpecs.count) fixtures") }
     if analyzedCount != corpusSpecs.count { failures.append("analysis covered \(analyzedCount)/\(corpusSpecs.count) fixtures") }
     if previewedCount != corpusSpecs.count { failures.append("preview covered \(previewedCount)/\(corpusSpecs.count) fixtures") }
+    if colorToolsCount != corpusSpecs.count { failures.append("color tools phase covered \(colorToolsCount)/\(corpusSpecs.count) fixtures") }
+    if liquifyCount != liquifySpecs.count { failures.append("liquify phase covered \(liquifyCount)/\(liquifySpecs.count) fixtures") }
+    if watermarkCount != corpusSpecs.count { failures.append("watermark phase covered \(watermarkCount)/\(corpusSpecs.count) fixtures") }
     if batchSummary.succeeded != corpusSpecs.count { failures.append("batch exported \(batchSummary.succeeded)/\(corpusSpecs.count) fixtures") }
     if batchSummary.failed != 0 { failures.append("batch reported \(batchSummary.failed) failures") }
     if exportedFiles.count != corpusSpecs.count { failures.append("batch produced \(exportedFiles.count) export files, expected \(corpusSpecs.count)") }
@@ -451,7 +675,7 @@ do {
     let peak = peakResidentBytes()
     let totalMS = milliseconds(since: processStart)
     var report: [String: Any] = [
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
         "command": arguments.joined(separator: " "),
         "workRoot": workRoot.path,
@@ -478,6 +702,9 @@ do {
             "batch export covers BatchProcessor throughput, not the app's batch UI, progress bar or cancellation UX",
             "RSS is process-wide and includes corpus generation; timings vary with machine load",
             "HEIC encoding on this host logs AppleAVE XPC fallback messages; ImageIO still finalizes valid HEIC files (decode is verified by the import phase)",
+            "P1 color-tools/lens-effects and watermark phases are headless full-resolution renders of the real engines; they are not a real-photo aesthetic or typography acceptance",
+            "P1 liquify phase uses deterministic synthetic face-landmark geometry, not a detected real face; timings only",
+            "schemaVersion 2 adds the P1 phases; the P0 phases (corpus/import/analysis/preview/batch) keep their earlier meaning",
         ],
     ]
     if !failures.isEmpty { report["failures"] = failures }
