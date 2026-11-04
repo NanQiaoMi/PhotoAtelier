@@ -78,12 +78,12 @@
 
 | 检查 | 结果 | 证据 |
 |---|---|---|
-| `make check`（构建 + 全量测试） | 退出码 0，全部通过 | 见最终验收日志 |
+| `make check`（构建 + 全量测试） | 退出码 0，**326 tests / 0 failures**（151.06s） | 最终验收日志 |
 | 新增定向测试 | FaceSemanticTests、PortraitRetouchTests、ReferenceColorMatchTests、UndoHistoryTests、PhotoSelectionTests、IOTests、BatchTests、ColorCompatibilityTests 等 | 各工作项报告与 `artifacts/` |
-| `bash Scripts/build_app.sh` | 退出码 0，包校验通过 | 构建日志 |
-| `bash Scripts/ui_smoke.sh` | 退出码 0，页签/截图 | `artifacts/p0-20261103/ui-smoke/` |
-| `Scripts/benchmark.swift` | 退出码 0，JSON 记录 | `artifacts/p0-20261103/benchmark/` |
-| 应用级自检 | `APP_SMOKE PASS`（含人像/追色面板快照） | `--self-test` 证据目录 |
+| `bash Scripts/build_app.sh` | 退出码 0，4 签名 dylib/55 XML/许可/portable paths 通过；`codesign --verify --deep --strict` 与 `verify_app.py` 均 exit 0 | 构建日志 |
+| `bash Scripts/ui_smoke.sh`（重建包） | 退出码 0，**6 页签 / 8 截图**（分析/基础/局部/人像/追色/导出） | `artifacts/p0-20261103/ui-smoke/` |
+| `Scripts/benchmark.swift`（最终树重编译） | 编译/运行均退出 0，`benchmark: PASS`，9/9 批量导出，peak RSS 3768.5MB | `artifacts/p0-20261103/benchmark/` |
+| 应用级自检 | `APP_SMOKE PASS · 36 checks` + `PORTRAIT_CONTRACT_SELF_CHECK PASS`（含人像/追色面板快照） | `--self-test` 证据目录 |
 
 **未验证项（不得当作已验收）**：
 1. 真实照片的人像/追色审美与画质评审（需要用户提供授权样片后单独执行）。

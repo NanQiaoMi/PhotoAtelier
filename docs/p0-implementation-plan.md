@@ -242,6 +242,19 @@
 | W9 基准与 UI 冒烟 | ✅ approved | `artifacts/p0-20261103/{benchmark,ui-smoke}/`；重建 bundle 上 5 页签/7 截图 PASS |
 | S1 配方 v10 边界回归 | ✅ approved | LocalMaskTests 19/19、SceneAdaptiveTests 15/15 |
 | S2 人像 UI 状态诚实性 | ✅ approved | maxFaces=4、皮肤覆盖阈值、v10 自动升级断言；`artifacts/p0-20261103/verify-s2/` |
-| S3 追色评审遗留修复 | 进行中 | skinOnly 覆盖阈值、v10 automatic 分支、来源名/测量竞态 |
+| S3 追色评审遗留修复 | ✅ approved | skinOnly 覆盖阈值单点化、v10 automatic 分支、来源名/测量竞态；ColorCompatibilityTests 25/25 |
 
-**最终验收待办**：全量 `make check`、`bash Scripts/build_app.sh`、重建包 `bash Scripts/ui_smoke.sh`、最终树 benchmark、README/[P0 交付说明](p0-release-notes.md) 更新、提交到 `feat/p0-gap-closure`。
+**最终验收结果（2026-11-04，全部实测）**：
+
+| 检查 | 命令 | 退出码 | 关键输出 |
+|---|---|---|---|
+| 全量构建与测试 | `make check` | 0 | `Executed 326 tests, with 0 failures`（151.06s） |
+| Release 打包与签名 | `bash Scripts/build_app.sh` | 0 | 4 个签名 x86_64 dylib、55 XML、许可集合、portable paths 全部通过 |
+| 包校验 | `codesign --verify --deep --strict build/PhotoAtelier.app` / `python3 Scripts/verify_app.py build/PhotoAtelier.app` | 0 / 0 | 严格签名与包内容校验通过 |
+| UI 冒烟（重建包） | `bash Scripts/ui_smoke.sh` | 0 | `PASS: 6 tabs switched, 8 screenshots`；页签：分析/基础/局部/人像/追色/导出 |
+| 性能基准（最终树） | `swiftc … Scripts/benchmark.swift` + 运行 | 0 / 0 | `benchmark: PASS`；9/9 批量导出，peak RSS 3768.5MB，JSON 在 `artifacts/p0-20261103/benchmark/benchmark.json` |
+| 应用级自检 | `.build/debug/PhotoAtelier --self-test artifacts/demo/input …` | 0 | `APP_SMOKE PASS · 36 checks` + `PORTRAIT_CONTRACT_SELF_CHECK PASS`（人像/追色面板快照） |
+
+**提交**：`b12f14f feat(p0): add HEIC import, undo/redo, face masks, portrait v1, reference color and QA tooling`；`88ac11d feat(p0): add reference color tab, export resize/template/HEIC and UI honesty fixes`（均在 `feat/p0-gap-closure`）。
+
+**仍保留的诚实边界**：真实照片人像/追色审美验收未执行；UI 完整交互未自动化（ui_smoke 主路径）；AVIF 有效解码/HEIC GUI 点选未自动化；Apple Silicon 未实测；benchmark 为 debug 对象 + 合成语料。
