@@ -11,6 +11,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         batchObserver = AppModel.shared.$batchRunning.removeDuplicates().sink { [weak self] running in
             if !running { self?.finishTerminationIfNeeded() }
         }
+        // Test/verification hook: open a folder on launch without driving the
+        // NSOpenPanel through accessibility automation. Only active when the
+        // explicit `--open-folder <path>` argument is passed.
+        if let index = CommandLine.arguments.firstIndex(of: "--open-folder"),
+           CommandLine.arguments.count > index + 1 {
+            let path = CommandLine.arguments[index + 1]
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                AppModel.shared.loadFolder(url)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
