@@ -21,6 +21,14 @@
 //   a text watermark with the system font. They measure pipeline cost only; they
 //   are not a real-photo aesthetic, face-reshaping or typography acceptance.
 // - schemaVersion 2 adds those P1 phases; the P0 phases keep their old meaning.
+// - P1-B phases: "mattingAndBackground" builds a matte from a synthetic radial
+//   gradient mask (NOT a Vision-detected person), then runs the real
+//   BackgroundReplacement + IDPhotoLayout engines at full resolution;
+//   "repairBrush" applies fixed heal+clone strokes with the real
+//   RepairBrushEngine; "deliveryPage" writes a real static HTML album plus
+//   contact-sheet PDF through DeliveryGalleryWriter (local file IO, disk-bound).
+//   These are pipeline cost probes, not matting/retouch/print acceptance.
+// - schemaVersion 3 adds those P1-B phases; earlier phases keep their meaning.
 //
 // Compile against already-built PhotoCore objects (same approach as
 // docs/adaptive-detail.md:62). From the repository root:
@@ -28,12 +36,12 @@
 //   BIN="$(swift build --show-bin-path)"   # e.g. .build/x86_64-apple-macosx/debug
 //   swiftc -I "$BIN" -I "$BIN/CLensfunBridge.build" Scripts/benchmark.swift \
 //     "$BIN"/PhotoCore.build/*.o "$BIN"/CLensfunBridge.build/CLensfunBridge.c.o \
-//     -o artifacts/p1-4-verify/benchmark/benchmark
-//   artifacts/p1-4-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
+//     -o artifacts/p1b-b7-verify/benchmark/benchmark
+//   artifacts/p1b-b7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 // The object layout is SwiftPM's standard debug layout; --show-bin-path keeps the
 // command portable across architectures and custom scratch directories.
 //
-// Output defaults to artifacts/p1-4-verify/benchmark/benchmark.json and all
+// Output defaults to artifacts/p1b-b7-verify/benchmark/benchmark.json and all
 // generated inputs/exports stay under artifacts/ (gitignored). Input photographs
 // outside the synthetic corpus are never read.
 
@@ -55,8 +63,8 @@ guard manager.fileExists(atPath: root.appendingPathComponent("Package.swift").pa
     FileHandle.standardError.write(Data("benchmark: run from the repository root (Package.swift not found in \(root.path))\n".utf8))
     exit(2)
 }
-let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1-4-verify/benchmark/benchmark.json")
-let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1-4-verify/benchmark", isDirectory: true)
+let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1b-b7-verify/benchmark/benchmark.json")
+let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1b-b7-verify/benchmark", isDirectory: true)
 let corpusRoot = workRoot.appendingPathComponent("corpus", isDirectory: true)
 let runStamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 let exportRoot = workRoot.appendingPathComponent("export-\(runStamp)", isDirectory: true)
@@ -328,6 +336,52 @@ func benchmarkWatermarkSettings() -> WatermarkSettings {
                       rotationDegrees: 0)
 }
 
+// MARK: - P1-B capability probes (headless, real PhotoCore engines)
+
+/// Synthetic elliptical coverage mask for the matting phase (white inside, black
+/// outside). This is NOT a Vision detection result: it lets the real
+/// BackgroundReplacement / IDPhotoLayout pipeline run headless on synthetic
+/// fixtures without pretending to measure real person segmentation.
+func syntheticPersonMask(extent: CGRect) -> CIImage {
+    let filter = CIFilter(name: "CIRadialGradient")!
+    let shortEdge = min(extent.width, extent.height)
+    filter.setValue(CIVector(x: extent.midX, y: extent.midY), forKey: "inputCenter")
+    filter.setValue(shortEdge * 0.26, forKey: "inputRadius0")
+    filter.setValue(shortEdge * 0.30, forKey: "inputRadius1")
+    filter.setValue(CIColor(red: 1, green: 1, blue: 1), forKey: "inputColor0")
+    filter.setValue(CIColor(red: 0, green: 0, blue: 0), forKey: "inputColor1")
+    return filter.outputImage!.cropped(to: extent)
+}
+
+func benchmarkBackgroundSettings() -> BackgroundReplacementSettings {
+    BackgroundReplacementSettings(shadowEnabled: true, shadowOpacity: 0.35,
+                                  shadowBlur: 0.15, shadowOffsetX: 0,
+                                  shadowOffsetY: -0.04, edgeDecontamination: 0.6)
+}
+
+/// Fixed heal + clone strokes for the repair phase (normalized coordinates).
+func benchmarkRepairStrokes() -> [RepairStroke] {
+    [RepairStroke(mode: .heal,
+                  points: [MaskPoint(x: 0.40, y: 0.50), MaskPoint(x: 0.46, y: 0.52)],
+                  radius: 0.035, feather: 0.5, strength: 1),
+     RepairStroke(mode: .clone,
+                  points: [MaskPoint(x: 0.60, y: 0.48), MaskPoint(x: 0.64, y: 0.50)],
+                  radius: 0.035, feather: 0.5, strength: 1,
+                  cloneOffset: MaskPoint(x: 0.10, y: 0.06))]
+}
+
+func benchmarkDeliverySettings() -> DeliverySettings {
+    var settings = DeliverySettings()
+    settings.title = "光屿 · P1-B 基准交付"
+    settings.columnCount = 3
+    settings.thumbnailMaxDimension = 640
+    settings.previewMaxDimension = 1600
+    settings.includeContactSheet = true
+    settings.contactSheetColumns = 3
+    settings.paper = .a4
+    return settings
+}
+
 // MARK: - Run
 
 var phaseRows: [String: Any] = [:]
@@ -586,7 +640,143 @@ do {
         "note": "headless full-resolution text watermark with the system font; not a typography or real-photo acceptance",
     ] as [String: Any]
 
-    // 8. Batch export through the real BatchProcessor, with input hashes checked.
+    // 8. P1-B matting + background replacement + ID-photo crop (headless).
+    let mattingStart = CFAbsoluteTimeGetCurrent()
+    let matteSettings = PersonMatteSettings()
+    let backgroundSettings = benchmarkBackgroundSettings()
+    let idPhotoSettings = IDPhotoCropSettings(size: .oneInch, dpi: 300)
+    let syntheticFaceBox = CGRect(x: 0.36, y: 0.34, width: 0.28, height: 0.32)
+    var mattingRows: [[String: Any]] = []
+    var mattingCount = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let extent = loaded.image.extent
+            let mask = syntheticPersonMask(extent: extent)
+            let matteStart = CFAbsoluteTimeGetCurrent()
+            let matte = try PersonMatting.matte(fromMask: mask, settings: matteSettings,
+                                                context: engine.context)
+            let matteMS = milliseconds(since: matteStart)
+            let backgroundStart = CFAbsoluteTimeGetCurrent()
+            let composited = try BackgroundReplacement.apply(
+                foreground: loaded.image, matte: matte,
+                fill: .preset(.blue), settings: backgroundSettings)
+            let backgroundMS = milliseconds(since: backgroundStart)
+            let idPhotoStart = CFAbsoluteTimeGetCurrent()
+            let idPhoto = try IDPhotoLayout.render(photo: composited,
+                                                   faceBox: syntheticFaceBox,
+                                                   settings: idPhotoSettings)
+            let rendered = try renderFullResolution(idPhoto, engine: engine)
+            let idPhotoMS = milliseconds(since: idPhotoStart)
+            mattingCount += 1
+            mattingRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "matteMilliseconds": matteMS,
+                "backgroundMilliseconds": backgroundMS,
+                "idPhotoMilliseconds": idPhotoMS,
+                "coverage": matte.coverage,
+                "hasPerson": matte.hasPerson,
+                "idPhotoWidth": rendered.width,
+                "idPhotoHeight": rendered.height,
+            ])
+        } catch {
+            failures.append("matting phase failed for \(spec.filename): \(error.localizedDescription)")
+            mattingRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["mattingAndBackground"] = [
+        "milliseconds": milliseconds(since: mattingStart),
+        "perImage": mattingRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["matte": "synthetic radial-gradient mask (not a Vision detection)",
+                     "background": "standard blue preset, shadow on",
+                     "idPhoto": "一寸 300DPI 295×413 crop from synthetic face box"] as [String: Any],
+        "note": "headless full-resolution real BackgroundReplacement + IDPhotoLayout engines; synthetic mask, not a matting-quality acceptance",
+    ] as [String: Any]
+
+    // 9. P1-B repair brush heal + clone (headless).
+    let repairStart = CFAbsoluteTimeGetCurrent()
+    let repairStrokes = benchmarkRepairStrokes()
+    var repairRows: [[String: Any]] = []
+    var repairCount = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let repaired = try RepairBrushEngine.apply(to: loaded.image, strokes: repairStrokes)
+            let rendered = try renderFullResolution(repaired, engine: engine)
+            repairCount += 1
+            repairRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "width": rendered.width,
+                "height": rendered.height,
+            ])
+        } catch {
+            failures.append("repair phase failed for \(spec.filename): \(error.localizedDescription)")
+            repairRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["repairBrush"] = [
+        "milliseconds": milliseconds(since: repairStart),
+        "perImage": repairRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["strokes": 2, "modes": ["heal", "clone"],
+                     "radius": 0.035, "feather": 0.5, "strength": 1.0] as [String: Any],
+        "note": "headless full-resolution real RepairBrushEngine heal+clone on synthetic fixtures; not a retouch-quality acceptance",
+    ] as [String: Any]
+
+    // 10. P1-B local delivery page: static HTML + JPEG previews + contact-sheet PDF.
+    let deliveryStart = CFAbsoluteTimeGetCurrent()
+    let deliveryRoot = workRoot.appendingPathComponent("delivery", isDirectory: true)
+    var deliveryRow: [String: Any] = [:]
+    do {
+        if manager.fileExists(atPath: deliveryRoot.path) {
+            try manager.removeItem(at: deliveryRoot)
+        }
+        let fileURLs = corpusSpecs.map { corpusRoot.appendingPathComponent($0.filename) }
+        let deliveryResult = try DeliveryGalleryWriter.write(
+            fileURLs: fileURLs, settings: benchmarkDeliverySettings(),
+            outputDirectory: deliveryRoot, context: engine.context)
+        let thumbCount = (try? manager.contentsOfDirectory(
+            at: deliveryResult.thumbnailDirectoryURL, includingPropertiesForKeys: nil))?.count ?? 0
+        let previewCount = (try? manager.contentsOfDirectory(
+            at: deliveryResult.previewDirectoryURL, includingPropertiesForKeys: nil))?.count ?? 0
+        let htmlBytes = (try? manager.attributesOfItem(
+            atPath: deliveryResult.indexHTMLURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        deliveryRow = [
+            "milliseconds": milliseconds(since: deliveryStart),
+            "photoCount": deliveryResult.photoCount,
+            "htmlBytes": htmlBytes,
+            "contactSheetGenerated": deliveryResult.contactSheetURL != nil,
+            "thumbnailCount": thumbCount,
+            "previewCount": previewCount,
+        ]
+        if thumbCount != corpusSpecs.count || previewCount != corpusSpecs.count {
+            failures.append("delivery phase wrote \(thumbCount) thumbs/\(previewCount) previews, expected \(corpusSpecs.count) each")
+        }
+        if deliveryResult.contactSheetURL == nil {
+            failures.append("delivery phase did not generate the contact-sheet PDF")
+        }
+    } catch {
+        failures.append("delivery phase failed: \(error.localizedDescription)")
+        deliveryRow = ["error": error.localizedDescription]
+    }
+    phaseRows["deliveryPage"] = [
+        "milliseconds": milliseconds(since: deliveryStart),
+        "perImage": [deliveryRow],
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["title": "光屿 · P1-B 基准交付", "columns": 3,
+                     "thumbnailMaxDimension": 640, "previewMaxDimension": 1600,
+                     "contactSheet": true, "paper": "a4"] as [String: Any],
+        "note": "headless real DeliveryGalleryWriter (local HTML + JPEG thumbs/previews + contact-sheet PDF); disk-bound, not a print/typography acceptance",
+    ] as [String: Any]
+
+    // 11. Batch export through the real BatchProcessor, with input hashes checked.
     var beforeHashes: [String: String] = [:]
     for spec in corpusSpecs {
         let url = corpusRoot.appendingPathComponent(spec.filename)
@@ -667,6 +857,8 @@ do {
     if colorToolsCount != corpusSpecs.count { failures.append("color tools phase covered \(colorToolsCount)/\(corpusSpecs.count) fixtures") }
     if liquifyCount != liquifySpecs.count { failures.append("liquify phase covered \(liquifyCount)/\(liquifySpecs.count) fixtures") }
     if watermarkCount != corpusSpecs.count { failures.append("watermark phase covered \(watermarkCount)/\(corpusSpecs.count) fixtures") }
+    if mattingCount != corpusSpecs.count { failures.append("matting phase covered \(mattingCount)/\(corpusSpecs.count) fixtures") }
+    if repairCount != corpusSpecs.count { failures.append("repair phase covered \(repairCount)/\(corpusSpecs.count) fixtures") }
     if batchSummary.succeeded != corpusSpecs.count { failures.append("batch exported \(batchSummary.succeeded)/\(corpusSpecs.count) fixtures") }
     if batchSummary.failed != 0 { failures.append("batch reported \(batchSummary.failed) failures") }
     if exportedFiles.count != corpusSpecs.count { failures.append("batch produced \(exportedFiles.count) export files, expected \(corpusSpecs.count)") }
@@ -675,7 +867,7 @@ do {
     let peak = peakResidentBytes()
     let totalMS = milliseconds(since: processStart)
     var report: [String: Any] = [
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
         "command": arguments.joined(separator: " "),
         "workRoot": workRoot.path,
@@ -705,6 +897,10 @@ do {
             "P1 color-tools/lens-effects and watermark phases are headless full-resolution renders of the real engines; they are not a real-photo aesthetic or typography acceptance",
             "P1 liquify phase uses deterministic synthetic face-landmark geometry, not a detected real face; timings only",
             "schemaVersion 2 adds the P1 phases; the P0 phases (corpus/import/analysis/preview/batch) keep their earlier meaning",
+            "P1-B mattingAndBackground uses a synthetic radial-gradient person mask, not a Vision detection; Vision person segmentation is not timed on synthetic fixtures",
+            "P1-B repairBrush applies fixed heal+clone strokes on synthetic fixtures; it is not a retouch-quality acceptance",
+            "P1-B deliveryPage measures local file IO (static HTML + JPEG thumbs/previews + contact-sheet PDF); disk/CPU dependent, not a print/typography acceptance",
+            "schemaVersion 3 adds the P1-B phases; P0/P1 phases keep their earlier meaning",
         ],
     ]
     if !failures.isEmpty { report["failures"] = failures }

@@ -4,21 +4,34 @@
 # What it does: launches build/PhotoAtelier.app with `open`, drives the real UI
 # through AppleScript (System Events) to open the synthetic fixture folder and to
 # click every inspector tab, and captures one window screenshot per tab with
-# `screencapture`. For the P1 panels whose new sections sit below the fold it also
-# scrolls the right inspector to the bottom and captures a second screenshot
-# (人像 → 液化/美型, 导出 → 水印, 调色 → 镜头效果/限制文案). It asserts that the
-# process stays alive and that every screenshot exists as a real PNG.
+# `screencapture`. For the P1/P1-B panels whose new sections sit below the fold it
+# also scrolls the right inspector and captures extra screenshots
+# (人像 → 修复/仿制画笔, 导出 → 客户交付页, 证件照 → 打印排版预览, 调色 → 镜头效果).
+# It asserts that the process stays alive, that every screenshot exists as a real
+# PNG, and that the target section text is actually inside the window viewport.
 #
 # Boundaries (do not overstate this evidence):
 # - Synthetic fixtures under artifacts/demo/input only. No user photographs are
 #   read, and no real-photo quality or aesthetic acceptance is performed.
 # - Not full interaction coverage: it covers launch, folder import, inspector tab
 #   switching, inspector scrolling and screenshots. Sliders, curve editing, the
-#   liquify brush, watermark text/image entry, masks, drag & drop, the file
-#   dialog's keyboard-only paths, batch export and quit-confirmation dialogs are
-#   NOT exercised. This is a rendering/liveness smoke test, not an interactive
-#   acceptance suite. The scrolled screenshots only prove the new P1 sections
-#   render; they are not a UX/aesthetic acceptance.
+#   liquify/repair brushes, certificate-photo background import, watermark and
+#   delivery-page actions, masks, drag & drop, the file dialog's keyboard-only
+#   paths, batch export and quit-confirmation dialogs are NOT exercised. This is a
+#   rendering/liveness smoke test, not an interactive acceptance suite. The
+#   scrolled screenshots only prove the new P1/P1-B sections render; they are not
+#   a UX/aesthetic acceptance.
+# - Failure retry: only failures of the actual run are retried (the app window is
+#   relaunched at most twice, waiting 10s then 20s) to absorb P1's known AX
+#   flakiness; precondition failures are not retried. The JSON records the attempt
+#   number so a retried pass is visible in the evidence.
+# - App binding: the JSON records the app executable mtime, SHA-256 and the git
+#   commit, and the run fails if the executable changes while the smoke runs, so a
+#   pass can never be attributed to a different build than the one tested.
+# - Retry-policy test hook: `UI_SMOKE_FORCE_FAIL_ATTEMPTS=N` makes the first N
+#   attempts fail immediately WITHOUT launching the app, so the retry path
+#   (attempts + increasing waits) can be verified without repeated windows; the
+#   remaining attempt is a real run. Test-only, unset in normal runs.
 # - Requires a logged-in GUI session with Accessibility permission granted to
 #   the automation host (System Events). It resizes and repositions the app
 #   window to 1200x950 at (10,40) and quits any running PhotoAtelier instance.
@@ -29,7 +42,7 @@
 #
 # Usage (from the repository root, after `bash Scripts/build_app.sh`):
 #   bash Scripts/ui_smoke.sh [OUTPUT_DIRECTORY]
-# Default output: artifacts/p1-4-verify/ui-smoke/
+# Default output: artifacts/p1b-b7-verify/ui-smoke/
 # Optional env: PHOTO_ATELIER_APP=/path/to/PhotoAtelier.app
 # Exit codes: 0 pass, 1 assertion/automation failure, 2 missing precondition.
 
@@ -39,8 +52,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 APP="${PHOTO_ATELIER_APP:-$ROOT/build/PhotoAtelier.app}"
+APP_BIN="$APP/Contents/MacOS/PhotoAtelier"
 INPUT="$ROOT/artifacts/demo/input"
-OUT="${1:-$ROOT/artifacts/p1-4-verify/ui-smoke}"
+OUT="${1:-$ROOT/artifacts/p1b-b7-verify/ui-smoke}"
 BUNDLE_ID="local.photoatelier.mac"
 PROCESS_PATTERN="PhotoAtelier.app/Contents/MacOS/PhotoAtelier"
 
@@ -523,14 +537,15 @@ end run
 APPLESCRIPT
 }
 
-# Known text from each below-the-fold P1 section, used to prove the scroll
+# Known text from each below-the-fold P1/P1-B section, used to prove the scroll
 # actually brought the new panel area into the window viewport (not just that the
 # scroll bar value changed).
 section_keyword() {
     case "$1" in
-        人像) printf '%s' "液化" ;;
-        导出) printf '%s' "水印" ;;
-        调色) printf '%s' "蓝色差" ;;
+        人像) printf '%s' "非生成式、不重建结构|仿制画笔" ;;
+        导出) printf '%s' "生成接触表 PDF|导出客户交付页|不覆盖既有交付页|客户交付页" ;;
+        证件照) printf '%s' "几何预览只计算纸张一行能放几张|打印排版预览" ;;
+        调色) printf '%s' "蓝色差|红色差" ;;
         *) printf '' ;;
     esac
 }
@@ -540,8 +555,12 @@ section_keyword() {
 verify_section_visible() {
     osascript - "$BUNDLE_ID" "$1" <<'APPLESCRIPT' || return 1
 on run argv
-  set keyword to item 2 of argv
-  if keyword is "" then return "NO_KEYWORD"
+  set candidatesText to item 2 of argv
+  if candidatesText is "" then return "NO_KEYWORD"
+  set savedDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to "|"
+  set candidates to text items of candidatesText
+  set AppleScript's text item delimiters to savedDelimiters
   tell application "System Events"
     tell process "PhotoAtelier"
       set w to window 1
@@ -560,18 +579,29 @@ on run argv
         try
           if role of e is "AXStaticText" then
             set v to value of e
-            if v is not missing value and (v as text) contains keyword then
-              set p to position of e
-              set ex to (item 1 of p) as real
-              set ey to (item 2 of p) as real
-              if ex >= winLeft and ex <= winRight and ey >= winTop and ey <= winBottom then
-                return "VISIBLE:" & keyword
-              end if
+            if v is not missing value then
+              set vt to v as text
+              repeat with candidate in candidates
+                set candidateText to candidate as text
+                if candidateText is not "" and vt contains candidateText then
+                  set p to position of e
+                  set sz to size of e
+                  set ex to (item 1 of p) as real
+                  set ey to (item 2 of p) as real
+                  set ew to (item 1 of sz) as real
+                  set eh to (item 2 of sz) as real
+                  -- Partially visible counts: the element rect must intersect the
+                  -- window rect (a long paragraph can start above the viewport).
+                  if (ex + ew) > winLeft and ex < winRight and (ey + eh) > winTop and ey < winBottom then
+                    return "VISIBLE:" & candidateText
+                  end if
+                end if
+              end repeat
             end if
           end if
         end try
       end repeat
-      return "NOT_VISIBLE:" & keyword
+      return "NOT_VISIBLE:" & candidatesText
     end tell
   end tell
 end run
@@ -599,6 +629,44 @@ mkdir -p "$OUT"
 log "app bundle: $APP"
 log "synthetic input: $INPUT"
 log "output: $OUT"
+
+# Evidence binding: record which build the smoke tested and fail if the
+# executable changes mid-run, so a pass is never attributed to another build.
+APP_MTIME_EPOCH="$(stat -f %m "$APP_BIN" 2>/dev/null || echo 0)"
+APP_SHA256="$(shasum -a 256 "$APP_BIN" 2>/dev/null | awk '{print $1}' || true)"
+APP_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+[[ -n "$APP_SHA256" ]] || fail "could not compute app executable SHA-256"
+log "app evidence: mtime=$APP_MTIME_EPOCH sha256=$APP_SHA256 commit=$APP_COMMIT"
+
+# Failure retry: the whole run is re-executed at most twice (10s/20s waits) so
+# the known AX flakiness does not turn a good build into a false negative. Only
+# run failures are retried; precondition failures above already exited.
+if [[ "${UI_SMOKE_RETRY_ATTEMPT:-0}" -eq 0 ]]; then
+    for attempt in 1 2 3; do
+        log "attempt $attempt/3"
+        if UI_SMOKE_RETRY_ATTEMPT="$attempt" bash "$0" "$@"; then
+            exit 0
+        else
+            status=$?
+        fi
+        if [[ "$attempt" -lt 3 ]]; then
+            wait_seconds=$((attempt * 10))
+            log "attempt $attempt failed (exit $status); retrying in ${wait_seconds}s"
+            sleep "$wait_seconds"
+        else
+            log "FAIL: all 3 attempts failed (last exit $status)"
+            exit 1
+        fi
+    done
+fi
+UI_SMOKE_ATTEMPT="${UI_SMOKE_RETRY_ATTEMPT:-1}"
+log "run attempt: $UI_SMOKE_ATTEMPT/3"
+# Test-only retry-policy hook: fail fast without launching the app so the retry
+# logic can be exercised without repeated windows. Never set in normal runs.
+if [[ "${UI_SMOKE_FORCE_FAIL_ATTEMPTS:-0}" -ge "$UI_SMOKE_ATTEMPT" ]]; then
+    log "forced failure for retry-policy test (attempt $UI_SMOKE_ATTEMPT)"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Run
@@ -656,7 +724,30 @@ log "inspector tabs: ${TAB_LABELS[*]}"
 
 # P1 panels whose new sections are below the fold get a second, bottom-scrolled
 # screenshot: 人像 → 液化/美型, 导出 → 水印, 调色 → 镜头效果与限制文案.
+# P1/P1-B panels whose new sections are below the fold get extra scrolled
+# screenshots: 人像 → 修复/仿制画笔, 导出 → 客户交付页, 证件照 → 打印排版预览,
+# 调色 → 镜头效果/限制文案.
+capture_scrolled_section() {
+    local label="$1" scroll_values="$2" suffix="$3" keyword="$4"
+    local scroll_result visible_result value attempt
+    visible_result="VERIFY_ERROR"
+    for attempt in 1 2; do
+        for value in $scroll_values; do
+            scroll_result="$(scroll_inspector "$value")" || scroll_result="SCROLL_ERROR"
+            [[ "$scroll_result" == "SCROLLED:"* ]] || fail "could not scroll inspector for '$label' ($scroll_result)"
+            sleep 0.6
+            visible_result="$(verify_section_visible "$keyword")" || visible_result="VERIFY_ERROR"
+            [[ "$visible_result" == "VISIBLE:"* ]] && break 2
+            sleep 0.3
+        done
+    done
+    [[ "$visible_result" == "VISIBLE:"* ]] || fail "section text '$keyword' is not visible after scrolling '$label' ($visible_result)"
+    snapshot "$(printf 'tab-%02d-%s-%s.png' "$index" "$label" "$suffix")"
+    SCROLLED_SECTIONS+=("$label:$suffix")
+}
+
 SCROLLED_SECTIONS=()
+EXPECTED_SECTIONS=("人像:bottom" "导出:delivery" "证件照:bottom" "调色:bottom")
 index=0
 for label in "${TAB_LABELS[@]}"; do
     index=$((index + 1))
@@ -668,40 +759,36 @@ for label in "${TAB_LABELS[@]}"; do
     snapshot "$(printf 'tab-%02d-%s.png' "$index" "$label")"
     keyword="$(section_keyword "$label")"
     if [[ -n "$keyword" ]]; then
-        visible_result="VERIFY_ERROR"
-        for attempt in 1 2; do
-            scroll_result="$(scroll_inspector 1)" || scroll_result="SCROLL_ERROR"
-            [[ "$scroll_result" == "SCROLLED:"* ]] || fail "could not scroll inspector for '$label' ($scroll_result)"
-            sleep 0.6
-            visible_result="$(verify_section_visible "$keyword")" || visible_result="VERIFY_ERROR"
-            [[ "$visible_result" == "VISIBLE:"* ]] && break
-            sleep 0.4
-        done
-        [[ "$visible_result" == "VISIBLE:"* ]] || fail "P1 section text '$keyword' is not visible after scrolling '$label' ($visible_result)"
-        snapshot "$(printf 'tab-%02d-%s-bottom.png' "$index" "$label")"
-        SCROLLED_SECTIONS+=("$label")
+        case "$label" in
+            导出) capture_scrolled_section "$label" "1.0 0.9" "delivery" "$keyword" ;;
+            *) capture_scrolled_section "$label" "1.0" "bottom" "$keyword" ;;
+        esac
     fi
 done
-[[ "${#TAB_LABELS[@]}" -ge 7 ]] || fail "expected at least 7 P1 inspector tabs, got ${#TAB_LABELS[@]}"
-# F2: the three P1 panels must each have a bottom screenshot; a renamed tab must
-# fail loudly instead of silently skipping the new-section evidence.
-for expected in 人像 导出 调色; do
+[[ "${#TAB_LABELS[@]}" -ge 7 ]] || fail "expected at least 7 inspector tabs, got ${#TAB_LABELS[@]}"
+# Every expected P1/P1-B section must have produced its scrolled screenshot.
+for expected in "${EXPECTED_SECTIONS[@]}"; do
     found=0
     for captured in "${SCROLLED_SECTIONS[@]}"; do
         [[ "$captured" == "$expected" ]] && found=1
     done
-    [[ "$found" -eq 1 ]] || fail "missing P1 bottom screenshot for tab '$expected' (captured: ${SCROLLED_SECTIONS[*]:-none}); tab may have been renamed"
+    [[ "$found" -eq 1 ]] || fail "missing scrolled screenshot '$expected' (captured: ${SCROLLED_SECTIONS[*]:-none}); tab/section may have been renamed"
 done
-[[ "${#SCROLLED_SECTIONS[@]}" -eq 3 ]] || fail "expected 3 P1 bottom screenshots, got ${#SCROLLED_SECTIONS[@]}"
-
+[[ "${#SCROLLED_SECTIONS[@]}" -eq "${#EXPECTED_SECTIONS[@]}" ]] || fail "expected ${#EXPECTED_SECTIONS[@]} scrolled sections, got ${#SCROLLED_SECTIONS[@]}"
 # Final liveness assertion and evidence summary.
 assert_alive "at the end of the smoke run"
+app_sha256_after="$(shasum -a 256 "$APP_BIN" 2>/dev/null | awk '{print $1}' || true)"
+[[ "$app_sha256_after" == "$APP_SHA256" ]] || fail "app executable changed during the smoke run (before=$APP_SHA256 after=$app_sha256_after)"
 {
     printf '{\n'
     printf '  "status": "pass",\n'
     printf '  "app": "%s",\n' "$APP"
     printf '  "syntheticInput": "%s",\n' "$INPUT"
     printf '  "processCheck": "alive",\n'
+    printf '  "attempt": %s,\n' "$UI_SMOKE_ATTEMPT"
+    printf '  "appExecutableMTime": %s,\n' "$APP_MTIME_EPOCH"
+    printf '  "appExecutableSHA256": "%s",\n' "$APP_SHA256"
+    printf '  "commit": "%s",\n' "$APP_COMMIT"
     printf '  "tabs": ['
     first=1
     for label in "${TAB_LABELS[@]}"; do
@@ -730,12 +817,13 @@ assert_alive "at the end of the smoke run"
     printf '  "boundaries": [\n'
     printf '    "synthetic fixtures only; no real-photo quality or aesthetic acceptance",\n'
     printf '    "covers launch, folder import, inspector tab switching, inspector scrolling and screenshots only",\n'
-    printf '    "new P1 sections are captured via bottom-scrolled screenshots; curve/liquify/watermark interactions are not exercised",\n'
+    printf '    "P1/P1-B sections are captured via scrolled screenshots; curve/liquify/repair/certificate/delivery interactions are not exercised",\n'
+    printf '    "app executable mtime/SHA-256/commit are recorded; the run fails if the executable changes mid-run",\n'
     printf '    "sliders, masks, drag and drop, batch export and quit dialogs are not exercised",\n'
     printf '    "requires a GUI session with Accessibility permission for the automation host"\n'
     printf '  ]\n'
     printf '}\n'
 } > "$OUT/ui-smoke.json"
 
-log "PASS: ${#TAB_LABELS[@]} tabs switched, ${#SCREENSHOT_FILES[@]} screenshots, P1 scrolled sections: ${SCROLLED_SECTIONS[*]} in $OUT"
+log "PASS: attempt ${UI_SMOKE_ATTEMPT}/3, ${#TAB_LABELS[@]} tabs switched, ${#SCREENSHOT_FILES[@]} screenshots, scrolled sections: ${SCROLLED_SECTIONS[*]}, app sha256 ${APP_SHA256:0:12} (mtime ${APP_MTIME_EPOCH}, commit ${APP_COMMIT}) in $OUT"
 exit 0

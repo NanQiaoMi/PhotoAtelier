@@ -187,15 +187,33 @@
 
 ---
 
-## 10. 执行状态（待更新）
+## 10. 执行状态（2026-11-04 更新）
 
-| 工作项 | 状态 | 说明 |
+| 工作项 | 状态 | 说明与证据 |
 |---|---|---|
-| B1 证件照/换背景核心 | pending | |
-| B2 修复画笔核心 | pending | |
-| B3 交付页核心 | pending | |
-| B4 证件照集成 | pending | |
-| B5 修复画笔集成 | pending | |
-| B6 交付页集成 | pending | |
-| B7 质量加固 | pending | |
-| S1 P1 文档修正 | pending | |
+| B1 证件照/换背景核心 | ✅ approved | PersonMattingTests 8/8、IDPhotoLayoutTests 8/8；抠图/背景/阴影/尺寸/排版几何 |
+| B2 修复画笔核心 | ✅ approved | RepairBrushTests 13/13；heal/clone/羽化/来源偏移 |
+| B3 交付页核心 | ✅ approved | DeliveryGalleryTests 13/13；HTML/PDF/隐私/确定性 |
+| B4 证件照集成 | ✅ approved | Recipe v12、证件照页签、管线接入；ColorCompatibilityTests 37/37、EngineTests 21/21 |
+| B5 修复画笔集成 | ✅ approved | 画布修复画笔/撤销/批量；ColorCompatibility 36/36、PortraitRetouch 16/16 |
+| B6 交付页集成 | ✅ approved | 导出流程/清单 v4/隐私；BatchTests 16/16、IO 19/19 |
+| B7 质量加固 | ✅ approved | ui_smoke 重试+app 哈希绑定+8 页签/14 截图；benchmark schemaVersion 3 |
+| S1 P1 文档修正 | ✅ approved | WarpStroke 注释逐轴椭圆语义 |
+| S2 v12 版本边界回归 | ✅ approved | LocalMaskTests 19/19、SceneAdaptiveTests 15/15 |
+| S3 B4 nit 修复 | ✅ approved | 中性证书跳过深校验 + onAppear 条件预览 |
+| S4 B5 nit 修复 | ✅ approved | 修复笔迹取消/仿制来源重置/半径范围收敛 |
+| S5 B6 nit 修复 | ✅ approved | 交付页前置校验/原子落盘/summary 生效设置 |
+
+**最终验收（2026-11-04，全部实测）**：
+
+| 检查 | 命令 | 退出码 | 关键输出 |
+|---|---|---|---|
+| 全量构建与测试 | `make check` | 0 | `Executed 458 tests, with 0 failures`（146.2s） |
+| Release 打包与签名 | `bash Scripts/build_app.sh` | 0 | 4 签名 dylib / 55 XML / 许可 / portable paths 通过 |
+| 包校验 | `codesign --verify --deep --strict` / `python3 Scripts/verify_app.py` | 0 / 0 | 严格签名与包内容校验通过 |
+| UI 冒烟（重建包，单次） | `UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh artifacts/p1b-b7-verify/ui-smoke` | 0 | `PASS: attempt 3/3, 8 tabs, 14 screenshots`；scrolled：人像:bottom/导出:delivery/调色:bottom/证件照:bottom；app sha256 301080f0…、commit a2361c7 |
+| 性能基准（最终树） | `swiftc … Scripts/benchmark.swift` + 运行 | 0 / 0 | `benchmark: PASS`；schemaVersion 3；mattingAndBackground 2714.4ms/9、repairBrush 5130.2ms/9、deliveryPage 3426.2ms；peak RSS 5172.8MB |
+
+**提交**：`bc69b59` 核心算法；`6790241` 证件照+修复画笔集成；`ab098e8` 交付页集成；`a2361c7` nit 修复；`（docs/scripts commit）` 质量脚本与文档。
+
+**仍保留的诚实边界**：真实照片抠图/证件照/修补/打印审美未验收；GUI 点选与真实鼠标笔迹未自动化；24MP 性能未基准；Apple Silicon 未实测；发丝/半透明/复杂背景、大面积结构缺陷、特殊规格与真实打印色彩未验收；B7 两条非阻塞 nit（重试 OUT 未清理、benchmark 用 /tmp 对象副本）已记录。
