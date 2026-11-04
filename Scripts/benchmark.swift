@@ -29,6 +29,14 @@
 //   contact-sheet PDF through DeliveryGalleryWriter (local file IO, disk-bound).
 //   These are pipeline cost probes, not matting/retouch/print acceptance.
 // - schemaVersion 3 adds those P1-B phases; earlier phases keep their meaning.
+// - P1-C phases: "qualityAnalysis" runs the real heuristic QualityAnalyzer on the
+//   synthetic corpus (no real-photo culling acceptance); "makeup" runs the real
+//   MakeupEngine with deterministic synthetic face landmarks (not a real-face or
+//   beauty acceptance); "parallelBatch" compares serial (maxConcurrency 1) vs
+//   bounded-parallel (4) runs of the same CPU-bound synthetic pipeline, recording
+//   wall times, speedup and order preservation (debug objects, load-dependent,
+//   not release throughput).
+// - schemaVersion 4 adds those P1-C phases; earlier phases keep their meaning.
 //
 // Compile against already-built PhotoCore objects (same approach as
 // docs/adaptive-detail.md:62). From the repository root:
@@ -36,12 +44,12 @@
 //   BIN="$(swift build --show-bin-path)"   # e.g. .build/x86_64-apple-macosx/debug
 //   swiftc -I "$BIN" -I "$BIN/CLensfunBridge.build" Scripts/benchmark.swift \
 //     "$BIN"/PhotoCore.build/*.o "$BIN"/CLensfunBridge.build/CLensfunBridge.c.o \
-//     -o artifacts/p1b-b7-verify/benchmark/benchmark
-//   artifacts/p1b-b7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
+//     -o artifacts/p1c-c7-verify/benchmark/benchmark
+//   artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 // The object layout is SwiftPM's standard debug layout; --show-bin-path keeps the
 // command portable across architectures and custom scratch directories.
 //
-// Output defaults to artifacts/p1b-b7-verify/benchmark/benchmark.json and all
+// Output defaults to artifacts/p1c-c7-verify/benchmark/benchmark.json and all
 // generated inputs/exports stay under artifacts/ (gitignored). Input photographs
 // outside the synthetic corpus are never read.
 
@@ -63,8 +71,8 @@ guard manager.fileExists(atPath: root.appendingPathComponent("Package.swift").pa
     FileHandle.standardError.write(Data("benchmark: run from the repository root (Package.swift not found in \(root.path))\n".utf8))
     exit(2)
 }
-let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1b-b7-verify/benchmark/benchmark.json")
-let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1b-b7-verify/benchmark", isDirectory: true)
+let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1c-c7-verify/benchmark/benchmark.json")
+let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1c-c7-verify/benchmark", isDirectory: true)
 let corpusRoot = workRoot.appendingPathComponent("corpus", isDirectory: true)
 let runStamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 let exportRoot = workRoot.appendingPathComponent("export-\(runStamp)", isDirectory: true)
@@ -380,6 +388,95 @@ func benchmarkDeliverySettings() -> DeliverySettings {
     settings.contactSheetColumns = 3
     settings.paper = .a4
     return settings
+}
+
+// MARK: - P1-C capability probes (headless, real PhotoCore engines)
+
+func benchmarkMakeupSettings() -> MakeupSettings {
+    MakeupSettings(lipColor: SRGBColor(red: 0.80, green: 0.20, blue: 0.30), lipIntensity: 0.55,
+                   browColor: SRGBColor(red: 0.26, green: 0.18, blue: 0.14), browDensity: 0.45,
+                   cheekColor: SRGBColor(red: 0.93, green: 0.48, blue: 0.48), cheekIntensity: 0.35,
+                   cheekRadius: 0.5,
+                   eyeshadowColor: SRGBColor(red: 0.55, green: 0.36, blue: 0.46),
+                   eyeshadowIntensity: 0.30)
+}
+
+/// Deterministic synthetic face geometry for the makeup phase: contour + eyes +
+/// brows + nose + lips. This is NOT a detected real face; it only lets the real
+/// MakeupEngine (semantic masks + polygon fallbacks) run headless on the synthetic
+/// corpus without claiming a real-photo make-up acceptance.
+func syntheticMakeupLandmarks() -> FaceLandmarkSet {
+    func ellipse(center: CGPoint, rx: Double, ry: Double, count: Int) -> [CGPoint] {
+        (0..<count).map { index in
+            let angle = 2 * Double.pi * Double(index) / Double(count)
+            return CGPoint(x: center.x + rx * cos(angle), y: center.y + ry * sin(angle))
+        }
+    }
+    let box = CGRect(x: 0.30, y: 0.24, width: 0.40, height: 0.48)
+    let contour = ellipse(center: CGPoint(x: box.midX, y: box.midY),
+                          rx: box.width * 0.5, ry: box.height * 0.5, count: 20)
+    let eyeY = box.minY + box.height * 0.60
+    let leftEyeCenter = CGPoint(x: box.minX + box.width * 0.33, y: eyeY)
+    let rightEyeCenter = CGPoint(x: box.minX + box.width * 0.67, y: eyeY)
+    return FaceLandmarkSet(
+        boundingBox: box, confidence: 0.99,
+        faceContour: contour,
+        leftEye: ellipse(center: leftEyeCenter, rx: box.width * 0.09,
+                         ry: box.height * 0.045, count: 8),
+        rightEye: ellipse(center: rightEyeCenter, rx: box.width * 0.09,
+                          ry: box.height * 0.045, count: 8),
+        leftEyebrow: [CGPoint(x: leftEyeCenter.x - box.width * 0.09, y: eyeY + box.height * 0.075),
+                      CGPoint(x: leftEyeCenter.x, y: eyeY + box.height * 0.095),
+                      CGPoint(x: leftEyeCenter.x + box.width * 0.09, y: eyeY + box.height * 0.075)],
+        rightEyebrow: [CGPoint(x: rightEyeCenter.x - box.width * 0.09, y: eyeY + box.height * 0.075),
+                       CGPoint(x: rightEyeCenter.x, y: eyeY + box.height * 0.095),
+                       CGPoint(x: rightEyeCenter.x + box.width * 0.09, y: eyeY + box.height * 0.075)],
+        nose: [CGPoint(x: box.midX, y: box.minY + box.height * 0.42),
+               CGPoint(x: box.midX - box.width * 0.05, y: box.minY + box.height * 0.48),
+               CGPoint(x: box.midX + box.width * 0.05, y: box.minY + box.height * 0.48)],
+        outerLips: ellipse(center: CGPoint(x: box.midX, y: box.minY + box.height * 0.33),
+                           rx: box.width * 0.15, ry: box.height * 0.055, count: 10),
+        innerLips: ellipse(center: CGPoint(x: box.midX, y: box.minY + box.height * 0.33),
+                           rx: box.width * 0.07, ry: box.height * 0.022, count: 8),
+        leftPupil: leftEyeCenter, rightPupil: rightEyeCenter)
+}
+
+/// One CPU-bound per-item operation for the serial-vs-parallel phase: load the
+/// fixture, run the real colour/lens engines, force a full-resolution render.
+func benchmarkParallelOperation(_ spec: CorpusSpec, corpusRoot: URL, engine: PhotoEngine,
+                                colorSettings: ColorToolsSettings,
+                                lensSettings: LensEffectsSettings) async throws -> Int {
+    let url = corpusRoot.appendingPathComponent(spec.filename)
+    let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+    let tools = try ColorToolsEngine.apply(colorSettings, to: loaded.image)
+    let lens = try LensEffectsEngine.apply(lensSettings, to: tools)
+    let rendered = try renderFullResolution(lens, engine: engine)
+    return rendered.width
+}
+
+/// Small result box so the async Task can hand its outcome back to the sync
+/// benchmark driver without mutating a captured `var` (Swift concurrency check).
+final class BenchmarkBox<Value>: @unchecked Sendable {
+    var value: Value?
+}
+
+func runParallelBatchPhase(_ specs: [CorpusSpec], corpusRoot: URL, engine: PhotoEngine,
+                           concurrency: Int) -> (milliseconds: Double, outcome: ParallelBatchOutcome<Int>) {
+    let colorSettings = benchmarkColorToolsSettings()
+    let lensSettings = benchmarkLensEffectsSettings()
+    let start = CFAbsoluteTimeGetCurrent()
+    let box = BenchmarkBox<ParallelBatchOutcome<Int>>()
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        box.value = await ParallelBatch.run(items: specs, maxConcurrency: concurrency) { spec in
+            try await benchmarkParallelOperation(spec, corpusRoot: corpusRoot, engine: engine,
+                                                 colorSettings: colorSettings,
+                                                 lensSettings: lensSettings)
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return (milliseconds(since: start), box.value!)
 }
 
 // MARK: - Run
@@ -776,7 +873,113 @@ do {
         "note": "headless real DeliveryGalleryWriter (local HTML + JPEG thumbs/previews + contact-sheet PDF); disk-bound, not a print/typography acceptance",
     ] as [String: Any]
 
-    // 11. Batch export through the real BatchProcessor, with input hashes checked.
+    // 12. P1-C heuristic quality analysis (headless, synthetic corpus).
+    let qualityStart = CFAbsoluteTimeGetCurrent()
+    let qualitySettings = QualityAnalysisSettings()
+    var qualityRows: [[String: Any]] = []
+    var qualityCount = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let report = try QualityAnalyzer.report(for: loaded.image, settings: qualitySettings)
+            qualityCount += 1
+            qualityRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "sharpnessScore": report.sharpnessScore,
+                "exposureScore": report.exposureScore,
+                "overallScore": report.overallScore,
+                "recommendation": report.recommendation.rawValue,
+            ])
+        } catch {
+            failures.append("quality phase failed for \(spec.filename): \(error.localizedDescription)")
+            qualityRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    phaseRows["qualityAnalysis"] = [
+        "milliseconds": milliseconds(since: qualityStart),
+        "perImage": qualityRows,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["analysisMaxDimension": qualitySettings.analysisMaxDimension,
+                     "closedEyeOpennessThreshold": qualitySettings.closedEyeOpennessThreshold,
+                     "targetMeanLuma": qualitySettings.targetMeanLuma] as [String: Any],
+        "note": "headless real QualityAnalyzer on synthetic fixtures (no face landmarks injected); heuristic culling probe, not a real-photo culling acceptance",
+    ] as [String: Any]
+
+    // 13. P1-C make-up engine (headless, synthetic face landmarks).
+    let makeupStart = CFAbsoluteTimeGetCurrent()
+    let makeupSettings = benchmarkMakeupSettings()
+    let makeupFaces = [syntheticMakeupLandmarks()]
+    var makeupRows: [[String: Any]] = []
+    var makeupApplied = 0
+    for spec in corpusSpecs {
+        let url = corpusRoot.appendingPathComponent(spec.filename)
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+            let madeUp = try MakeupEngine.apply(to: loaded.image, faces: makeupFaces,
+                                                settings: makeupSettings)
+            let rendered = try renderFullResolution(madeUp, engine: engine)
+            makeupApplied += 1
+            makeupRows.append([
+                "file": spec.filename,
+                "milliseconds": milliseconds(since: start),
+                "width": rendered.width,
+                "height": rendered.height,
+            ])
+        } catch {
+            makeupRows.append(["file": spec.filename, "error": error.localizedDescription])
+        }
+    }
+    if makeupApplied == 0 {
+        failures.append("makeup phase did not apply to any fixture")
+    }
+    phaseRows["makeup"] = [
+        "milliseconds": milliseconds(since: makeupStart),
+        "perImage": makeupRows,
+        "appliedCount": makeupApplied,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "settings": ["lipIntensity": makeupSettings.lipIntensity,
+                     "browDensity": makeupSettings.browDensity,
+                     "cheekIntensity": makeupSettings.cheekIntensity,
+                     "eyeshadowIntensity": makeupSettings.eyeshadowIntensity,
+                     "faces": "1 deterministic synthetic landmark set"] as [String: Any],
+        "note": "headless real MakeupEngine with synthetic face landmarks; not a real-face or beauty acceptance",
+    ] as [String: Any]
+
+    // 14. P1-C serial vs bounded-parallel batch comparison (headless).
+    let parallelStart = CFAbsoluteTimeGetCurrent()
+    let serialRun = runParallelBatchPhase(corpusSpecs, corpusRoot: corpusRoot,
+                                          engine: engine, concurrency: 1)
+    let parallelRun = runParallelBatchPhase(corpusSpecs, corpusRoot: corpusRoot,
+                                            engine: engine, concurrency: 4)
+    let speedup = serialRun.milliseconds / max(1, parallelRun.milliseconds)
+    let orderPreserved = serialRun.outcome.values == parallelRun.outcome.values
+    phaseRows["parallelBatch"] = [
+        "milliseconds": milliseconds(since: parallelStart),
+        "serialMilliseconds": serialRun.milliseconds,
+        "parallelMilliseconds": parallelRun.milliseconds,
+        "speedup": speedup,
+        "requestedConcurrency": 4,
+        "effectiveConcurrency": parallelRun.outcome.effectiveConcurrency,
+        "serialSucceeded": serialRun.outcome.succeededCount,
+        "parallelSucceeded": parallelRun.outcome.succeededCount,
+        "parallelFailed": parallelRun.outcome.failedCount,
+        "parallelCancelled": parallelRun.outcome.cancelled,
+        "orderPreserved": orderPreserved,
+        "rssAfterBytes": currentMemory().residentBytes,
+        "note": "serial (maxConcurrency 1) vs bounded-parallel (4) on the same synthetic pipeline (load + colour/lens + full-resolution render); full-resolution Core Image rendering is memory/GPU-bound, so the observed speedup is modest; debug objects and machine load affect the ratio, not release throughput",
+    ] as [String: Any]
+    if !orderPreserved {
+        failures.append("parallelBatch results are not in input order")
+    }
+    if parallelRun.outcome.succeededCount != corpusSpecs.count {
+        failures.append("parallelBatch succeeded \(parallelRun.outcome.succeededCount)/\(corpusSpecs.count) fixtures")
+    }
+
+    // 15. Batch export through the real BatchProcessor, with input hashes checked.
     var beforeHashes: [String: String] = [:]
     for spec in corpusSpecs {
         let url = corpusRoot.appendingPathComponent(spec.filename)
@@ -859,6 +1062,7 @@ do {
     if watermarkCount != corpusSpecs.count { failures.append("watermark phase covered \(watermarkCount)/\(corpusSpecs.count) fixtures") }
     if mattingCount != corpusSpecs.count { failures.append("matting phase covered \(mattingCount)/\(corpusSpecs.count) fixtures") }
     if repairCount != corpusSpecs.count { failures.append("repair phase covered \(repairCount)/\(corpusSpecs.count) fixtures") }
+    if qualityCount != corpusSpecs.count { failures.append("quality phase covered \(qualityCount)/\(corpusSpecs.count) fixtures") }
     if batchSummary.succeeded != corpusSpecs.count { failures.append("batch exported \(batchSummary.succeeded)/\(corpusSpecs.count) fixtures") }
     if batchSummary.failed != 0 { failures.append("batch reported \(batchSummary.failed) failures") }
     if exportedFiles.count != corpusSpecs.count { failures.append("batch produced \(exportedFiles.count) export files, expected \(corpusSpecs.count)") }
@@ -867,7 +1071,7 @@ do {
     let peak = peakResidentBytes()
     let totalMS = milliseconds(since: processStart)
     var report: [String: Any] = [
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
         "command": arguments.joined(separator: " "),
         "workRoot": workRoot.path,
@@ -901,6 +1105,10 @@ do {
             "P1-B repairBrush applies fixed heal+clone strokes on synthetic fixtures; it is not a retouch-quality acceptance",
             "P1-B deliveryPage measures local file IO (static HTML + JPEG thumbs/previews + contact-sheet PDF); disk/CPU dependent, not a print/typography acceptance",
             "schemaVersion 3 adds the P1-B phases; P0/P1 phases keep their earlier meaning",
+            "P1-C qualityAnalysis runs the heuristic QualityAnalyzer on synthetic fixtures without face landmarks; it is not a real-photo culling or aesthetic acceptance",
+            "P1-C makeup uses one deterministic synthetic face-landmark set; it is not a real-face or beauty acceptance",
+            "P1-C parallelBatch compares serial vs bounded-parallel runs of the same CPU-bound synthetic pipeline; the speedup depends on debug objects, machine load and synthetic data, and is not release throughput",
+            "schemaVersion 4 adds the P1-C phases; P0/P1/P1-B phases keep their earlier meaning",
         ],
     ]
     if !failures.isEmpty { report["failures"] = failures }

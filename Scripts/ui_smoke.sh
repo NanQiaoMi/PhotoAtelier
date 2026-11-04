@@ -4,23 +4,26 @@
 # What it does: launches build/PhotoAtelier.app with `open`, drives the real UI
 # through AppleScript (System Events) to open the synthetic fixture folder and to
 # click every inspector tab, and captures one window screenshot per tab with
-# `screencapture`. For the P1/P1-B panels whose new sections sit below the fold it
-# also scrolls the right inspector and captures extra screenshots
-# (人像 → 修复/仿制画笔, 导出 → 客户交付页, 证件照 → 打印排版预览, 调色 → 镜头效果).
-# It asserts that the process stays alive, that every screenshot exists as a real
-# PNG, and that the target section text is actually inside the window viewport.
+# `screencapture`. For the P1/P1-B/P1-C panels whose new sections sit below the
+# fold it also scrolls the right inspector and captures extra screenshots
+# (人像 → 妆容 + 修复/仿制画笔, 导出 → 批量并发 + 挑图筛选 + 客户交付页,
+# 证件照 → 打印排版预览, 调色 → 镜头效果). The culling controls (filter picker,
+# auto-cull button, star/reject buttons) are asserted on the left panel after the
+# fixture import. It asserts that the process stays alive, that every screenshot
+# exists as a real PNG, and that the target section text/control is actually inside
+# the window viewport.
 #
 # Boundaries (do not overstate this evidence):
 # - Synthetic fixtures under artifacts/demo/input only. No user photographs are
 #   read, and no real-photo quality or aesthetic acceptance is performed.
 # - Not full interaction coverage: it covers launch, folder import, inspector tab
-#   switching, inspector scrolling and screenshots. Sliders, curve editing, the
-#   liquify/repair brushes, certificate-photo background import, watermark and
-#   delivery-page actions, masks, drag & drop, the file dialog's keyboard-only
-#   paths, batch export and quit-confirmation dialogs are NOT exercised. This is a
-#   rendering/liveness smoke test, not an interactive acceptance suite. The
-#   scrolled screenshots only prove the new P1/P1-B sections render; they are not
-#   a UX/aesthetic acceptance.
+#   switching, inspector scrolling, culling-control presence and screenshots.
+#   Sliders, curve editing, the liquify/repair brushes, make-up colour pickers,
+#   certificate-photo background import, watermark/delivery actions, masks,
+#   drag & drop, the file dialog's keyboard-only paths, batch export and
+#   quit-confirmation dialogs are NOT exercised. This is a rendering/liveness
+#   smoke test, not an interactive acceptance suite. The scrolled screenshots only
+#   prove the new sections render; they are not a UX/aesthetic acceptance.
 # - Failure retry: only failures of the actual run are retried (the app window is
 #   relaunched at most twice, waiting 10s then 20s) to absorb P1's known AX
 #   flakiness; precondition failures are not retried. The JSON records the attempt
@@ -42,7 +45,7 @@
 #
 # Usage (from the repository root, after `bash Scripts/build_app.sh`):
 #   bash Scripts/ui_smoke.sh [OUTPUT_DIRECTORY]
-# Default output: artifacts/p1b-b7-verify/ui-smoke/
+# Default output: artifacts/p1c-c7-verify/ui-smoke/
 # Optional env: PHOTO_ATELIER_APP=/path/to/PhotoAtelier.app
 # Exit codes: 0 pass, 1 assertion/automation failure, 2 missing precondition.
 
@@ -54,7 +57,7 @@ cd "$ROOT"
 APP="${PHOTO_ATELIER_APP:-$ROOT/build/PhotoAtelier.app}"
 APP_BIN="$APP/Contents/MacOS/PhotoAtelier"
 INPUT="$ROOT/artifacts/demo/input"
-OUT="${1:-$ROOT/artifacts/p1b-b7-verify/ui-smoke}"
+OUT="${1:-$ROOT/artifacts/p1c-c7-verify/ui-smoke}"
 BUNDLE_ID="local.photoatelier.mac"
 PROCESS_PATTERN="PhotoAtelier.app/Contents/MacOS/PhotoAtelier"
 
@@ -537,16 +540,35 @@ end run
 APPLESCRIPT
 }
 
-# Known text from each below-the-fold P1/P1-B section, used to prove the scroll
-# actually brought the new panel area into the window viewport (not just that the
-# scroll bar value changed).
-section_keyword() {
-    case "$1" in
-        人像) printf '%s' "非生成式、不重建结构|仿制画笔" ;;
-        导出) printf '%s' "生成接触表 PDF|导出客户交付页|不覆盖既有交付页|客户交付页" ;;
-        证件照) printf '%s' "几何预览只计算纸张一行能放几张|打印排版预览" ;;
-        调色) printf '%s' "蓝色差|红色差" ;;
-        *) printf '' ;;
+# Known text from each below-the-fold P1/P1-B/P1-C section, used to prove the
+# scroll actually brought the new panel area into the window viewport (not just
+# that the scroll bar value changed). Multiple candidates are OR-ed; the scroll
+# values are tried in order until one candidate is visible.
+capture_tab_sections() {
+    local label="$1"
+    case "$label" in
+        人像)
+            capture_scrolled_section "$label" "0.35 0.45 0.55 0.65 0.75" "makeup" \
+                "妆容 v1（启发式）|唇/眉/腮红/眼影是颜色规则"
+            capture_scrolled_section "$label" "0.95 1.0" "bottom" \
+                "非生成式、不重建结构|仿制画笔"
+            ;;
+        导出)
+            capture_scrolled_section "$label" "0.30 0.40 0.50 0.60" "concurrency" \
+                "批量并发|张并行"
+            capture_scrolled_section "$label" "0.75 0.85 0.95" "cull" \
+                "挑图筛选（仅本次会话|跳过废片"
+            capture_scrolled_section "$label" "0.65 0.75 0.85" "delivery" \
+                "生成接触表 PDF|导出客户交付页|不覆盖既有交付页"
+            ;;
+        证件照)
+            capture_scrolled_section "$label" "0.90 1.0" "bottom" \
+                "几何预览只计算纸张一行能放几张|打印排版预览"
+            ;;
+        调色)
+            capture_scrolled_section "$label" "1.0 0.9" "bottom" \
+                "蓝色差|红色差"
+            ;;
     esac
 }
 
@@ -597,6 +619,85 @@ on run argv
                   end if
                 end if
               end repeat
+            end if
+          end if
+        end try
+      end repeat
+      return "NOT_VISIBLE:" & candidatesText
+    end tell
+  end tell
+end run
+APPLESCRIPT
+}
+
+# True only when a control (button / picker / checkbox / menu button) whose
+# title or accessibility description contains the keyword is inside the window's
+# on-screen rectangle. Used for the culling controls (filter picker, auto-cull
+# button, star/reject buttons) that are not static text.
+verify_control_visible() {
+    osascript - "$BUNDLE_ID" "$1" <<'APPLESCRIPT' || return 1
+on run argv
+  set candidatesText to item 2 of argv
+  if candidatesText is "" then return "NO_KEYWORD"
+  set savedDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to "|"
+  set candidates to text items of candidatesText
+  set AppleScript's text item delimiters to savedDelimiters
+  tell application "System Events"
+    tell process "PhotoAtelier"
+      set w to window 1
+      set wp to position of w
+      set ws to size of w
+      set winLeft to (item 1 of wp) as real
+      set winTop to (item 2 of wp) as real
+      set winRight to winLeft + (item 1 of ws) as real
+      set winBottom to winTop + (item 2 of ws) as real
+      try
+        set contentsList to entire contents of w
+      on error
+        return "NO_CONTENTS"
+      end try
+      repeat with e in contentsList
+        try
+          set matchedCandidate to ""
+          repeat with candidate in candidates
+            if matchedCandidate is "" then
+              set candidateText to candidate as text
+              if candidateText is not "" then
+                try
+                  set t to name of e
+                  if t is not missing value and (t as text) contains candidateText then set matchedCandidate to candidateText
+                end try
+                if matchedCandidate is "" then
+                  try
+                    set d to description of e
+                    if d is not missing value and (d as text) contains candidateText then set matchedCandidate to candidateText
+                  end try
+                end if
+                if matchedCandidate is "" then
+                  try
+                    set h to help of e
+                    if h is not missing value and (h as text) contains candidateText then set matchedCandidate to candidateText
+                  end try
+                end if
+                if matchedCandidate is "" then
+                  try
+                    set v to value of e
+                    if v is not missing value and (v as text) contains candidateText then set matchedCandidate to candidateText
+                  end try
+                end if
+              end if
+            end if
+          end repeat
+          if matchedCandidate is not "" then
+            set p to position of e
+            set sz to size of e
+            set ex to (item 1 of p) as real
+            set ey to (item 2 of p) as real
+            set ew to (item 1 of sz) as real
+            set eh to (item 2 of sz) as real
+            if (ex + ew) > winLeft and ex < winRight and (ey + eh) > winTop and ey < winBottom then
+              return "VISIBLE:" & matchedCandidate
             end if
           end if
         end try
@@ -713,6 +814,13 @@ if [[ "$import_ok" -ne 1 ]]; then
 fi
 activate_window || fail "could not re-activate app after import"
 snapshot "02-folder-loaded.png"
+# P1-C culling controls live on the left panel / preview toolbar, not in an
+# inspector tab, so assert them right after the fixture import.
+for control_keyword in "自动挑图" "推荐|全部" "星（快捷键" "切换废片标记"; do
+    control_result="$(verify_control_visible "$control_keyword")" || control_result="CONTROL_VERIFY_ERROR"
+    [[ "$control_result" == "VISIBLE:"* ]] || fail "culling control '$control_keyword' is not visible ($control_result)"
+done
+snapshot "03-cull-controls.png"
 
 LABELS="$(tab_labels)"
 [[ -n "$LABELS" ]] || fail "no inspector tabs found through accessibility"
@@ -747,7 +855,7 @@ capture_scrolled_section() {
 }
 
 SCROLLED_SECTIONS=()
-EXPECTED_SECTIONS=("人像:bottom" "导出:delivery" "证件照:bottom" "调色:bottom")
+EXPECTED_SECTIONS=("人像:makeup" "人像:bottom" "导出:concurrency" "导出:cull" "导出:delivery" "证件照:bottom" "调色:bottom")
 index=0
 for label in "${TAB_LABELS[@]}"; do
     index=$((index + 1))
@@ -757,13 +865,7 @@ for label in "${TAB_LABELS[@]}"; do
     activate_window >/dev/null 2>&1 || true
     sleep 0.6
     snapshot "$(printf 'tab-%02d-%s.png' "$index" "$label")"
-    keyword="$(section_keyword "$label")"
-    if [[ -n "$keyword" ]]; then
-        case "$label" in
-            导出) capture_scrolled_section "$label" "1.0 0.9" "delivery" "$keyword" ;;
-            *) capture_scrolled_section "$label" "1.0" "bottom" "$keyword" ;;
-        esac
-    fi
+    capture_tab_sections "$label"
 done
 [[ "${#TAB_LABELS[@]}" -ge 7 ]] || fail "expected at least 7 inspector tabs, got ${#TAB_LABELS[@]}"
 # Every expected P1/P1-B section must have produced its scrolled screenshot.
@@ -817,7 +919,8 @@ app_sha256_after="$(shasum -a 256 "$APP_BIN" 2>/dev/null | awk '{print $1}' || t
     printf '  "boundaries": [\n'
     printf '    "synthetic fixtures only; no real-photo quality or aesthetic acceptance",\n'
     printf '    "covers launch, folder import, inspector tab switching, inspector scrolling and screenshots only",\n'
-    printf '    "P1/P1-B sections are captured via scrolled screenshots; curve/liquify/repair/certificate/delivery interactions are not exercised",\n'
+    printf '    "P1/P1-B/P1-C sections are captured via scrolled screenshots; curve/liquify/repair/makeup/certificate/delivery interactions are not exercised",\n'
+    printf '    "culling controls (filter picker, auto-cull button, star/reject buttons) are asserted for presence only; ratings are session-only and not persisted",\n'
     printf '    "app executable mtime/SHA-256/commit are recorded; the run fails if the executable changes mid-run",\n'
     printf '    "sliders, masks, drag and drop, batch export and quit dialogs are not exercised",\n'
     printf '    "requires a GUI session with Accessibility permission for the automation host"\n'

@@ -164,14 +164,32 @@
 
 ---
 
-## 10. 执行状态（待更新）
+## 10. 执行状态（2026-11-04 更新）
 
-| 工作项 | 状态 | 说明 |
+| 工作项 | 状态 | 说明与证据 |
 |---|---|---|
-| C1 AI 挑图核心 | pending | |
-| C2 妆容核心 | pending | |
-| C3 性能核心 | pending | |
-| C4 挑图集成 | pending | |
-| C5 妆容集成 | pending | |
-| C6 性能集成 | pending | |
-| C7 质量适配 | pending | |
+| C1 AI 挑图核心 | ✅ approved | QualityAnalysisTests 11/11、BurstGroupingTests 13/13 |
+| C2 妆容核心 | ✅ approved | MakeupEngineTests 10/10（round 2 修复 polygon 回退不可达） |
+| C3 性能核心 | ✅ approved | ParallelBatchTests 10/10；并发上限/顺序/失败隔离/取消 |
+| C4 挑图集成 | ✅ approved | PhotoSelection 15/15、Batch 23+；评级/筛选/自动挑图/导出跳过 |
+| C5 妆容集成 | ✅ approved | Recipe v13、人像页妆容区；ColorCompatibility 39/39、Engine 36/36（round 2 修复颜色折叠） |
+| C6 性能集成 | ✅ approved | 批量并发 4（1–8）、PreviewRequestGate、分析降采样；真实批量 3.49x |
+| C7 质量适配 | ✅ approved | benchmark schemaVersion 4；ui_smoke 新 UI 区段（exit 0 待解锁会话单次运行） |
+| S1 C4 nit 修复 | ✅ approved | recommended 排除废片、Option 快捷键、token/guard、清单兼容 |
+| S2 v13 版本边界回归 | ✅ approved | LocalMask 19/19、SceneAdaptive 15/15 |
+| S3 C5 nit 修复 | ✅ approved | preparedFaceMasks 收紧、低强度误报、参数注释 |
+| S4 S1 遗留修复 | ✅ approved | recommended 先排除 isRejected（自动 keep 后手动废片） |
+
+**最终验收（2026-11-04，部分待解锁）**：
+
+| 检查 | 命令 | 退出码 | 关键输出 |
+|---|---|---|---|
+| 全量构建与测试 | `make check` | 0 | 521 tests / 0 failures（154.5s） |
+| Release 打包 | `bash Scripts/build_app.sh` | 0 | 4 签名 dylib/55 XML/许可/portable paths 通过 |
+| 包校验 | `codesign --verify --deep --strict` / `python3 Scripts/verify_app.py` | 0 / 0 | 通过 |
+| UI 冒烟（重建包） | `UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh` | 待解锁会话单次运行 | 预期 8 页签/18 截图/7 scrolled 区段；两次失败（matcher 过严已修、锁屏 -1719）如实记录 |
+| 性能基准（最终树） | `swiftc … Scripts/benchmark.swift` + 运行 | 0 / 0 | `benchmark: PASS`，schemaVersion 4；quality 7110ms、makeup 33745ms、parallel 1.12x（C6 真实批量 3.49x） |
+
+**提交**：`75c65d9` 核心+集成；`1ddf0cf` nit 修复；`（docs/scripts commit）` 质量脚本与文档。
+
+**仍保留的诚实边界**：真实照片挑图准确率/妆容审美/性能吞吐未验收；GUI 点选与真实键盘快捷键未自动化；评级/废片不持久化；24MP 性能未基准；Apple Silicon 未实测；C7 两条非阻塞 nit（证据目录复用、benchmark 编译对象副本）已记录。
