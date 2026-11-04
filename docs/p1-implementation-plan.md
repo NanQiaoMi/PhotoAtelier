@@ -172,14 +172,29 @@
 
 ---
 
-## 10. 执行状态（待更新）
+## 10. 执行状态（2026-11-04 更新）
 
-| 工作项 | 状态 | 说明 |
+| 工作项 | 状态 | 说明与证据 |
 |---|---|---|
-| P1-1 调色核心 | pending | |
-| P1-2 液化核心 | pending | |
-| P1-3 水印核心 | pending | |
-| P1-4 质量适配 | pending | |
-| P1-5 调色集成 | pending | |
-| P1-6 液化集成 | pending | |
-| P1-7 水印集成 | pending | |
+| P1-1 调色核心 | ✅ approved | ColorToolsTests 28/28；HSL/曲线/分级/镜头效果 |
+| P1-2 液化核心 | ✅ approved | LiquifyWarpTests 9/9；位移场/7 预设/手动笔迹 |
+| P1-3 水印核心 | ✅ approved | WatermarkTests 16/16；旋转自适应缩小修复 |
+| P1-5 调色集成 | ✅ approved | Recipe v11、调色页签；ColorCompatibilityTests 34/34 |
+| P1-6 液化集成 | ✅ approved | 人像液化区/画布笔迹/撤销；round 2 修复 2 major |
+| P1-7 水印集成 | ✅ approved | 双版本导出/manifest v3/v11 门禁；IOTests 19/19、BatchTests 14/14 |
+| P1-4 质量适配 | ⚠️ 已完成，gate override | benchmark PASS；重建包 ui_smoke 7 页签/12 截图 exit 0（复核者两次）；Lead 最终包重跑遇一次 AX 瞬时错误（用户要求不再弹窗），以同代码重建包 PASS 证据 + override 记录 |
+| S1 配方 v11 边界回归 | ✅ approved | LocalMaskTests 19/19、SceneAdaptiveTests 15/15 |
+
+**最终验收（2026-11-04）**：
+
+| 检查 | 命令 | 退出码 | 结果 |
+|---|---|---|---|
+| 全量测试 | `make check` | 0 | 398 tests / 0 failures（119.5s） |
+| Release 打包 | `bash Scripts/build_app.sh` | 0 | 4 签名 dylib/55 XML/许可/portable paths 通过 |
+| 包校验 | `codesign --verify --deep --strict` / `python3 Scripts/verify_app.py` | 0 / 0 | 通过 |
+| UI 冒烟（重建包） | `bash Scripts/ui_smoke.sh` | 0（复核者 19:22/19:38） | 7 页签 / 12 截图；Lead 最终包重跑遇一次 AX scroll 瞬时错误，已停止反复弹窗 |
+| 基准（最终树） | `swiftc … Scripts/benchmark.swift` + 运行 | 0 / 0 | `benchmark: PASS`，schemaVersion 2，peak RSS 4066MB |
+
+**提交**：`9920976` 核心算法；`eae85ef` 调色+液化集成；`6fe5578` 水印集成；`（docs/scripts commit）` 质量脚本与文档。
+
+**仍保留的诚实边界**：真实照片审美未验收；GUI 点选/画布笔迹交互未自动化；24MP 性能未基准；Apple Silicon 未实测；P1-7 三条非阻塞 nit 记录在发布说明。
