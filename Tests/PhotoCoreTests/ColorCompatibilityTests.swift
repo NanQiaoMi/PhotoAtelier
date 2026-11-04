@@ -285,14 +285,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughTenAndRejectsEleven() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughElevenAndRejectsTwelve() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...10 {
+        for version in 1...11 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,8 +305,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 11
-        let rejectedOutput = root.appendingPathComponent("output-11", isDirectory: true)
+        futureRecipe.version = 12
+        let rejectedOutput = root.appendingPathComponent("output-12", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -988,5 +988,268 @@ final class ColorCompatibilityTests: XCTestCase {
                             colorSpace: linearColorSpace)
         guard extent.origin != .zero else { return image }
         return image.transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+    }
+
+    // MARK: - P1-5 color tools integration (v11)
+
+    func testColorToolsRequireV11RoundTripsAndLegacyPayloadsKeepOldPath() throws {
+        var settings = AdjustmentSettings()
+        var curves = ColorCurveSettings()
+        curves.luminance = [CurveControlPoint(x: 0, y: 0),
+                            CurveControlPoint(x: 0.5, y: 0.6),
+                            CurveControlPoint(x: 1, y: 1)]
+        var hsl = HSLSettings()
+        hsl.cyan.saturation = 0.4
+        var grading = ColorGradingSettings()
+        grading.highlights = ColorGradingWheel(hueDegrees: 40, saturation: 0.3, luminance: 0.1)
+        settings.colorTools = ColorToolsSettings(curves: curves, hsl: hsl, grading: grading)
+        settings.lensEffects = LensEffectsSettings(vignetteAmount: 0.4,
+                                                   chromaticAberrationRed: 0.2)
+
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 10
+        XCTAssertThrowsError(try recipe.validateVersion(),
+                             "v10 配方不得静默接受非中性调色工具/镜头效果")
+        recipe.version = 11
+        XCTAssertNoThrow(try recipe.validateVersion())
+
+        let encoded = try JSONEncoder().encode(recipe)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: encoded)
+        XCTAssertEqual(decoded, recipe, "v11 配方必须编码往返")
+        XCTAssertEqual(decoded.adjustments.colorTools, settings.colorTools)
+        XCTAssertEqual(decoded.adjustments.lensEffects, settings.lensEffects)
+
+        // Lens effects alone also require v11.
+        var lensOnly = AdjustmentSettings()
+        lensOnly.lensEffects = LensEffectsSettings(vignetteAmount: 0.3)
+        var lensRecipe = Recipe(adjustments: lensOnly)
+        lensRecipe.version = 10
+        XCTAssertThrowsError(try lensRecipe.validateVersion())
+
+        // Old recipes carry no colorTools/lensEffects keys: decode as nil and keep
+        // the pre-v11 pixel path (identical to a neutral current recipe).
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var adjustments = try XCTUnwrap(object["adjustments"] as? [String: Any])
+        adjustments.removeValue(forKey: "colorTools")
+        adjustments.removeValue(forKey: "lensEffects")
+        object["adjustments"] = adjustments
+        object["version"] = 9
+        let legacy = try JSONDecoder().decode(Recipe.self,
+                                              from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.adjustments.colorTools)
+        XCTAssertNil(legacy.adjustments.lensEffects)
+        XCTAssertNoThrow(try legacy.validateVersion())
+        let extent = CGRect(x: 0, y: 0, width: 4, height: 4)
+        let source = solid([0.32, 0.20, 0.14], extent: extent)
+        let legacyPixel = try pixel(try PhotoEngine().process(source, settings: legacy.adjustments, lut: nil).image,
+                                    x: 1, y: 1)
+        let neutralPixel = try pixel(try PhotoEngine().process(source, settings: AdjustmentSettings(), lut: nil).image,
+                                     x: 1, y: 1)
+        for channel in 0..<4 {
+            XCTAssertEqual(legacyPixel[channel], neutralPixel[channel], accuracy: 1e-9)
+        }
+    }
+
+    func testNeutralColorToolsAreExactNoOpsAndRecordNothing() throws {
+        var settings = AdjustmentSettings()
+        settings.colorTools = ColorToolsSettings()
+        settings.lensEffects = LensEffectsSettings()
+        let extent = CGRect(x: 0, y: 0, width: 8, height: 8)
+        let source = solid([0.3, 0.2, 0.15], extent: extent)
+        let baseline = try PhotoEngine().process(source, settings: AdjustmentSettings(), lut: nil)
+        let output = try PhotoEngine().process(source, settings: settings, lut: nil)
+        let baselinePixel = try pixel(baseline.image, x: 3, y: 3)
+        let outputPixel = try pixel(output.image, x: 3, y: 3)
+        for channel in 0..<4 {
+            XCTAssertEqual(outputPixel[channel], baselinePixel[channel], accuracy: 1e-9,
+                           "中性调色工具必须保持预 v11 像素路径")
+        }
+        XCTAssertNil(output.report.colorTools, "中性调色工具不应写入报告")
+    }
+
+    func testColorToolsValidationRejectsInvalidSettings() throws {
+        var badCurves = AdjustmentSettings()
+        badCurves.colorTools = ColorToolsSettings(curves: ColorCurveSettings(
+            red: [CurveControlPoint(x: 0.5, y: 0), CurveControlPoint(x: 0.5, y: 1)]))
+        XCTAssertThrowsError(try PhotoEngine.validate(badCurves))
+        var badHSL = AdjustmentSettings()
+        var hsl = HSLSettings()
+        hsl.red.saturation = 2
+        badHSL.colorTools = ColorToolsSettings(hsl: hsl)
+        XCTAssertThrowsError(try PhotoEngine.validate(badHSL))
+        var badLens = AdjustmentSettings()
+        badLens.lensEffects = LensEffectsSettings(vignetteAmount: .nan)
+        XCTAssertThrowsError(try PhotoEngine.validate(badLens))
+    }
+
+    func testColorToolsReportRecordsAppliedStages() throws {
+        var curves = ColorCurveSettings()
+        curves.luminance = [CurveControlPoint(x: 0, y: 0),
+                            CurveControlPoint(x: 0.5, y: 0.6),
+                            CurveControlPoint(x: 1, y: 1)]
+        var settings = AdjustmentSettings()
+        settings.colorTools = ColorToolsSettings(curves: curves)
+        settings.lensEffects = LensEffectsSettings(vignetteAmount: 0.4,
+                                                   chromaticAberrationRed: -0.2)
+        let extent = CGRect(x: 0, y: 0, width: 8, height: 8)
+        let output = try PhotoEngine().process(solid([0.3, 0.2, 0.15], extent: extent),
+                                               settings: settings, lut: nil)
+        let report = try XCTUnwrap(output.report.colorTools)
+        XCTAssertEqual(report.stages, ["curves", "lensEffects"])
+        XCTAssertEqual(report.vignetteAmount, 0.4, accuracy: 1e-9)
+        XCTAssertEqual(report.chromaticAberration, 0.2, accuracy: 1e-9)
+    }
+
+    func testRequiredRecipeVersionReturnsElevenForColorToolsAndLensEffects() throws {
+        var curves = ColorCurveSettings()
+        curves.red = [CurveControlPoint(x: 0, y: 0.1), CurveControlPoint(x: 1, y: 1)]
+        var settings = AdjustmentSettings()
+        settings.colorTools = ColorToolsSettings(curves: curves)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 11)
+        settings.colorTools = nil
+        settings.lensEffects = LensEffectsSettings(vignetteAmount: 0.2)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 11)
+
+        let automatic = AutomaticBatchRecipe(styleID: "balanced", baseline: settings,
+                                             referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automatic), 11)
+        var recipe = Recipe(adjustments: AdjustmentSettings(), automatic: automatic)
+        recipe.version = 10
+        XCTAssertThrowsError(try recipe.validateVersion())
+        recipe.version = 11
+        XCTAssertNoThrow(try recipe.validateVersion())
+
+        var neutral = AdjustmentSettings()
+        neutral.colorTools = ColorToolsSettings()
+        neutral.lensEffects = LensEffectsSettings()
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutral, automatic: nil), 9)
+        var portrait = AdjustmentSettings()
+        portrait.portrait = PortraitRefinementSettings(blemishStrength: 0.2)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: portrait, automatic: nil), 10)
+    }
+
+    func testColorToolsPipelineOrderToneThenToolsThenLensThenLUT() throws {
+        let width = 24, height = 20
+        let extent = CGRect(x: 0, y: 0, width: width, height: height)
+        let source = gradient(width: width, height: height) { x, y in
+            let t = Float(x) / 23
+            let u = Float(y) / 19
+            return (0.12 + 0.45 * t, 0.18 + 0.30 * u, 0.30 - 0.15 * t)
+        }
+        var curves = ColorCurveSettings()
+        curves.luminance = [CurveControlPoint(x: 0, y: 0),
+                            CurveControlPoint(x: 0.5, y: 0.6),
+                            CurveControlPoint(x: 1, y: 1)]
+        var hsl = HSLSettings()
+        hsl.red.saturation = 0.4
+        var grading = ColorGradingSettings()
+        grading.global = ColorGradingWheel(hueDegrees: 200, saturation: 0.2, luminance: 0.05)
+        let colorTools = ColorToolsSettings(curves: curves, hsl: hsl, grading: grading)
+        let lensEffects = LensEffectsSettings(vignetteAmount: 0.35, chromaticAberrationBlue: 0.4)
+        let lut = try colorCube(size: 2) { r, g, b in
+            (min(1, 0.05 + 0.90 * r), min(1, 0.02 + 0.85 * g), min(1, 0.03 + 0.95 * b))
+        }
+
+        var combined = AdjustmentSettings()
+        combined.exposureEV = 0.4
+        combined.colorTools = colorTools
+        combined.lensEffects = lensEffects
+        combined.lutIntensity = 1
+        let combinedOutput = try PhotoEngine().process(source, settings: combined, lut: lut).image
+
+        // Sequential reference: basic tone → color tools → lens effects → LUT.
+        var toneOnly = AdjustmentSettings()
+        toneOnly.exposureEV = 0.4
+        var staged = try PhotoEngine().process(source, settings: toneOnly, lut: nil).image
+        staged = try ColorToolsEngine.apply(colorTools, to: staged)
+        staged = try LensEffectsEngine.apply(lensEffects, to: staged)
+        var lutOnly = AdjustmentSettings()
+        lutOnly.lutIntensity = 1
+        let expected = try PhotoEngine().process(staged, settings: lutOnly, lut: lut).image
+
+        for (x, y) in sampleGrid(width: width, height: height) {
+            let actual = try pixel(combinedOutput, x: x, y: y)
+            let wanted = try pixel(expected, x: x, y: y)
+            for channel in 0..<4 {
+                XCTAssertEqual(actual[channel], wanted[channel], accuracy: 0.003,
+                               "管线顺序应为 基础影调→曲线/HSL/分级→镜头效果→LUT（\(x),\(y) ch\(channel)）")
+            }
+        }
+    }
+
+    // MARK: - P1-6 liquify recipe gate
+
+    func testLiquifyRequiresV11RoundTripsAndNeutralStaysLegacy() throws {
+        var settings = AdjustmentSettings()
+        settings.liquify = FaceReshapeSettings(preset: .round,
+                                               parameters: FaceReshapeParameters(slimFace: 0.4))
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 10
+        XCTAssertThrowsError(try recipe.validateVersion()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("液化"),
+                          "a v10 recipe with non-neutral liquify must be rejected explicitly")
+        }
+        recipe.version = 11
+        XCTAssertNoThrow(try recipe.validateVersion())
+        let encoded = try JSONEncoder().encode(recipe)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: encoded)
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.version, 11)
+        XCTAssertEqual(decoded.adjustments.liquify?.preset, .round)
+        XCTAssertEqual(try XCTUnwrap(decoded.adjustments.liquify?.parameters.slimFace),
+                       0.4, accuracy: 1e-9)
+        // Preset offsets stay additive on top of the explicit slider.
+        XCTAssertEqual(try XCTUnwrap(decoded.adjustments.liquify?.effectiveParameters.slimFace),
+                       0.95, accuracy: 1e-9)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 11)
+
+        // Explicitly neutral liquify keeps the legacy v9 payload and pixel path.
+        var neutral = AdjustmentSettings()
+        neutral.liquify = FaceReshapeSettings()
+        XCTAssertNoThrow(try Recipe(adjustments: neutral).validateVersion())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutral, automatic: nil), 9)
+
+        // Manual strokes alone also require v11.
+        var strokeOnly = AdjustmentSettings()
+        strokeOnly.liquify = FaceReshapeSettings(strokes: [
+            WarpStroke(mode: .push,
+                       points: [MaskPoint(x: 0.4, y: 0.5), MaskPoint(x: 0.6, y: 0.5)],
+                       radius: 0.08, strength: 0.6)
+        ])
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: strokeOnly, automatic: nil), 11)
+
+        // The automatic recipe's baseline/reference branches are covered too.
+        var baselineSettings = AdjustmentSettings()
+        baselineSettings.liquify = FaceReshapeSettings(preset: .youthful)
+        let automatic = AutomaticBatchRecipe(styleID: "balanced",
+                                             baseline: baselineSettings,
+                                             referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automatic), 11)
+        var automaticRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automatic)
+        automaticRecipe.version = 10
+        XCTAssertThrowsError(try automaticRecipe.validateVersion())
+        automaticRecipe.version = 11
+        XCTAssertNoThrow(try automaticRecipe.validateVersion())
+
+        // v1–v10 payloads without the field decode as nil and keep the old path.
+        var legacy = Recipe(adjustments: AdjustmentSettings())
+        legacy.version = 10
+        let legacyDecoded = try JSONDecoder().decode(Recipe.self,
+            from: try JSONEncoder().encode(legacy))
+        XCTAssertNil(legacyDecoded.adjustments.liquify)
+        XCTAssertNoThrow(try legacyDecoded.validateVersion())
+    }
+
+    func testLiquifyValidationRejectsMalformedStrokesAndOutOfRangeStrength() {
+        var settings = AdjustmentSettings()
+        settings.liquify = FaceReshapeSettings(strokes: [
+            WarpStroke(mode: .push, points: [MaskPoint(x: Double.nan, y: 0.5)],
+                       radius: 0.08, strength: 0.6)
+        ])
+        XCTAssertThrowsError(try PhotoEngine.validate(settings))
+        settings.liquify = FaceReshapeSettings(strength: 1.5)
+        XCTAssertThrowsError(try PhotoEngine.validate(settings))
     }
 }

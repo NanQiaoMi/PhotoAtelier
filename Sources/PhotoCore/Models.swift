@@ -272,8 +272,38 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v10.
     /// Absent or neutral reference-color settings keep the pre-v10 render path.
     public var referenceColor: ReferenceColorSettings? = nil
+    /// Optional for exact compatibility with recipes written before v11.
+    /// Absent or neutral color tools (curves/HSL/grading) keep the pre-v11 path.
+    public var colorTools: ColorToolsSettings? = nil
+    /// Optional for exact compatibility with recipes written before v11.
+    /// Absent or neutral lens effects (vignette/CA) keep the pre-v11 path.
+    public var lensEffects: LensEffectsSettings? = nil
+    /// Optional for exact compatibility with recipes written before v11.
+    /// Absent or neutral liquify settings (face presets/sliders/manual strokes)
+    /// keep the pre-v11 path untouched.
+    public var liquify: FaceReshapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
+}
+
+/// Per-photo record of which P1 color-tool stages actually ran, embedded in
+/// `ProcessingReport` so batch manifests can state the applied color pipeline
+/// instead of omitting it. `nil` means no active color tool (pre-v11 path).
+public struct ColorToolsReport: Codable, Equatable {
+    /// Names of the stages that ran, in pipeline order, e.g.
+    /// `["curves", "hsl", "grading", "lensEffects"]`.
+    public var stages: [String]
+    public var vignetteAmount: Double
+    public var chromaticAberration: Double
+    public var note: String?
+
+    public init(stages: [String], vignetteAmount: Double = 0,
+                chromaticAberration: Double = 0, note: String? = nil) {
+        self.stages = stages
+        self.vignetteAmount = vignetteAmount
+        self.chromaticAberration = chromaticAberration
+        self.note = note
+    }
 }
 
 /// User-facing reference-color ("AI 追色") settings stored in a v10 recipe.
@@ -360,7 +390,8 @@ public extension ExportSettings {
 
 public struct Recipe: Codable, Equatable {
     /// Version 9 adds opt-in per-photo LUT candidate evaluation.
-    /// Version 10 adds portrait refinement and later reference-color/export fields.
+    /// Version 10 adds portrait refinement, reference color and export extensions.
+    /// Version 11 adds the P1 color tools, liquify and watermark fields.
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -376,7 +407,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...10).contains(version) else {
+        guard (1...11).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         let portraitSettings = [adjustments.portrait,
@@ -390,6 +421,24 @@ public struct Recipe: Codable, Equatable {
                                automatic?.referenceSettings.referenceColor]
         guard version >= 10 || referenceColors.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("参考图追色需要配方版本 10，不能静默降级。")
+        }
+        let colorToolGroups = [adjustments.colorTools,
+                               automatic?.baseline.colorTools,
+                               automatic?.referenceSettings.colorTools]
+        guard version >= 11 || colorToolGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("曲线/HSL/颜色分级需要配方版本 11，不能静默降级。")
+        }
+        let lensEffectGroups = [adjustments.lensEffects,
+                                automatic?.baseline.lensEffects,
+                                automatic?.referenceSettings.lensEffects]
+        guard version >= 11 || lensEffectGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("暗角/横向色差需要配方版本 11，不能静默降级。")
+        }
+        let liquifyGroups = [adjustments.liquify,
+                             automatic?.baseline.liquify,
+                             automatic?.referenceSettings.liquify]
+        guard version >= 11 || liquifyGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的液化/美型需要配方版本 11，不能静默降级。")
         }
         let exportSettings = self.export
         let usesExtendedExport = exportSettings.requiresVersion10Recipe
@@ -436,6 +485,62 @@ public struct PhotoItem: Identifiable, Equatable {
     public init(url: URL, relativePath: String) { self.url = url; self.relativePath = relativePath }
 }
 
+/// Per-photo record of the liquify/face-reshape stage. `nil` means no active
+/// liquify setting (pre-v11 path). A non-nil report with `applied == false`
+/// documents that a face-dependent warp was requested but skipped (no usable
+/// face), so batch manifests can say why instead of silently omitting it.
+/// Pure math for preset-relative liquify sliders, shared by the UI and tests.
+///
+/// A preset contributes an offset on every slider; an explicit slider edit is
+/// stored as a clamped offset so `preset + offset` can never leave `-1...1`
+/// (which `FaceReshapeEngine.validate` would reject, failing the whole preview).
+public enum LiquifySliderMath {
+    /// Clamped explicit offset for a slider position showing `effective`.
+    public static func explicitOffset(forEffective effective: Double,
+                                      presetValue: Double) -> Double {
+        guard effective.isFinite, presetValue.isFinite else { return 0 }
+        return min(1, max(-1, effective - presetValue))
+    }
+
+    /// The effective value the slider should display after clamping.
+    public static func clampedEffective(_ effective: Double, presetValue: Double) -> Double {
+        let offset = explicitOffset(forEffective: effective, presetValue: presetValue)
+        return min(1, max(-1, presetValue + offset))
+    }
+}
+
+/// Brush footprint math shared by the canvas overlay and the warp field.
+///
+/// A `WarpStroke.radius` is a fraction of each image axis, so the real footprint
+/// is an ellipse with pixel radii `(radius × width, radius × height)` — not a
+/// circle based on the short edge. The overlay must use the same radii.
+public enum LiquifyBrushGeometry {
+    public static func pixelRadii(radius: Double, imageSize: CGSize) -> (x: Double, y: Double) {
+        guard radius.isFinite, radius > 0,
+              imageSize.width.isFinite, imageSize.height.isFinite,
+              imageSize.width > 0, imageSize.height > 0 else { return (0, 0) }
+        return (radius * Double(imageSize.width), radius * Double(imageSize.height))
+    }
+}
+
+public struct LiquifyIntegrationReport: Codable, Equatable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var presetApplied: Bool
+    public var strokeCount: Int
+    public var note: String?
+
+    public init(applied: Bool = false, faceCount: Int = 0,
+                presetApplied: Bool = false, strokeCount: Int = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.presetApplied = presetApplied
+        self.strokeCount = strokeCount
+        self.note = note
+    }
+}
+
 public struct ProcessingReport: Codable, Equatable {
     public var warnings: [String] = []
     public var appliedExposureEV: Double = 0
@@ -457,6 +562,12 @@ public struct ProcessingReport: Codable, Equatable {
     /// active reference color; batch manifests use it to record whether the
     /// shared profile was applied or explicitly skipped.
     public var referenceColor: ReferenceColorReport?
+    /// Per-photo P1 color-tool status (curves/HSL/grading/lens effects).
+    /// `nil` when no color tool is active, keeping the pre-v11 path exact.
+    public var colorTools: ColorToolsReport?
+    /// Per-photo P1 liquify/face-reshape status. `nil` when liquify is absent or
+    /// neutral; a report with `applied == false` records a face-dependent skip.
+    public var liquify: LiquifyIntegrationReport?
     public init() {}
 }
 

@@ -126,6 +126,15 @@ final class AppModel: ObservableObject {
     @Published var maskEditMode = false
     @Published var pickingMaskColor = false
     @Published var showMaskCoverage = false
+    // P1 liquify / face-reshape editing state (settings live in adjustments.liquify).
+    @Published var liquifyBrushActive = false
+    @Published var liquifyBrushMode: WarpStroke.Mode = .push
+    @Published var liquifyBrushRadius: Double = 0.08
+    @Published var liquifyBrushStrength: Double = 0.6
+    @Published private(set) var liquifyStrokeInProgress = false
+    @Published private(set) var liquifyDraftStroke: WarpStroke?
+    private var liquifyStrokeUndoBase: UndoSnapshot?
+    private var liquifyStrokeLastPoint: MaskPoint?
     @Published var maskOverlayOpacity: Double = 0.55
     @Published var maskOverlayImage: NSImage?
     @Published var maskInspection: MaskInspection?
@@ -241,7 +250,7 @@ final class AppModel: ObservableObject {
         // v9 and then rejected by our own v10 gate.
         var requiredVersion = PhotoEngine.requiredRecipeVersion(adjustments: adjustments,
                                                                 automatic: automaticRecipe)
-        if exportSettings.requiresVersion10Recipe { requiredVersion = 10 }
+        if exportSettings.requiresVersion10Recipe { requiredVersion = max(requiredVersion, 10) }
         if requiredVersion > recipe.version { recipe.version = requiredVersion }
         return recipe
     }
@@ -289,11 +298,16 @@ final class AppModel: ObservableObject {
         let portraitContractFailure = Self.portraitContractSelfCheckFailure()
         assert(portraitContractFailure == nil, portraitContractFailure ?? "")
         if ProcessInfo.processInfo.arguments.contains("--self-test") {
+            var liquifyProbe = AdjustmentSettings()
+            liquifyProbe.liquify = FaceReshapeSettings(preset: .youthful)
+            let liquifyVersion = PhotoEngine.requiredRecipeVersion(adjustments: liquifyProbe,
+                                                                   automatic: nil)
             print("PORTRAIT_CONTRACT_SELF_CHECK \(portraitContractFailure == nil ? "PASS" : "FAIL")"
                 + " · maxFaces=\(Self.portraitMaximumFaces)"
                 + " · minSkinCoverage=\(Self.portraitMinimumSkinCoverage)"
                 + " · neutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings()))"
-                + " · nonNeutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)))")
+                + " · nonNeutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)))"
+                + " · liquifyVersion=\(liquifyVersion)")
         }
         #endif
     }
@@ -332,6 +346,8 @@ final class AppModel: ObservableObject {
         closeNativeInspection()
         nativeInspectionRegion = .init()
         cancelMaskInteraction()
+        cancelLiquifyStroke()
+        liquifyBrushActive = false
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
@@ -582,6 +598,8 @@ final class AppModel: ObservableObject {
         nativeInspection.cancel()
         nativeInspectionRegion.center = .init(x: 0.5, y: 0.5)
         cancelMaskInteraction()
+        cancelLiquifyStroke()
+        liquifyBrushActive = false
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         invalidatePortraitDetection()
@@ -1475,7 +1493,228 @@ final class AppModel: ObservableObject {
         if !portraitRecipeNeedsVersion10(active) {
             return "non-neutral portrait settings must require v10"
         }
+        // P1-6 liquify contract: non-neutral liquify must save as v11, explicitly
+        // neutral liquify must stay on the legacy version.
+        var activeLiquify = AdjustmentSettings()
+        activeLiquify.liquify = FaceReshapeSettings(preset: .youthful)
+        if PhotoEngine.requiredRecipeVersion(adjustments: activeLiquify, automatic: nil) != 11 {
+            return "non-neutral liquify settings must require recipe v11"
+        }
+        var neutralLiquify = AdjustmentSettings()
+        neutralLiquify.liquify = FaceReshapeSettings()
+        if PhotoEngine.requiredRecipeVersion(adjustments: neutralLiquify, automatic: nil) != 9 {
+            return "explicitly neutral liquify settings must not require v11"
+        }
+        var strokeOnlyLiquify = AdjustmentSettings()
+        strokeOnlyLiquify.liquify = FaceReshapeSettings(strokes: [
+            WarpStroke(mode: .push, points: [MaskPoint(x: 0.4, y: 0.5), MaskPoint(x: 0.6, y: 0.5)],
+                       radius: 0.08, strength: 0.6)
+        ])
+        if PhotoEngine.requiredRecipeVersion(adjustments: strokeOnlyLiquify, automatic: nil) != 11 {
+            return "manual liquify strokes must require recipe v11"
+        }
+        // P1-6 review F1: preset+slider edits must stay inside the validated
+        // -1...1 explicit range (otherwise the whole preview is rejected).
+        if Self.liquifyExplicitValue(forEffective: -1, presetValue: 0.55) != -1 {
+            return "liquify slider must clamp preset-relative offsets (negative side)"
+        }
+        if Self.liquifyExplicitValue(forEffective: 1, presetValue: -0.30) != 1 {
+            return "liquify slider must clamp preset-relative offsets (positive side)"
+        }
+        if abs(Self.liquifyExplicitValue(forEffective: 0.2, presetValue: 0.55) - (-0.35)) > 1e-12 {
+            return "liquify slider offset arithmetic is wrong"
+        }
+        // P1-6 review F5: a neutral setting with protection disabled must stay
+        // stored so the toggle cannot bounce back.
+        if Self.collapsedLiquifySettings(FaceReshapeSettings()) != nil {
+            return "neutral liquify with default protection must collapse to nil"
+        }
+        var unprotected = FaceReshapeSettings()
+        unprotected.backgroundProtection = false
+        if Self.collapsedLiquifySettings(unprotected) == nil {
+            return "neutral liquify with protection disabled must be kept"
+        }
         return nil
+    }
+
+    // MARK: Liquify / face reshaping (P1)
+
+    /// Current liquify settings; `nil` means the pre-v11 path (no warp).
+    var liquifySettings: FaceReshapeSettings {
+        adjustments.liquify ?? FaceReshapeSettings()
+    }
+
+    /// Face-shape preset/slider controls need a detected face; manual strokes do not.
+    var canEditLiquifyFaceShape: Bool {
+        !batchRunning && afterImage != nil && portraitFaceStatus.detectedFaceCount > 0
+    }
+
+    var canDrawLiquify: Bool {
+        !batchRunning && afterImage != nil && selectedPhoto != nil
+    }
+
+    var liquifyStatusNote: String {
+        if batchRunning { return "批处理进行中，液化编辑暂不可用。" }
+        if afterImage == nil { return "打开照片后可编辑液化/美型。" }
+        if portraitFaceStatus.isDetecting { return "正在检测人脸；脸型预设与滑杆需要人脸地标。" }
+        if portraitFaceStatus.detectedFaceCount == 0 {
+            return "未检测到可用人脸：脸型预设与滑杆不可用；手动液化笔迹仍可使用并会记录到配方。"
+        }
+        return "检测到 \(portraitFaceStatus.detectedFaceCount) 张人脸；脸型与滑杆只作用于第一张脸，后续蒙版基于变形后的图像。"
+    }
+
+    /// Applies one liquify edit. A fully neutral setting collapses back to `nil`
+    /// so old recipes keep the exact pre-v11 decode/encode shape — except when the
+    /// user explicitly turned background protection off, which is kept so the
+    /// toggle cannot silently bounce back (it changes no pixels).
+    func updateLiquifySettings(_ mutate: (inout FaceReshapeSettings) -> Void) {
+        var settings = adjustments.liquify ?? FaceReshapeSettings()
+        mutate(&settings)
+        adjustments.liquify = Self.collapsedLiquifySettings(settings)
+    }
+
+    /// `nil` only for a neutral setting whose protection flag is at its default;
+    /// a neutral setting with protection disabled is stored (no pixel effect) so
+    /// the UI toggle state survives.
+    static func collapsedLiquifySettings(_ settings: FaceReshapeSettings) -> FaceReshapeSettings? {
+        if settings.isNeutral, settings.backgroundProtection { return nil }
+        return settings
+    }
+
+    /// Maps an effective slider value to the stored explicit offset. The preset
+    /// contribution is subtracted and the result clamped to `-1...1`, so
+    /// preset+offset can never leave the validated range (otherwise
+    /// `PhotoEngine.validate` would reject the whole preview).
+    static func liquifyExplicitValue(forEffective effective: Double,
+                                     presetValue: Double) -> Double {
+        LiquifySliderMath.explicitOffset(forEffective: effective, presetValue: presetValue)
+    }
+
+    /// One slash of a liquify slider: stores the clamped explicit offset while the
+    /// slider displays the effective (preset+offset) value.
+    func setLiquifyParameter(_ effective: Double,
+                             _ keyPath: WritableKeyPath<FaceReshapeParameters, Double>) {
+        updateLiquifySettings { settings in
+            settings.parameters[keyPath: keyPath] = Self.liquifyExplicitValue(
+                forEffective: effective,
+                presetValue: settings.preset.parameters[keyPath: keyPath])
+        }
+    }
+
+    func applyLiquifyPreset(_ preset: FaceShapePreset) {
+        guard preset == .classic || canEditLiquifyFaceShape else {
+            status = "未检测到可用人脸，无法应用脸型预设；可先使用手动液化笔迹。"
+            return
+        }
+        updateLiquifySettings { $0.preset = preset }
+        status = preset == .classic
+            ? "已恢复经典（中性）脸型。"
+            : "已应用「\(preset.title)」脸型预设；请预览确认后再保存配方。"
+    }
+
+    func resetLiquify() {
+        cancelLiquifyStroke()
+        liquifyBrushActive = false
+        adjustments.liquify = nil
+        status = "已归零液化/美型设置（含手动笔迹）。"
+    }
+
+    func removeLastLiquifyStroke() {
+        guard var settings = adjustments.liquify, !settings.strokes.isEmpty else { return }
+        settings.strokes.removeLast()
+        adjustments.liquify = Self.collapsedLiquifySettings(settings)
+        status = "已删除最后一笔手动液化笔迹。"
+    }
+
+    func clearLiquifyStrokes() {
+        guard var settings = adjustments.liquify, !settings.strokes.isEmpty else { return }
+        settings.strokes.removeAll()
+        adjustments.liquify = Self.collapsedLiquifySettings(settings)
+        status = "已清除全部手动液化笔迹。"
+    }
+
+    func toggleLiquifyBrush() {
+        guard canDrawLiquify else {
+            status = "当前没有可编辑的照片，无法进入液化画笔。"
+            return
+        }
+        if liquifyBrushActive {
+            cancelLiquifyStroke()
+            liquifyBrushActive = false
+            status = "已退出手动液化画笔。"
+        } else {
+            cancelMaskInteraction()
+            selectedMask = nil
+            liquifyBrushActive = true
+            status = "手动液化画笔已开启（\(liquifyBrushMode.title)）；在画布拖动绘制，松开后应用预览，⌘Z 可撤销整笔。"
+        }
+    }
+
+    /// Starts one manual liquify stroke. Points are accumulated in
+    /// `liquifyDraftStroke` (no recipe mutation) so a drag produces exactly one
+    /// preview and one undo step.
+    func beginLiquifyStroke(at point: MaskPoint) {
+        guard liquifyBrushActive, canDrawLiquify, !liquifyStrokeInProgress else { return }
+        guard point.x.isFinite, point.y.isFinite, (0...1).contains(point.x),
+              (0...1).contains(point.y) else { return }
+        liquifyDraftStroke = WarpStroke(mode: liquifyBrushMode, points: [point],
+                                        radius: liquifyBrushRadius,
+                                        strength: liquifyBrushStrength)
+        liquifyStrokeLastPoint = point
+        liquifyStrokeUndoBase = currentUndoSnapshot
+        liquifyStrokeInProgress = true
+    }
+
+    func extendLiquifyStroke(to point: MaskPoint) {
+        guard liquifyStrokeInProgress, var stroke = liquifyDraftStroke else { return }
+        guard point.x.isFinite, point.y.isFinite, (0...1).contains(point.x),
+              (0...1).contains(point.y) else { return }
+        if let last = liquifyStrokeLastPoint {
+            let dx = point.x - last.x
+            let dy = point.y - last.y
+            guard (dx * dx + dy * dy).squareRoot() >= 0.003 else { return }
+        }
+        guard stroke.points.count < FaceReshapeEngine.maximumStrokePoints else { return }
+        stroke.points.append(point)
+        liquifyDraftStroke = stroke
+        liquifyStrokeLastPoint = point
+    }
+
+    /// Commits the draft stroke as one undoable edit and requests one preview.
+    func endLiquifyStroke() {
+        guard liquifyStrokeInProgress else { return }
+        liquifyStrokeInProgress = false
+        defer {
+            liquifyDraftStroke = nil
+            liquifyStrokeLastPoint = nil
+            liquifyStrokeUndoBase = nil
+        }
+        guard let stroke = liquifyDraftStroke, stroke.points.count >= 2 else { return }
+        undoSuppressed = true
+        var settings = adjustments.liquify ?? FaceReshapeSettings()
+        settings.strokes.append(stroke)
+        adjustments.liquify = settings.isNeutral ? nil : settings
+        undoSuppressed = false
+        if let base = liquifyStrokeUndoBase {
+            let now = Date()
+            let after = currentUndoSnapshot
+            if after != base {
+                seedUndoBaseline(base, at: now)
+                undoHistory.push(after, key: "liquify.stroke", at: now)
+                refreshUndoAvailability()
+            }
+        }
+        status = "已添加 1 笔\(stroke.mode.title)液化笔迹（共 \(liquifySettings.strokes.count) 笔）；可 ⌘Z 撤销整笔。"
+        // The adjustments change above triggers ContentView's single debounced
+        // preview request; requesting an immediate one here would cancel it and
+        // render twice for no benefit.
+    }
+
+    func cancelLiquifyStroke() {
+        liquifyStrokeInProgress = false
+        liquifyDraftStroke = nil
+        liquifyStrokeLastPoint = nil
+        liquifyStrokeUndoBase = nil
     }
 
     // MARK: Portrait refinement
@@ -1687,6 +1926,37 @@ final class AppModel: ObservableObject {
         referenceColorThumbnail = nil
         referenceColorThumbnailProfile = nil
         referenceColorSourceName = restoredProfile == nil ? nil : label
+    }
+
+    // MARK: Color tools (P1)
+
+    /// Applies one P1 color-tools edit. The value stays non-nil while the panel is
+    /// being edited (a neutral tool can be mid-edit, e.g. a hue chosen before its
+    /// saturation); the engine skips neutral values so pixels and the recipe
+    /// version gate are unaffected. The explicit reset action clears it to `nil`.
+    func updateColorTools(_ mutate: (inout ColorToolsSettings) -> Void) {
+        var tools = adjustments.colorTools ?? ColorToolsSettings()
+        mutate(&tools)
+        adjustments.colorTools = tools
+    }
+
+    /// Applies one lens-effects edit (vignette / chromatic aberration). Kept
+    /// non-nil for the same mid-edit reason as `updateColorTools`.
+    func updateLensEffects(_ mutate: (inout LensEffectsSettings) -> Void) {
+        var effects = adjustments.lensEffects ?? LensEffectsSettings()
+        mutate(&effects)
+        adjustments.lensEffects = effects
+    }
+
+    /// True when any P1 color tool can currently change pixels.
+    var hasActiveColorTools: Bool {
+        !(adjustments.colorTools?.isNeutral ?? true) || !(adjustments.lensEffects?.isNeutral ?? true)
+    }
+
+    func resetColorTools() {
+        adjustments.colorTools = nil
+        adjustments.lensEffects = nil
+        status = "已归零曲线、HSL、颜色分级与镜头效果。"
     }
 
     func saveRecipe() {

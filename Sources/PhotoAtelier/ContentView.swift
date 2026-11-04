@@ -58,7 +58,10 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
-        .onChange(of: model.adjustments) { _ in model.requestPreview() }
+        .onChange(of: model.adjustments) { _ in
+            // One drag = one commit at stroke end; dragging never re-renders.
+            if !model.liquifyStrokeInProgress { model.requestPreview() }
+        }
         .onChange(of: model.selectedLUT) { _ in model.requestPreview() }
         .onChange(of: model.exportSettings.recursive) { _ in model.reloadFolder() }
         .onChange(of: model.exportSettings.colorSpace) { _ in model.requestPreview() }
@@ -68,12 +71,19 @@ struct ContentView: View {
             model.requestPreview()
         }
         .onChange(of: model.maskInteractionActive) { active in if active { compare = false } }
+        .onChange(of: model.liquifyBrushActive) { active in
+            if active { compare = false; model.cancelMaskInteraction() }
+        }
         .onChange(of: model.maskDrawMode) { _ in model.drawingMask = false; model.maskEditMode = false }
         .onChange(of: model.maskKind) { kind in
             if kind == .luminance || kind == .color { model.drawingMask = false }
         }
         .onChange(of: inspectorTab) { tab in
             if tab != 2 { model.cancelMaskInteraction(); model.showMaskCoverage = false }
+            if tab != 3 {
+                model.cancelLiquifyStroke()
+                model.liquifyBrushActive = false
+            }
             if tab == 3 { model.requestPortraitDetection(force: false) }
         }
         .onChange(of: model.selectedID) { _ in
@@ -276,6 +286,7 @@ struct ContentView: View {
             Picker("调整分类", selection: $inspectorTab) {
                 Text("分析").tag(0); Text("基础").tag(1); Text("局部").tag(2)
                 Text("人像").tag(3); Text("追色").tag(4); Text("导出").tag(5)
+                Text("调色").tag(6)
             }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 17).padding(.vertical, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -287,6 +298,7 @@ struct ContentView: View {
                     else if inspectorTab == 2 { MaskInspector(model: model) }
                     else if inspectorTab == 3 { PortraitRetouchPanel(model: model) }
                     else if inspectorTab == 4 { ReferenceColorPanel(model: model) }
+                    else if inspectorTab == 6 { ColorToolsPanel(model: model) }
                     else { exportInspector }
                 }.padding(.horizontal, 20).padding(.bottom, 24)
             }.disabled(model.batchRunning)

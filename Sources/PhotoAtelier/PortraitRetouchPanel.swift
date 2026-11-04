@@ -79,6 +79,9 @@ struct PortraitRetouchPanel: View {
             .opacity(canEdit ? 1 : 0.45)
 
             separator
+            liquifySection
+
+            separator
             Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸、或皮肤蒙版覆盖不足（低于 \(String(format: "%.2f", AppModel.portraitMinimumSkinCoverage * 100))%% 画面）时整段跳过且不改像素，控件保持禁用。效果不保证，请逐张预览。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
@@ -133,6 +136,147 @@ struct PortraitRetouchPanel: View {
                                             model.updatePortraitSettings { $0[keyPath: keyPath] = newValue }
                                         }),
                          range: 0...1, percent: true)
+    }
+
+    // MARK: Liquify / face reshaping (P1)
+
+    private var liquifySection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Label("液化 / 美型 v1", systemImage: "face.smiling")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer(minLength: 0)
+                if model.adjustments.liquify != nil {
+                    Button("归零") { model.resetLiquify() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                        .disabled(model.batchRunning)
+                }
+            }
+            Text("启发式位移场，不是商业级美型。脸型/滑杆需要人脸地标并只作用于第一张脸；手动液化笔迹在无脸时也可用。合成测试只验证方向/有界/局部性/直线保护，未做真实照片审美验收。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 5).padding(.bottom, 9)
+            Text(model.liquifyStatusNote)
+                .font(.system(size: 9))
+                .foregroundColor(model.canEditLiquifyFaceShape ? AtelierPalette.accent : AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 10)
+
+            Picker("脸型预设", selection: liquifyPresetBinding) {
+                ForEach(FaceShapePreset.allCases) { preset in
+                    Text(preset.title).tag(preset)
+                }
+            }.font(.system(size: 10))
+                .disabled(!model.canEditLiquifyFaceShape)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Group {
+                    liquifySlider("瘦脸", \.slimFace)
+                    liquifySlider("小脸", \.smallFace)
+                    liquifySlider("大眼", \.enlargeEyes)
+                    liquifySlider("鼻翼", \.narrowNose)
+                    liquifySlider("嘴唇", \.lipWidth)
+                    liquifySlider("下巴", \.chin)
+                    AdjustmentSlider(title: "整体强度", value: liquifyStrengthBinding,
+                                     range: 0...1, percent: true)
+                    Toggle("保护背景直线（脸框外衰减）", isOn: liquifyBackgroundBinding)
+                        .toggleStyle(.switch).controlSize(.mini)
+                        .font(.system(size: 10)).padding(.bottom, 13)
+                        .help("把自动脸型位移在脸框 + feather 之外衰减到 0，背景直线不弯；手动笔迹仍按用户意图生效。")
+                }
+            }
+            .padding(.top, 8)
+            .disabled(!model.canEditLiquifyFaceShape)
+            .opacity(model.canEditLiquifyFaceShape ? 1 : 0.45)
+
+            HStack(spacing: 8) {
+                Button(model.liquifyBrushActive ? "关闭液化画笔" : "手动液化画笔") {
+                    model.toggleLiquifyBrush()
+                }
+                .font(.system(size: 10)).buttonStyle(.bordered)
+                .disabled(!model.canDrawLiquify)
+                if !model.liquifySettings.strokes.isEmpty {
+                    Text("\(model.liquifySettings.strokes.count) 笔")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(AtelierPalette.muted)
+                    Button("撤销一笔") { model.removeLastLiquifyStroke() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                        .disabled(model.batchRunning)
+                    Button("清空") { model.clearLiquifyStrokes() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.muted)
+                        .disabled(model.batchRunning)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 2)
+
+            if model.liquifyBrushActive {
+                VStack(alignment: .leading, spacing: 0) {
+                    Picker("笔迹模式", selection: liquifyBrushModeBinding) {
+                        ForEach(WarpStroke.Mode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }.pickerStyle(.segmented).font(.system(size: 10)).padding(.top, 10)
+                    AdjustmentSlider(title: "画笔半径", value: liquifyRadiusBinding,
+                                     range: 0.02...0.3, percent: true).padding(.top, 10)
+                    AdjustmentSlider(title: "画笔强度", value: liquifyStrengthBrushBinding,
+                                     range: 0...1, percent: true)
+                    Text("在画布拖动绘制；松开后应用一次预览并生成一个撤销步骤（⌘Z 撤销整笔）。极端叠加可能局部折叠，请逐张预览。")
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var liquifyPresetBinding: Binding<FaceShapePreset> {
+        Binding(get: { model.liquifySettings.preset },
+                set: { model.applyLiquifyPreset($0) })
+    }
+
+    private var liquifyStrengthBinding: Binding<Double> {
+        Binding(get: { model.liquifySettings.strength },
+                set: { newValue in model.updateLiquifySettings { $0.strength = newValue } })
+    }
+
+    private var liquifyBackgroundBinding: Binding<Bool> {
+        Binding(get: { model.liquifySettings.backgroundProtection },
+                set: { newValue in
+                    model.updateLiquifySettings { $0.backgroundProtection = newValue }
+                })
+    }
+
+    private var liquifyBrushModeBinding: Binding<WarpStroke.Mode> {
+        Binding(get: { model.liquifyBrushMode },
+                set: { model.liquifyBrushMode = $0 })
+    }
+
+    private var liquifyRadiusBinding: Binding<Double> {
+        Binding(get: { model.liquifyBrushRadius },
+                set: { model.liquifyBrushRadius = min(0.3, max(0.02, $0)) })
+    }
+
+    private var liquifyStrengthBrushBinding: Binding<Double> {
+        Binding(get: { model.liquifyBrushStrength },
+                set: { model.liquifyBrushStrength = min(1, max(0, $0)) })
+    }
+
+    /// -1...1 slider showing the effective value (preset + explicit offset); the
+    /// explicit offset is stored so the preset contribution stays visible.
+    private func liquifySlider(_ title: String,
+                               _ keyPath: WritableKeyPath<FaceReshapeParameters, Double>) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.liquifySettings.effectiveParameters[keyPath: keyPath] },
+                set: { newValue in
+                    model.setLiquifyParameter(newValue, keyPath)
+                }),
+            range: -1...1)
     }
 
     private var separator: some View {

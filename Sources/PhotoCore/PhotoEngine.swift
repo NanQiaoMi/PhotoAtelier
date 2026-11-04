@@ -277,6 +277,9 @@ public final class PhotoEngine {
         if let harmony = settings.colorHarmony { try ColorHarmonyEngine.validate(harmony) }
         if let effects = settings.creativeEffects { try CreativeEffectsEngine.validate(effects) }
         if let adaptation = settings.adaptiveLUT { try LUTAdaptationEngine.validate(adaptation) }
+        if let colorTools = settings.colorTools { try colorTools.validate() }
+        if let lensEffects = settings.lensEffects { try LensEffectsEngine.validate(lensEffects) }
+        if let liquify = settings.liquify { try FaceReshapeEngine.validate(liquify) }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -348,72 +351,50 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
-        let automaticEV = settings.autoExposure ? (stats?.conservativeExposureEV ?? 0) : 0
-        let totalEV = automaticEV + settings.exposureEV
-        if abs(totalEV) > 0.0001 {
-            working = try apply("CIExposureAdjust", to: working,
-                                parameters: ["inputEV": NSNumber(value: totalEV)])
-        }
-        report.appliedExposureEV = totalEV
+        // Implemented order (accepted deviation from docs/p1 plan §4): the P0
+        // legacy pipeline applies the basic tone block before the geometry block,
+        // and reordering it would change the pixel output of every v1–v10 recipe.
+        // Lead decision (P1-6 review, F2): keep the legacy order and document it.
+        // Real sequence: basic tone → geometry → liquify → color tools → lens
+        // effects → portrait → reference color → local masks → LUT.
+        // The plan's ideal `geometry → liquify → basic tone` is NOT implemented to
+        // preserve the recipe pixel-compatibility contract.
+        working = try applyBasicTone(working, settings: settings, stats: stats,
+                                     report: &report, cancellation: cancellation)
+        working = try applyGeometry(working, settings: settings, report: &report,
+                                    cancellation: cancellation)
+        working = try applyLiquify(working, settings: settings, report: &report,
+                                   cancellation: cancellation)
+        try cancellation?.check()
 
-        if settings.autoWhiteBalance {
-            if let gains = stats?.neutralBalanceGains {
-                working = try applyWhiteBalanceGains(gains, to: working)
-            } else {
-                report.warnings.append("自动白平衡未找到足够可靠的中性像素，本图跳过自动白平衡。")
-            }
+        // v11 color tools: basic tone → curves → HSL → grading → lens effects.
+        // Both stages are pure filters on the working image; a neutral or absent
+        // setting is skipped entirely so the pre-v11 pixel path stays exact.
+        if let colorTools = settings.colorTools, !colorTools.isNeutral {
+            working = try ColorToolsEngine.apply(colorTools, to: working,
+                                                 cancellation: cancellation)
+            var stages: [String] = []
+            if let curves = colorTools.curves, !curves.isNeutral { stages.append("curves") }
+            if let hsl = colorTools.hsl, !hsl.isNeutral { stages.append("hsl") }
+            if let grading = colorTools.grading, !grading.isNeutral { stages.append("grading") }
+            report.colorTools = ColorToolsReport(stages: stages)
         }
-        if abs(settings.temperature) > 0.0001 || abs(settings.tint) > 0.0001 {
-            working = try applyTemperature(settings.temperature, tint: settings.tint, to: working)
+        if let lensEffects = settings.lensEffects, !lensEffects.isNeutral {
+            working = try LensEffectsEngine.apply(lensEffects, to: working,
+                                                  cancellation: cancellation)
+            let chromatic = max(abs(lensEffects.chromaticAberrationRed),
+                                abs(lensEffects.chromaticAberrationBlue))
+            var stages = report.colorTools?.stages ?? []
+            stages.append("lensEffects")
+            report.colorTools = ColorToolsReport(stages: stages,
+                                                 vignetteAmount: lensEffects.vignetteAmount,
+                                                 chromaticAberration: chromatic)
         }
         try cancellation?.check()
 
-        if settings.saturation != 1 || settings.contrast != 1 ||
-            settings.highlights != 0 || settings.shadows != 0 {
-            let toneInput = working
-            guard let kernel = Self.localToneKernel else {
-                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 编译失败。")
-            }
-            guard let adjusted = kernel.apply(extent: working.extent, arguments: [
-                working,
-                NSNumber(value: settings.saturation),
-                NSNumber(value: settings.contrast),
-                NSNumber(value: settings.highlights),
-                NSNumber(value: settings.shadows)
-            ]) else {
-                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 无法生成输出。")
-            }
-            working = adjusted
-            if settings.saturation > 1, let harmony = settings.colorHarmony, harmony.enabled {
-                guard let lightOnly = kernel.apply(extent: toneInput.extent, arguments: [
-                    toneInput, NSNumber(value: 1), NSNumber(value: settings.contrast),
-                    NSNumber(value: settings.highlights), NSNumber(value: settings.shadows)
-                ]) else { throw AtelierError.invalidConfiguration("无法建立光线调整后的色彩参考。") }
-                working = try ColorHarmonyEngine.protect(reference: lightOnly, candidate: working,
-                                                        settings: harmony, scene: nil, context: context)
-            }
-        }
-
-        if let tonal = settings.tonalCurve {
-            working = try TonalCurveEngine.apply(working, settings: tonal)
-        }
-
-        if settings.autoStraighten {
-            working = try autoStraighten(working, report: &report, cancellation: cancellation)
-        }
-        if abs(settings.rotationDegrees) > 0.0001 {
-            working = try rotate(working, degrees: settings.rotationDegrees)
-            report.straighteningDegrees += settings.rotationDegrees
-        }
-        if settings.verticalPerspective != 0 || settings.horizontalPerspective != 0 {
-            working = try applyPerspective(working,
-                                           vertical: settings.verticalPerspective,
-                                           horizontal: settings.horizontalPerspective)
-        }
-        try cancellation?.check()
-
-        // Pipeline order: global tone/geometry → portrait refinement →
-        // reference-color match → local masks/detail → LUT → output gamut.
+        // Pipeline order: global tone/geometry → basic tone → color tools →
+        // lens effects → portrait refinement → reference-color match → local
+        // masks/detail → LUT → output gamut.
         // Portrait masks are measured on the globally adjusted image and the
         // refined result becomes the reference for local-mask measurement, so
         // local edits see the same skin the user sees. A neutral portrait
@@ -774,13 +755,27 @@ public final class PhotoEngine {
     }
 
     /// Lowest recipe version that can encode `adjustments`/`automatic` without a
-    /// silent downgrade. Version 10 is required when a v10-only field (portrait
-    /// refinement or reference color) can take effect anywhere: the live
-    /// adjustments or the automatic recipe's baseline/reference settings. A
+    /// silent downgrade. Version 11 is required when a v11-only field (color
+    /// tools, lens effects or liquify) can take effect anywhere; version 10 when
+    /// a v10-only field (portrait refinement or reference color) can. A
     /// reference-color profile is stored as v10 data even at zero strength, so a
-    /// present (non-nil) setting also requires v10.
+    /// present (non-nil) setting also requires v10. Neutral optional groups stay
+    /// on the legacy version so old recipes keep their exact payload.
     public static func requiredRecipeVersion(adjustments: AdjustmentSettings,
                                              automatic: AutomaticBatchRecipe?) -> Int {
+        let colorTools = [adjustments.colorTools,
+                          automatic?.baseline.colorTools,
+                          automatic?.referenceSettings.colorTools]
+        let lensEffects = [adjustments.lensEffects,
+                           automatic?.baseline.lensEffects,
+                           automatic?.referenceSettings.lensEffects]
+        let liquifyGroups = [adjustments.liquify,
+                             automatic?.baseline.liquify,
+                             automatic?.referenceSettings.liquify]
+        let needsVersion11 = colorTools.contains { $0.map { !$0.isNeutral } ?? false }
+            || lensEffects.contains { $0.map { !$0.isNeutral } ?? false }
+            || liquifyGroups.contains { $0.map { !$0.isNeutral } ?? false }
+        if needsVersion11 { return 11 }
         let portraits = [adjustments.portrait,
                          automatic?.baseline.portrait,
                          automatic?.referenceSettings.portrait]
@@ -1049,6 +1044,134 @@ public final class PhotoEngine {
               lut.rgba.allSatisfy({ $0.isFinite && (-16...16).contains($0) }) else {
             throw AtelierError.invalidLUT("LUT 尺寸、DOMAIN 或数据分量无效。")
         }
+    }
+
+    // MARK: - Pipeline stages
+
+    /// Basic tone block: exposure/white balance/temperature/local tone/harmony/
+    /// tonal curve. Runs before geometry in the accepted implementation order
+    /// (legacy P0 position preserved for v1–v10 pixel compatibility).
+    private func applyBasicTone(_ image: CIImage,
+                                settings: AdjustmentSettings,
+                                stats: ImageStatistics?,
+                                report: inout ProcessingReport,
+                                cancellation: CancellationToken?) throws -> CIImage {
+        var working = image
+        let automaticEV = settings.autoExposure ? (stats?.conservativeExposureEV ?? 0) : 0
+        let totalEV = automaticEV + settings.exposureEV
+        if abs(totalEV) > 0.0001 {
+            working = try apply("CIExposureAdjust", to: working,
+                                parameters: ["inputEV": NSNumber(value: totalEV)])
+        }
+        report.appliedExposureEV = totalEV
+
+        if settings.autoWhiteBalance {
+            if let gains = stats?.neutralBalanceGains {
+                working = try applyWhiteBalanceGains(gains, to: working)
+            } else {
+                report.warnings.append("自动白平衡未找到足够可靠的中性像素，本图跳过自动白平衡。")
+            }
+        }
+        if abs(settings.temperature) > 0.0001 || abs(settings.tint) > 0.0001 {
+            working = try applyTemperature(settings.temperature, tint: settings.tint, to: working)
+        }
+        try cancellation?.check()
+
+        if settings.saturation != 1 || settings.contrast != 1 ||
+            settings.highlights != 0 || settings.shadows != 0 {
+            let toneInput = working
+            guard let kernel = Self.localToneKernel else {
+                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 编译失败。")
+            }
+            guard let adjusted = kernel.apply(extent: working.extent, arguments: [
+                working,
+                NSNumber(value: settings.saturation),
+                NSNumber(value: settings.contrast),
+                NSNumber(value: settings.highlights),
+                NSNumber(value: settings.shadows)
+            ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 色调 kernel 无法生成输出。")
+            }
+            working = adjusted
+            if settings.saturation > 1, let harmony = settings.colorHarmony, harmony.enabled {
+                guard let lightOnly = kernel.apply(extent: toneInput.extent, arguments: [
+                    toneInput, NSNumber(value: 1), NSNumber(value: settings.contrast),
+                    NSNumber(value: settings.highlights), NSNumber(value: settings.shadows)
+                ]) else { throw AtelierError.invalidConfiguration("无法建立光线调整后的色彩参考。") }
+                working = try ColorHarmonyEngine.protect(reference: lightOnly, candidate: working,
+                                                        settings: harmony, scene: nil, context: context)
+            }
+        }
+
+        if let tonal = settings.tonalCurve {
+            working = try TonalCurveEngine.apply(working, settings: tonal)
+        }
+        return working
+    }
+
+    /// Global geometry block: auto straightening, explicit rotation, perspective.
+    /// Runs after the basic tone block (legacy order) and before liquify.
+    private func applyGeometry(_ image: CIImage,
+                               settings: AdjustmentSettings,
+                               report: inout ProcessingReport,
+                               cancellation: CancellationToken?) throws -> CIImage {
+        var working = image
+        if settings.autoStraighten {
+            working = try autoStraighten(working, report: &report, cancellation: cancellation)
+        }
+        if abs(settings.rotationDegrees) > 0.0001 {
+            working = try rotate(working, degrees: settings.rotationDegrees)
+            report.straighteningDegrees += settings.rotationDegrees
+        }
+        if settings.verticalPerspective != 0 || settings.horizontalPerspective != 0 {
+            working = try applyPerspective(working,
+                                           vertical: settings.verticalPerspective,
+                                           horizontal: settings.horizontalPerspective)
+        }
+        return working
+    }
+
+    /// Liquify / face reshaping. Runs after tone and geometry, before the v11
+    /// color tools, portrait refinement and local masks. Auto face-shape controls
+    /// need Vision landmarks; manual strokes work without a face. Skips are
+    /// recorded in the report and warnings, never silent.
+    private func applyLiquify(_ image: CIImage,
+                              settings: AdjustmentSettings,
+                              report: inout ProcessingReport,
+                              cancellation: CancellationToken?) throws -> CIImage {
+        guard let liquify = settings.liquify, !liquify.isNeutral else { return image }
+        var working = image
+        let wantsFaceShape = !liquify.effectiveParameters.isNeutral
+        var landmarks: FaceLandmarkSet?
+        if wantsFaceShape {
+            landmarks = FaceSemanticAnalyzer.detect(in: working, maxFaces: 1).first
+        }
+        if wantsFaceShape, landmarks == nil {
+            let note = "未检测到可用人脸或本机 Vision 不可用，液化/美型（脸型与滑杆）已跳过；手动液化笔迹仍会应用。"
+            var settingsWithoutFace = liquify
+            settingsWithoutFace.parameters = FaceReshapeParameters()
+            settingsWithoutFace.preset = .classic
+            if !settingsWithoutFace.strokes.isEmpty {
+                working = try FaceReshapeEngine.apply(to: working, landmarks: nil,
+                                                      settings: settingsWithoutFace)
+                report.liquify = LiquifyIntegrationReport(applied: true, faceCount: 0,
+                    presetApplied: false, strokeCount: settingsWithoutFace.strokes.count, note: note)
+            } else {
+                report.liquify = LiquifyIntegrationReport(applied: false, faceCount: 0,
+                    presetApplied: false, strokeCount: 0, note: note)
+            }
+            report.warnings.append(note)
+        } else {
+            working = try FaceReshapeEngine.apply(to: working, landmarks: landmarks,
+                                                  settings: liquify)
+            report.liquify = LiquifyIntegrationReport(
+                applied: true, faceCount: landmarks == nil ? 0 : 1,
+                presetApplied: wantsFaceShape && landmarks != nil,
+                strokeCount: liquify.strokes.count,
+                note: nil)
+        }
+        try cancellation?.check()
+        return working
     }
 
     private func autoStraighten(_ image: CIImage, report: inout ProcessingReport,

@@ -629,4 +629,230 @@ final class PortraitRetouchTests: XCTestCase {
         XCTAssertEqual(legacyDecoded.version, 9)
         XCTAssertNoThrow(try legacyDecoded.validateVersion())
     }
+
+    // MARK: - P1-6 liquify integration
+
+    func testLiquifyPipelineRunsAfterLegacyToneAndGeometryAndBeforeColorTools() throws {
+        let width = 64, height = 48
+        let source = makeImage(width: width, height: height) { column, row in
+            let x = Float(column) / Float(width - 1)
+            let y = Float(row) / Float(height - 1)
+            return (min(1, 0.05 + 0.9 * x * x),
+                    min(1, 0.08 + 0.75 * y),
+                    min(1, 0.10 + 0.6 * x * y), 1)
+        }
+        let engine = PhotoEngine()
+        let stroke = WarpStroke(mode: .push,
+                                points: [MaskPoint(x: 0.35, y: 0.5), MaskPoint(x: 0.65, y: 0.5)],
+                                radius: 0.12, strength: 0.9)
+        let liquify = FaceReshapeSettings(strokes: [stroke])
+
+        // Strong nonlinear tone + geometry + a nonlinear color tool make the
+        // pipeline order observable from pixels.
+        var toneAndGeometry = AdjustmentSettings()
+        toneAndGeometry.exposureEV = 0.45
+        toneAndGeometry.contrast = 2.4
+        toneAndGeometry.saturation = 1.4
+        toneAndGeometry.rotationDegrees = 9
+        var curves = ColorCurveSettings()
+        curves.luminance = [CurveControlPoint(x: 0, y: 0),
+                            CurveControlPoint(x: 0.5, y: 0.75),
+                            CurveControlPoint(x: 1, y: 1)]
+        let colorTools = ColorToolsSettings(curves: curves)
+
+        var combined = toneAndGeometry
+        combined.liquify = liquify
+        combined.colorTools = colorTools
+        let actual = try engine.process(source, settings: combined, lut: nil)
+        let liquifyReport = try XCTUnwrap(actual.report.liquify)
+        XCTAssertTrue(liquifyReport.applied)
+        XCTAssertEqual(liquifyReport.strokeCount, 1)
+
+        // Accepted implementation order (Lead decision on review F2): legacy
+        // pixel compatibility keeps 基础影调 → 几何 → 液化 → 调色工具. The plan
+        // §4 ideal order (geometry → liquify → tone) is intentionally NOT used.
+        let base = try engine.process(source, settings: toneAndGeometry, lut: nil)
+        let warped = try FaceReshapeEngine.apply(to: base.image, landmarks: nil,
+                                                 settings: liquify)
+        let expected = try ColorToolsEngine.apply(colorTools, to: warped)
+        assertPixelsEqual(try render(actual.image), try render(expected),
+                          message: "真实顺序应为 基础影调→几何→液化→调色工具",
+                          tolerance: 0.004)
+
+        // The plan §4 order (tone last) must differ, proving tone runs before
+        // geometry+liquify instead of after them.
+        var geometryOnly = AdjustmentSettings()
+        geometryOnly.rotationDegrees = 9
+        let rotated = try engine.process(source, settings: geometryOnly, lut: nil)
+        let warpedAfterRotation = try FaceReshapeEngine.apply(to: rotated.image,
+                                                              landmarks: nil,
+                                                              settings: liquify)
+        var toneOnly = toneAndGeometry
+        toneOnly.liquify = nil
+        toneOnly.colorTools = nil
+        toneOnly.rotationDegrees = 0
+        let planOrder = try engine.process(warpedAfterRotation, settings: toneOnly, lut: nil)
+        let actualPixels = try render(actual.image)
+        let forwardTonePixels = try render(expected)
+        XCTAssertGreaterThan(maximumAbsoluteDifference(forwardTonePixels,
+                                                       try render(planOrder.image),
+                                                       width: width, height: height,
+                                                       region: { _, _ in true }),
+                             0.002,
+                             "影调若在液化之后像素必须不同，证明真实顺序为影调→几何→液化")
+
+        // Liquify must run before the color tools: the reverse order differs.
+        let toolsFirst = try ColorToolsEngine.apply(colorTools, to: base.image)
+        let warpedAfterTools = try FaceReshapeEngine.apply(to: toolsFirst, landmarks: nil,
+                                                           settings: liquify)
+        XCTAssertGreaterThan(maximumAbsoluteDifference(actualPixels,
+                                                       try render(warpedAfterTools),
+                                                       width: width, height: height,
+                                                       region: { _, _ in true }),
+                             0.002,
+                             "液化必须在调色工具之前；否则色阶响应会不同")
+
+        // Missing and explicitly neutral liquify keep the pre-v11 path exactly.
+        var withoutLiquify = combined
+        withoutLiquify.liquify = nil
+        var explicitlyNeutral = withoutLiquify
+        explicitlyNeutral.liquify = FaceReshapeSettings()
+        let baseline = try engine.process(source, settings: withoutLiquify, lut: nil)
+        let neutralOutput = try engine.process(source, settings: explicitlyNeutral, lut: nil)
+        assertPixelsEqual(try render(baseline.image), try render(neutralOutput.image),
+                          message: "显式中性液化必须与缺少液化字段像素完全一致")
+        XCTAssertNil(baseline.report.liquify)
+        XCTAssertNil(neutralOutput.report.liquify)
+    }
+
+    func testLiquifySliderMathNeverStoresOutOfRangeExplicitParameters() throws {
+        let keyPaths: [WritableKeyPath<FaceReshapeParameters, Double>] = [
+            \.slimFace, \.smallFace, \.enlargeEyes, \.narrowNose, \.lipWidth, \.chin
+        ]
+        for preset in FaceShapePreset.allCases {
+            for keyPath in keyPaths {
+                let presetValue = preset.parameters[keyPath: keyPath]
+                for effective in [-1.0, -0.55, 0.0, 0.4, 1.0] {
+                    let explicit = LiquifySliderMath.explicitOffset(forEffective: effective,
+                                                                    presetValue: presetValue)
+                    XCTAssertTrue((-1...1).contains(explicit),
+                                  "preset \(preset.title) endpoint \(effective) must stay in -1...1")
+                    var parameters = FaceReshapeParameters()
+                    parameters[keyPath: keyPath] = explicit
+                    var settings = AdjustmentSettings()
+                    settings.liquify = FaceReshapeSettings(preset: preset, parameters: parameters)
+                    XCTAssertNoThrow(try FaceReshapeEngine.validate(settings.liquify!),
+                                     "preset \(preset.title) endpoint \(effective) must validate")
+                    XCTAssertNoThrow(try PhotoEngine.validate(settings),
+                                     "preset \(preset.title) endpoint \(effective) must not fail the preview")
+                    let effectiveAfter = settings.liquify!.effectiveParameters[keyPath: keyPath]
+                    XCTAssertTrue((-1...1).contains(effectiveAfter))
+                    XCTAssertEqual(effectiveAfter,
+                                   LiquifySliderMath.clampedEffective(effective,
+                                                                      presetValue: presetValue),
+                                   accuracy: 1e-12)
+                }
+            }
+        }
+        // Reproduce the reviewer's failure case: round preset + slider dragged to -1.
+        let roundPreset = FaceShapePreset.round.parameters
+        let explicit = LiquifySliderMath.explicitOffset(forEffective: -1,
+                                                        presetValue: roundPreset.slimFace)
+        XCTAssertEqual(explicit, -1, accuracy: 1e-12)
+        XCTAssertEqual(roundPreset.slimFace + explicit, -0.45, accuracy: 1e-12)
+    }
+
+    func testLiquifyBrushOverlayFootprintMatchesWarpFieldOnNonSquareImage() throws {
+        // 3:2 landscape: a short-edge circle would understate the footprint.
+        let imageSize = CGSize(width: 6000, height: 4000)
+        let radii = LiquifyBrushGeometry.pixelRadii(radius: 0.08, imageSize: imageSize)
+        XCTAssertEqual(radii.x, 480, accuracy: 1e-9)
+        XCTAssertEqual(radii.y, 320, accuracy: 1e-9)
+        XCTAssertNotEqual(radii.x, radii.y)
+
+        // The warp field's actual support matches those normalized radii.
+        var field = FaceReshapeEngine.warpField(
+            landmarks: nil,
+            settings: FaceReshapeSettings(strokes: [
+                WarpStroke(mode: .push,
+                           points: [MaskPoint(x: 0.4, y: 0.5), MaskPoint(x: 0.6, y: 0.5)],
+                           radius: 0.08, strength: 1)
+            ]),
+            imageSize: imageSize)
+        let center = CGPoint(x: 0.6, y: 0.5)
+        func magnitude(_ point: CGPoint) -> Double {
+            let value = field.displacement(at: point)
+            return (value.x * value.x + value.y * value.y).squareRoot()
+        }
+        XCTAssertGreaterThan(magnitude(CGPoint(x: center.x + 0.08 * 0.5, y: center.y)),
+                             0.0001, "横向作用区域内应有位移")
+        XCTAssertGreaterThan(magnitude(CGPoint(x: center.x, y: center.y + 0.08 * 0.5)),
+                             0.0001, "纵向作用区域内应有位移")
+        XCTAssertEqual(magnitude(CGPoint(x: center.x + 0.08 * 1.5, y: center.y)), 0,
+                       accuracy: 1e-9, "横向 1.5×半径外应为零位移")
+        XCTAssertEqual(magnitude(CGPoint(x: center.x, y: center.y + 0.08 * 1.5)), 0,
+                       accuracy: 1e-9, "纵向 1.5×半径外应为零位移")
+    }
+
+    func testLiquifyFacePresetWithoutFaceDegradesExplicitlyAndLeavesPixels() throws {
+        let width = 64, height = 48
+        let source = makeImage(width: width, height: height) { column, _ in
+            let value = Float(0.2 + 0.5 * Double(column) / 64)
+            return (value, value * 0.9, value * 0.8, 1)
+        }
+        let engine = PhotoEngine()
+        let baseline = try engine.process(source, settings: AdjustmentSettings(), lut: nil)
+        var settings = AdjustmentSettings()
+        settings.liquify = FaceReshapeSettings(preset: .youthful)
+        let degraded = try engine.process(source, settings: settings, lut: nil)
+
+        assertPixelsEqual(try render(baseline.image), try render(degraded.image),
+                          message: "a face-dependent liquify preset without a face must not change pixels")
+        let report = try XCTUnwrap(degraded.report.liquify)
+        XCTAssertFalse(report.applied)
+        XCTAssertEqual(report.faceCount, 0)
+        XCTAssertFalse(report.presetApplied)
+        XCTAssertNotNil(report.note)
+        XCTAssertTrue(degraded.report.warnings.contains { $0.contains("液化") },
+                      "skipping liquify must be reported, never silent")
+    }
+
+    func testBatchManifestRecordsLiquifySkipForFaceDependentPreset() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let context = PhotoEngine().context
+        let image = CIImage(color: CIColor(red: 0.3, green: 0.25, blue: 0.2, alpha: 1,
+                                          colorSpace: space)!)
+            .cropped(to: CGRect(x: 0, y: 0, width: 48, height: 48))
+        var export = ExportSettings(); export.format = .png
+        try PhotoExporter.write(image: image, to: input.appendingPathComponent("flat.png"),
+                                settings: export, sourceProperties: [:], context: context)
+
+        var settings = AdjustmentSettings()
+        settings.liquify = FaceReshapeSettings(preset: .round)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 11
+        let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
+                                               inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let recipePayload = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(recipePayload["version"] as? Int, 11)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        let report = try XCTUnwrap(entry["report"] as? [String: Any])
+        let liquify = try XCTUnwrap(report["liquify"] as? [String: Any],
+                                    "batch manifest must record the liquify decision")
+        XCTAssertEqual(liquify["applied"] as? Bool, false)
+        XCTAssertEqual(liquify["faceCount"] as? Int, 0)
+        XCTAssertEqual(liquify["presetApplied"] as? Bool, false)
+        XCTAssertNotNil(liquify["note"] as? String)
+    }
 }

@@ -7,6 +7,7 @@ private enum CanvasDragAction: Equatable {
     case moveEnd(UUID)
     case pan
     case compare
+    case liquify
     case ignore
 }
 
@@ -52,11 +53,15 @@ struct PhotoCanvas: View {
         .onChange(of: model.selectedMask) { _ in cancelCanvasGesture() }
         .onChange(of: model.maskKind) { _ in cancelCanvasGesture() }
         .onChange(of: model.maskDrawMode) { _ in cancelCanvasGesture() }
+        .onChange(of: model.liquifyBrushActive) { _ in cancelCanvasGesture() }
         .onChange(of: model.batchRunning) { running in
             if running { cancelCanvasGesture() }
         }
         .onExitCommand {
-            if model.maskInteractionActive {
+            if model.liquifyBrushActive {
+                model.toggleLiquifyBrush()
+                cancelCanvasGesture()
+            } else if model.maskInteractionActive {
                 model.cancelMaskInteraction()
                 cancelCanvasGesture()
             }
@@ -75,6 +80,9 @@ struct PhotoCanvas: View {
                 if model.pickingMaskColor {
                     Label("点击照片取样颜色", systemImage: "eyedropper")
                         .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+                } else if model.liquifyBrushActive {
+                    Label("拖动绘制液化笔迹（松开应用）", systemImage: "drop")
+                        .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
                 } else if model.maskEditMode {
                     Label("拖动选中蒙版的控制点", systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
@@ -92,7 +100,7 @@ struct PhotoCanvas: View {
     }
 
     private func photoContent(_ after: NSImage, size: CGSize) -> some View {
-        let comparisonVisible = compare && !model.maskInteractionActive
+        let comparisonVisible = compare && !model.maskInteractionActive && !model.liquifyBrushActive
         return ZStack(alignment: .topLeading) {
             Image(nsImage: after).resizable().frame(width: size.width, height: size.height)
 
@@ -122,6 +130,7 @@ struct PhotoCanvas: View {
                 maskOutlines(size)
             }
             if !draft.isEmpty { draftOutline(size) }
+            if model.liquifyBrushActive { liquifyOverlay(size) }
             if model.maskEditMode { geometryHandles(size) }
         }
         .frame(width: size.width, height: size.height)
@@ -154,6 +163,12 @@ struct PhotoCanvas: View {
         switch action {
         case .draw:
             updateDraft(at: event.location, size: size)
+        case .liquify:
+            let point = normalized(event.location, size: size)
+            if !model.liquifyStrokeInProgress {
+                model.beginLiquifyStroke(at: normalized(event.startLocation, size: size))
+            }
+            model.extendLiquifyStroke(to: point)
         case .moveStart(let id):
             moveGeometry(id: id, handle: .start, to: event.location, size: size)
         case .moveEnd(let id):
@@ -168,7 +183,10 @@ struct PhotoCanvas: View {
     }
 
     private func handleDragEnded(_ event: DragGesture.Value, size: CGSize) {
-        if case .draw? = dragAction, !model.batchRunning, model.drawingMask {
+        if case .liquify? = dragAction {
+            model.extendLiquifyStroke(to: normalized(event.location, size: size))
+            model.endLiquifyStroke()
+        } else if case .draw? = dragAction, !model.batchRunning, model.drawingMask {
             updateDraft(at: event.location, size: size)
             finishDraft()
         } else if case .pan? = dragAction {
@@ -181,6 +199,7 @@ struct PhotoCanvas: View {
 
     private func actionForDrag(startLocation: CGPoint, size: CGSize) -> CanvasDragAction {
         if model.pickingMaskColor || model.batchRunning { return .ignore }
+        if model.liquifyBrushActive { return .liquify }
         if model.maskEditMode {
             return geometryHandle(at: startLocation, size: size) ?? .ignore
         }
@@ -300,6 +319,81 @@ struct PhotoCanvas: View {
         }.allowsHitTesting(false)
     }
 
+    /// Liquify brush overlay: committed strokes in white, the in-flight draft in
+    /// the accent colour. Drawn in screen space with the brush radius; it is a
+    /// guide only (the warp preview appears after the stroke is committed).
+    private func liquifyOverlay(_ size: CGSize) -> some View {
+        Canvas { context, _ in
+            // The real warp footprint is an ellipse: radius is a fraction of each
+            // image axis, so overlay radii must be (radius × width, radius × height)
+            // — matching LiquifyBrushGeometry. A short-edge circle would mislead
+            // users on non-square images.
+            func drawStroke(_ stroke: WarpStroke, color: Color) {
+                guard let first = stroke.points.first else { return }
+                let radii = LiquifyBrushGeometry.pixelRadii(radius: stroke.radius,
+                                                            imageSize: size)
+                let radiusX = CGFloat(radii.x)
+                let radiusY = CGFloat(radii.y)
+                guard radiusX > 0.5, radiusY > 0.5 else { return }
+                var path = Path()
+                path.move(to: screen(first, size: size))
+                for point in stroke.points.dropFirst() {
+                    path.addLine(to: screen(point, size: size))
+                }
+                // Sample the centreline and fill ellipses so the translucent
+                // footprint matches the warped region on 3:2 / 16:9 canvases.
+                let centers = sampledScreenPoints(stroke.points, size: size,
+                                                  spacing: max(3, min(radiusX, radiusY)))
+                for center in centers {
+                    let rect = CGRect(x: center.x - radiusX, y: center.y - radiusY,
+                                      width: radiusX * 2, height: radiusY * 2)
+                    context.fill(Path(ellipseIn: rect), with: .color(color.opacity(0.16)))
+                }
+                context.stroke(path, with: .color(color),
+                               style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+                if stroke.points.count < 2 {
+                    let center = screen(first, size: size)
+                    context.stroke(Path(ellipseIn: CGRect(x: center.x - radiusX,
+                                                          y: center.y - radiusY,
+                                                          width: radiusX * 2,
+                                                          height: radiusY * 2)),
+                                   with: .color(color.opacity(0.6)), lineWidth: 1)
+                }
+            }
+            for stroke in model.liquifySettings.strokes {
+                drawStroke(stroke, color: .white.opacity(0.55))
+            }
+            if let draft = model.liquifyDraftStroke {
+                drawStroke(draft, color: AtelierPalette.accent)
+            }
+        }.allowsHitTesting(false)
+    }
+
+    /// Screen-space samples along a normalized-space polyline, used by the
+    /// liquify overlay so the ellipse footprint follows the whole stroke.
+    private func sampledScreenPoints(_ points: [MaskPoint], size: CGSize,
+                                     spacing: CGFloat) -> [CGPoint] {
+        guard let first = points.first else { return [] }
+        let step = max(1, spacing)
+        var result: [CGPoint] = [screen(first, size: size)]
+        var previous = screen(first, size: size)
+        for point in points.dropFirst() {
+            let target = screen(point, size: size)
+            let distance = hypot(target.x - previous.x, target.y - previous.y)
+            if distance >= step {
+                let count = max(1, Int((distance / step).rounded(.down)))
+                for index in 1...count {
+                    let t = CGFloat(index) / CGFloat(count + 1)
+                    result.append(CGPoint(x: previous.x + (target.x - previous.x) * t,
+                                          y: previous.y + (target.y - previous.y) * t))
+                }
+            }
+            result.append(target)
+            previous = target
+        }
+        return result
+    }
+
     private func geometryHandles(_ size: CGSize) -> some View {
         Canvas { context, _ in
             guard let mask = model.adjustments.masks.first(where: { $0.id == model.selectedMask }),
@@ -392,6 +486,9 @@ struct PhotoCanvas: View {
         dragAction = nil
         dragStartPoint = nil
         panOrigin = pan
+        // A cancelled drag must not leave a half-finished liquify stroke that
+        // would keep suppressing previews.
+        model.cancelLiquifyStroke()
     }
 
     private enum GeometryHandle: Equatable { case start, end }
