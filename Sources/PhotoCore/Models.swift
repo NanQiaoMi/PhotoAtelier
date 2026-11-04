@@ -282,8 +282,202 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Absent or neutral liquify settings (face presets/sliders/manual strokes)
     /// keep the pre-v11 path untouched.
     public var liquify: FaceReshapeSettings? = nil
+    /// Optional for exact compatibility with recipes written before v12.
+    /// Absent or `enabled == false` certificate settings keep the pre-v12 path.
+    public var certificatePhoto: CertificatePhotoSettings? = nil
+    /// Optional for exact compatibility with recipes written before v12.
+    /// Absent or empty manual repair/clone strokes keep the pre-v12 render path.
+    public var repairBrush: RepairBrushSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
+}
+
+/// Background source for certificate-photo / background replacement.
+public enum CertificateBackgroundSource: String, Codable, CaseIterable, Identifiable {
+    case preset, customColor, image
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .preset: return "标准背景色"
+        case .customColor: return "自定义颜色"
+        case .image: return "本地背景图片"
+        }
+    }
+}
+
+/// Certificate-photo / background-replacement settings (recipe v12).
+///
+/// `enabled == false` is the explicit neutral state: the field may be present in a
+/// recipe but the engine skips the stage and keeps the pre-v12 pixel path exactly.
+/// When `size` is nil the stage only replaces the background and keeps the
+/// original extent; a non-nil size additionally crops to the exact preset pixel
+/// size (300 DPI by default), which **changes the canvas extent** — later local
+/// masks are normalized against the cropped image and should be reviewed.
+///
+/// This is a heuristic v1 cutout composition (Vision person segmentation + feather
+/// + colored background + synthetic shadow), not commercial matting. Real-photo
+/// aesthetic quality is not guaranteed.
+public struct CertificatePhotoSettings: Codable, Equatable {
+    public var enabled: Bool
+    public var backgroundSource: CertificateBackgroundSource
+    public var backgroundPreset: IDPhotoBackgroundPreset
+    public var customBackground: SRGBColor
+    /// Local file path used when `backgroundSource == .image`; network URLs are rejected.
+    public var backgroundImagePath: String?
+    public var shadow: BackgroundReplacementSettings
+    /// `nil` = keep original framing (background replacement only).
+    public var size: IDPhotoSize?
+    public var crop: IDPhotoCropSettings
+    /// Print-sheet preview geometry. Stored for UI/batch metadata; it never changes
+    /// the processed photo pixels.
+    public var print: PrintSheetSettings
+
+    public init(enabled: Bool = false,
+                backgroundSource: CertificateBackgroundSource = .preset,
+                backgroundPreset: IDPhotoBackgroundPreset = .white,
+                customBackground: SRGBColor = SRGBColor(red: 0.10, green: 0.30, blue: 0.70),
+                backgroundImagePath: String? = nil,
+                shadow: BackgroundReplacementSettings = BackgroundReplacementSettings(),
+                size: IDPhotoSize? = nil,
+                crop: IDPhotoCropSettings = IDPhotoCropSettings(),
+                print: PrintSheetSettings = PrintSheetSettings()) {
+        self.enabled = enabled
+        self.backgroundSource = backgroundSource
+        self.backgroundPreset = backgroundPreset
+        self.customBackground = customBackground
+        self.backgroundImagePath = backgroundImagePath
+        self.shadow = shadow
+        self.size = size
+        self.crop = crop
+        self.print = print
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, backgroundSource, backgroundPreset, customBackground
+        case backgroundImagePath, shadow, size, crop, print
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        backgroundSource = try values.decodeIfPresent(CertificateBackgroundSource.self,
+                                                     forKey: .backgroundSource) ?? .preset
+        backgroundPreset = try values.decodeIfPresent(IDPhotoBackgroundPreset.self,
+                                                     forKey: .backgroundPreset) ?? .white
+        customBackground = try values.decodeIfPresent(SRGBColor.self,
+                                                     forKey: .customBackground)
+            ?? SRGBColor(red: 0.10, green: 0.30, blue: 0.70)
+        backgroundImagePath = try values.decodeIfPresent(String.self, forKey: .backgroundImagePath)
+        shadow = try values.decodeIfPresent(BackgroundReplacementSettings.self,
+                                           forKey: .shadow) ?? BackgroundReplacementSettings()
+        size = try values.decodeIfPresent(IDPhotoSize.self, forKey: .size)
+        crop = try values.decodeIfPresent(IDPhotoCropSettings.self, forKey: .crop)
+            ?? IDPhotoCropSettings()
+        print = try values.decodeIfPresent(PrintSheetSettings.self, forKey: .print)
+            ?? PrintSheetSettings()
+    }
+
+    /// Enabled false means "explicitly neutral": the engine and recipe gate must
+    /// keep the pre-v12 pixel/version path.
+    public var isNeutral: Bool { !enabled }
+
+    public func validated() throws {
+        guard isNeutral || backgroundSource != .image
+                || (((backgroundImagePath?.count ?? 0) <= 4096)
+                    && !(backgroundImagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)) else {
+            throw AtelierError.invalidConfiguration("证件照背景图片路径不能为空或过长。")
+        }
+        if backgroundSource == .customColor {
+            _ = try customBackground.validated()
+        }
+        _ = try shadow.validated()
+        _ = try crop.validated()
+        _ = try print.validated()
+    }
+}
+
+/// Per-photo record of the P1-B certificate-photo / background stage. `nil` means
+/// no active certificate setting (pre-v12 path); `applied == false` documents an
+/// explicit skip (no usable person/face), never a silent edit.
+public struct CertificatePhotoReport: Codable, Equatable {
+    public var applied: Bool
+    public var background: String
+    public var coverage: Double
+    public var outputPixelSize: CGSize?
+    public var note: String?
+
+    public init(applied: Bool, background: String = "", coverage: Double = 0,
+                outputPixelSize: CGSize? = nil, note: String? = nil) {
+        self.applied = applied
+        self.background = background
+        self.coverage = coverage
+        self.outputPixelSize = outputPixelSize
+        self.note = note
+    }
+}
+
+/// Manual repair / clone brush strokes stored in a v12 recipe.
+///
+/// This is plain data: the pixels are produced by `RepairBrushEngine` in the
+/// processing pipeline (after lens effects and before portrait refinement). An
+/// empty stroke list is the neutral state; an absent field keeps the v1–v11
+/// pixel path exact.
+///
+/// Semantics are deliberately not generative and not automatic defect detection:
+/// the caller marks where to paint and the engine uses a low-frequency/donor-patch
+/// heuristic (heal) or copies the offset source (clone). Strength/feather blends
+/// happen in the **engine's working colour space** (the app pipeline uses extended
+/// linear sRGB), so partial-strength pixel values differ from an sRGB-only unit
+/// test even though geometry and alpha relations are identical.
+///
+/// Non-neutral settings require recipe version 12 (`Recipe.validateVersion`).
+public struct RepairBrushSettings: Codable, Equatable {
+    /// Strokes applied in array order; later strokes see the earlier result.
+    public var strokes: [RepairStroke]
+
+    public init(strokes: [RepairStroke] = []) {
+        self.strokes = strokes
+    }
+
+    /// True when the setting cannot change pixels; the field may then be omitted.
+    public var isNeutral: Bool { strokes.isEmpty }
+
+    public func validate() throws {
+        guard strokes.count <= RepairBrushEngine.maximumStrokeCount else {
+            throw AtelierError.invalidConfiguration(
+                "修复画笔笔迹数量不能超过 \(RepairBrushEngine.maximumStrokeCount) 笔。")
+        }
+        for (index, stroke) in strokes.enumerated() {
+            do {
+                try stroke.validate()
+            } catch {
+                throw AtelierError.invalidConfiguration(
+                    "第 \(index + 1) 笔修复笔迹无效：\(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+/// Per-photo record of the P1-B manual repair stage. `nil` means the recipe has no
+/// repair strokes (pre-v12 path); a non-nil report states how many strokes were
+/// applied so batch manifests can record the per-photo repair status.
+public struct RepairBrushReport: Codable, Equatable {
+    public var applied: Bool
+    public var strokeCount: Int
+    public var healStrokeCount: Int
+    public var cloneStrokeCount: Int
+    public var note: String?
+
+    public init(applied: Bool, strokeCount: Int = 0, healStrokeCount: Int = 0,
+                cloneStrokeCount: Int = 0, note: String? = nil) {
+        self.applied = applied
+        self.strokeCount = strokeCount
+        self.healStrokeCount = healStrokeCount
+        self.cloneStrokeCount = cloneStrokeCount
+        self.note = note
+    }
 }
 
 /// Per-photo record of which P1 color-tool stages actually ran, embedded in
@@ -422,6 +616,7 @@ public struct Recipe: Codable, Equatable {
     /// Version 9 adds opt-in per-photo LUT candidate evaluation.
     /// Version 10 adds portrait refinement, reference color and export extensions.
     /// Version 11 adds the P1 color tools, liquify and watermark fields.
+    /// Version 12 adds certificate photo / background replacement fields.
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -437,7 +632,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...11).contains(version) else {
+        guard (1...12).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         let portraitSettings = [adjustments.portrait,
@@ -469,6 +664,18 @@ public struct Recipe: Codable, Equatable {
                              automatic?.referenceSettings.liquify]
         guard version >= 11 || liquifyGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("非中性的液化/美型需要配方版本 11，不能静默降级。")
+        }
+        let certificateGroups = [adjustments.certificatePhoto,
+                                 automatic?.baseline.certificatePhoto,
+                                 automatic?.referenceSettings.certificatePhoto]
+        guard version >= 12 || certificateGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("证件照/换背景需要配方版本 12，不能静默降级。")
+        }
+        let repairGroups = [adjustments.repairBrush,
+                            automatic?.baseline.repairBrush,
+                            automatic?.referenceSettings.repairBrush]
+        guard version >= 12 || repairGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("手动修复/仿制笔迹需要配方版本 12，不能静默降级。")
         }
         let exportSettings = self.export
         let usesExtendedExport = exportSettings.requiresVersion10Recipe
@@ -601,6 +808,12 @@ public struct ProcessingReport: Codable, Equatable {
     /// Per-photo P1 liquify/face-reshape status. `nil` when liquify is absent or
     /// neutral; a report with `applied == false` records a face-dependent skip.
     public var liquify: LiquifyIntegrationReport?
+    /// Per-photo P1-B certificate/background status. `nil` when absent or
+    /// disabled; `applied == false` records an explicit no-person/no-face skip.
+    public var certificatePhoto: CertificatePhotoReport?
+    /// Per-photo P1-B manual repair/clone status. `nil` when the recipe has no
+    /// strokes; otherwise records the applied stroke counts for batch manifests.
+    public var repairBrush: RepairBrushReport?
     public init() {}
 }
 

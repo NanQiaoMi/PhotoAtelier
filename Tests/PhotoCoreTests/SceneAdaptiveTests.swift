@@ -405,11 +405,11 @@ final class SceneAdaptiveTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: oldAutomaticObject))
         XCTAssertNil(oldAutomatic.sceneIntent, "Missing legacy intent means automatic scene selection.")
 
-        // New recipes still default to v9; v11 is only required when the opt-in
-        // P1 color/liquify/watermark fields are used.
+        // New recipes still default to v9; v11/v12 are only required when the
+        // opt-in P1 color/liquify or P1-B certificate fields are used.
         let defaultRecipe = Recipe(automatic: selected)
         XCTAssertEqual(defaultRecipe.version, 9)
-        for version in 1...11 {
+        for version in 1...12 {
             var recipe = Recipe(automatic: oldAutomatic)
             recipe.version = version
             XCTAssertEqual(try JSONDecoder().decode(Recipe.self,
@@ -421,8 +421,8 @@ final class SceneAdaptiveTests: XCTestCase {
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        // v1-v11 are supported; 11 is the current version.
-        for version in 1...11 {
+        // v1-v12 are supported; 12 is the current version (P1-B certificate fields).
+        for version in 1...12 {
             var recipe = Recipe()
             recipe.version = version
             XCTAssertNoThrow(try BatchProcessor().run(items: [], inputRoot: input,
@@ -431,8 +431,8 @@ final class SceneAdaptiveTests: XCTestCase {
         }
         // Unknown future versions are rejected before the output directory is created.
         var unsupported = Recipe()
-        unsupported.version = 12
-        let rejectedOutput = root.appendingPathComponent("version-12")
+        unsupported.version = 13
+        let rejectedOutput = root.appendingPathComponent("version-13")
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: rejectedOutput, recipe: unsupported, lut: nil,
             cancellation: CancellationToken(), onEvent: { _ in }))

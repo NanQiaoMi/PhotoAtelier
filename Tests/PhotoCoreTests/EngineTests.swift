@@ -393,4 +393,258 @@ final class EngineTests: XCTestCase {
         \(rows.joined(separator: "\n"))
         """
     }
+
+    // MARK: - P1-B certificate photo / background replacement
+
+    private func solidEllipseMask(width: Int = 80, height: Int = 120) -> CIImage {
+        var components = [Float]()
+        components.reserveCapacity(width * height * 4)
+        for row in 0..<height {
+            for column in 0..<width {
+                let x = (Double(column) + 0.5) / Double(width)
+                let y = (Double(row) + 0.5) / Double(height)
+                let dx = (x - 0.5) / 0.30
+                let dy = (y - 0.5) / 0.38
+                let inside = dx * dx + dy * dy <= 1
+                let value: Float = inside ? 1 : 0
+                components.append(value); components.append(value)
+                components.append(value); components.append(1)
+            }
+        }
+        let data = components.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        return CIImage(bitmapData: data,
+                       bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                       size: CGSize(width: CGFloat(width), height: CGFloat(height)),
+                       format: .RGBAf, colorSpace: linearColorSpace)
+    }
+
+    private func preparedPersonMatte(engine: PhotoEngine) throws -> PersonMatte {
+        try PersonMatting.matte(fromMask: solidEllipseMask(),
+                                settings: PersonMatteSettings(feather: 0.4,
+                                                              edgeSoftness: 0.2,
+                                                              edgeDecontamination: 0,
+                                                              minimumCoverage: 0.01),
+                                context: engine.context)
+    }
+
+    func testCertificatePhotoNeutralAndAbsentKeepLegacyPixels() throws {
+        let engine = PhotoEngine()
+        let source = solidImage(0.25, 0.45, 0.65, width: 64, height: 96)
+        var baseline = neutralSettings()
+        baseline.exposureEV = 0.2
+        let without = try engine.process(source, settings: baseline, lut: nil)
+
+        var neutralCertificate = baseline
+        neutralCertificate.certificatePhoto = CertificatePhotoSettings(enabled: false,
+                                                                        size: .oneInch)
+        let neutral = try engine.process(source, settings: neutralCertificate, lut: nil)
+        XCTAssertNil(without.report.certificatePhoto)
+        XCTAssertNil(neutral.report.certificatePhoto)
+        XCTAssertEqual(neutral.image.extent, without.image.extent)
+        for point in [(8, 8), (32, 48), (56, 88)] {
+            let first = try pixel(without.image, x: point.0, y: point.1, engine: engine)
+            let second = try pixel(neutral.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(second[component], first[component], accuracy: 1e-6,
+                               "显式中性证件照设置必须保持旧像素路径")
+            }
+        }
+    }
+
+    func testCertificatePhotoReplacesBackgroundCropsAndRunsBeforeLUT() throws {
+        let engine = PhotoEngine()
+        let width = 120, height = 180
+        var components = [Float]()
+        components.reserveCapacity(width * height * 4)
+        for row in 0..<height {
+            for column in 0..<width {
+                let x = Float(column) / Float(width - 1)
+                let y = Float(row) / Float(height - 1)
+                components.append(0.10 + 0.70 * x)
+                components.append(0.15 + 0.55 * y)
+                components.append(0.20 + 0.30 * x * y)
+                components.append(1)
+            }
+        }
+        let data = components.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let source = CIImage(bitmapData: data,
+                             bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                             size: CGSize(width: CGFloat(width), height: CGFloat(height)),
+                             format: .RGBAf, colorSpace: linearColorSpace)
+        let matte = try preparedPersonMatte(engine: engine)
+        let faceBox = CGRect(x: 0.32, y: 0.46, width: 0.36, height: 0.30)
+
+        var certificate = CertificatePhotoSettings(enabled: true,
+                                                    backgroundSource: .preset,
+                                                    backgroundPreset: .white,
+                                                    shadow: BackgroundReplacementSettings(shadowEnabled: false),
+                                                    size: .oneInch)
+        certificate.shadow.edgeDecontamination = 0
+        var certificateOnly = neutralSettings()
+        certificateOnly.certificatePhoto = certificate
+        let certOnly = try engine.process(source, settings: certificateOnly, lut: nil,
+                                          preparedPersonMatte: matte,
+                                          preparedCertificateFaceBox: faceBox)
+        XCTAssertEqual(certOnly.image.extent.size, CGSize(width: 295, height: 413),
+                       "一寸 300DPI 裁剪应输出精确像素尺寸")
+        let certReport = try XCTUnwrap(certOnly.report.certificatePhoto)
+        XCTAssertTrue(certReport.applied)
+        XCTAssertGreaterThan(certReport.coverage, 0.01)
+        XCTAssertEqual(certReport.outputPixelSize, CGSize(width: 295, height: 413))
+        XCTAssertNotNil(certReport.note)
+        XCTAssertTrue(certOnly.report.warnings.contains { $0.contains("画布尺寸") })
+
+        // Cert stage runs before the LUT: engine(cert → LUT) == LUT(cert-only output).
+        var combined = certificateOnly
+        combined.lutIntensity = 1
+        let cube = inversionCube()
+        let actual = try engine.process(source, settings: combined, lut: cube,
+                                        preparedPersonMatte: matte,
+                                        preparedCertificateFaceBox: faceBox)
+        XCTAssertEqual(actual.image.extent, certOnly.image.extent)
+        var lutOnly = neutralSettings()
+        lutOnly.lutIntensity = 1
+        let expected = try engine.process(certOnly.image, settings: lutOnly, lut: cube)
+        for point in [(10, 10), (147, 206), (280, 400)] {
+            let actualPixel = try pixel(actual.image, x: point.0, y: point.1, engine: engine)
+            let expectedPixel = try pixel(expected.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(actualPixel[component], expectedPixel[component], accuracy: 0.004,
+                               "LUT 必须在证件照之后应用（\(point.0),\(point.1) ch\(component)）")
+            }
+        }
+
+        // Reversed order (LUT first, then background replacement) must differ: the
+        // synthetic white background gets inverted by the LUT only in the correct
+        // pipeline order.
+        let lutFirst = try engine.process(source, settings: lutOnly, lut: cube)
+        let replacedFirst = try BackgroundReplacement.apply(
+            foreground: lutFirst.image, matte: matte,
+            fill: .preset(.white),
+            settings: BackgroundReplacementSettings(shadowEnabled: false))
+        let wrongCrop = try IDPhotoLayout.render(photo: replacedFirst,
+                                                 faceBox: faceBox,
+                                                 settings: certificate.crop)
+        let actualCorner = try pixel(actual.image, x: 2, y: 2, engine: engine)
+        let wrongCorner = try pixel(wrongCrop, x: 2, y: 2, engine: engine)
+        let cornerDelta = abs(actualCorner[0] - wrongCorner[0])
+            + abs(actualCorner[1] - wrongCorner[1])
+            + abs(actualCorner[2] - wrongCorner[2])
+        XCTAssertGreaterThan(cornerDelta, 0.2,
+                             "顺序颠倒（先 LUT 再换背景）背景颜色应明显不同，证明证件照在 LUT 之前")
+    }
+
+    func testCertificatePhotoWithoutPersonSkipsExplicitly() throws {
+        let engine = PhotoEngine()
+        let source = solidImage(0.5, 0.5, 0.5, width: 96, height: 128)
+        var settings = neutralSettings()
+        settings.certificatePhoto = CertificatePhotoSettings(enabled: true,
+                                                              backgroundPreset: .blue,
+                                                              size: .oneInch)
+        let processed = try engine.process(source, settings: settings, lut: nil)
+        let baseline = try engine.process(source, settings: neutralSettings(), lut: nil)
+        XCTAssertEqual(processed.image.extent, baseline.image.extent,
+                       "无人物时证件照不应改变画布")
+        for point in [(10, 10), (48, 64), (80, 110)] {
+            let first = try pixel(baseline.image, x: point.0, y: point.1, engine: engine)
+            let second = try pixel(processed.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(second[component], first[component], accuracy: 1e-6,
+                               "无人物时不得静默改像素")
+            }
+        }
+        let report = try XCTUnwrap(processed.report.certificatePhoto)
+        XCTAssertFalse(report.applied)
+        XCTAssertNotNil(report.note)
+        XCTAssertTrue(report.note?.contains("人物") == true)
+        XCTAssertTrue(processed.report.warnings.contains { $0.contains("证件照") })
+    }
+
+    func testCertificatePhotoMissingBackgroundImageFailsExplicitly() throws {
+        let engine = PhotoEngine()
+        let source = solidImage(0.3, 0.4, 0.5, width: 64, height: 96)
+        let matte = try preparedPersonMatte(engine: engine)
+        var settings = neutralSettings()
+        var certificate = CertificatePhotoSettings(enabled: true,
+                                                   backgroundSource: .image,
+                                                   backgroundImagePath: "/tmp/photo-atelier-missing-bg-\(UUID().uuidString).png",
+                                                   shadow: BackgroundReplacementSettings(shadowEnabled: false),
+                                                   size: nil)
+        certificate.shadow.edgeDecontamination = 0
+        settings.certificatePhoto = certificate
+        XCTAssertThrowsError(try engine.process(source, settings: settings, lut: nil,
+                                                preparedPersonMatte: matte)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("背景"),
+                          "缺失背景图片必须显式报错：\(error.localizedDescription)")
+        }
+    }
+
+    func testCertificatePhotoBatchManifestRecordsSkipAndVersion12() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        let engine = PhotoEngine()
+        let image = solidImage(0.4, 0.4, 0.4, width: 64, height: 96)
+        var export = ExportSettings(); export.format = .png
+        try PhotoExporter.write(image: image, to: input.appendingPathComponent("flat.png"),
+                                settings: export, sourceProperties: [:], context: engine.context)
+        var settings = AdjustmentSettings()
+        settings.certificatePhoto = CertificatePhotoSettings(enabled: true,
+                                                              backgroundPreset: .blue,
+                                                              size: .oneInch)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 12
+        let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
+                                               inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let recipePayload = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(recipePayload["version"] as? Int, 12)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        let report = try XCTUnwrap(entry["report"] as? [String: Any])
+        let certificate = try XCTUnwrap(report["certificatePhoto"] as? [String: Any],
+                                        "批量清单必须记录证件照决策")
+        XCTAssertEqual(certificate["applied"] as? Bool, false)
+        XCTAssertNotNil(certificate["note"] as? String)
+    }
+
+    func testNeutralCertificatePhotoSkipsNestedValidationWhileActiveStillRejects() throws {
+        // A neutral (enabled == false) certificate field may carry legacy or
+        // malformed nested values; the v12 version gate treats it as inert, so the
+        // pipeline entry must not reject it either (no "gate passes, render fails").
+        var neutralCertificate = CertificatePhotoSettings(enabled: false)
+        neutralCertificate.crop.dpi = 0
+        neutralCertificate.shadow.shadowOpacity = 2
+        var neutralSettings = AdjustmentSettings()
+        neutralSettings.certificatePhoto = neutralCertificate
+        XCTAssertNoThrow(try PhotoEngine.validate(neutralSettings),
+                         "中性证件照字段不应因嵌套参数在管线入口被拒")
+        var neutralRecipe = Recipe(adjustments: neutralSettings)
+        neutralRecipe.version = 11
+        XCTAssertNoThrow(try neutralRecipe.validateVersion(),
+                         "中性证件照字段在旧版本配方中合法")
+
+        // Active settings with the same malformed nested values still fail loudly.
+        var activeCertificate = neutralCertificate
+        activeCertificate.enabled = true
+        var activeSettings = AdjustmentSettings()
+        activeSettings.certificatePhoto = activeCertificate
+        XCTAssertThrowsError(try PhotoEngine.validate(activeSettings),
+                             "非中性证件照的非法 DPI/阴影参数必须显式拒绝")
+        var validActive = CertificatePhotoSettings(enabled: true, size: .oneInch)
+        validActive.print.marginMM = 0
+        var validSettings = AdjustmentSettings()
+        validSettings.certificatePhoto = validActive
+        XCTAssertNoThrow(try PhotoEngine.validate(validSettings))
+    }
 }

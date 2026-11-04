@@ -280,6 +280,14 @@ public final class PhotoEngine {
         if let colorTools = settings.colorTools { try colorTools.validate() }
         if let lensEffects = settings.lensEffects { try LensEffectsEngine.validate(lensEffects) }
         if let liquify = settings.liquify { try FaceReshapeEngine.validate(liquify) }
+        // A neutral certificate field (enabled == false) is explicitly inert: the
+        // recipe version gate accepts it on old payloads, so it must not be
+        // rejected here by nested parameter validation. Active settings still fail
+        // loudly with the same malformed values.
+        if let certificate = settings.certificatePhoto, !certificate.isNeutral {
+            try certificate.validated()
+        }
+        if let repair = settings.repairBrush { try repair.validate() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -331,7 +339,9 @@ public final class PhotoEngine {
                         outputColorSpace: OutputColorSpace? = nil,
                         cancellation: CancellationToken? = nil,
                         preparedContentSelections: ContentSelectionResult? = nil,
-                        preparedLUTContext: LUTSemanticContext? = nil) throws -> ProcessedPhoto {
+                        preparedLUTContext: LUTSemanticContext? = nil,
+                        preparedPersonMatte: PersonMatte? = nil,
+                        preparedCertificateFaceBox: CGRect? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -392,9 +402,25 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
+        // P1-B v12 manual repair/clone brush: after lens effects and before the
+        // portrait stage, so face masks, reference color and local edits all see
+        // the repaired pixels. An absent or empty stroke list skips the stage
+        // entirely and keeps the pre-v12 pixel path exact. Strength/feather
+        // blending happens in this engine's working space (extended linear sRGB),
+        // so partial-strength values differ from sRGB-only unit tests.
+        if let repair = settings.repairBrush, !repair.isNeutral {
+            working = try RepairBrushEngine.apply(to: working, strokes: repair.strokes)
+            let healCount = repair.strokes.filter { $0.mode == .heal }.count
+            report.repairBrush = RepairBrushReport(applied: true,
+                                                   strokeCount: repair.strokes.count,
+                                                   healStrokeCount: healCount,
+                                                   cloneStrokeCount: repair.strokes.count - healCount)
+        }
+        try cancellation?.check()
+
         // Pipeline order: global tone/geometry → basic tone → color tools →
-        // lens effects → portrait refinement → reference-color match → local
-        // masks/detail → LUT → output gamut.
+        // lens effects → repair brush → portrait refinement → reference-color
+        // match → local masks/detail → LUT → output gamut.
         // Portrait masks are measured on the globally adjusted image and the
         // refined result becomes the reference for local-mask measurement, so
         // local edits see the same skin the user sees. A neutral portrait
@@ -435,6 +461,19 @@ public final class PhotoEngine {
             working = try applyReferenceColor(reference, to: working,
                                               faceMasks: preparedFaceMasks,
                                               report: &report, cancellation: cancellation)
+        }
+        try cancellation?.check()
+
+        // P1-B: background replacement / certificate photo runs after reference
+        // color and before local masks. A size preset changes the canvas extent;
+        // the local-mask reference below therefore uses the cropped image and mask
+        // coordinates are normalized against the new extent (documented in
+        // CertificatePhotoSettings; the report carries a review note).
+        if let certificate = settings.certificatePhoto, !certificate.isNeutral {
+            working = try applyCertificatePhoto(working, settings: certificate,
+                                                preparedMatte: preparedPersonMatte,
+                                                preparedFaceBox: preparedCertificateFaceBox,
+                                                report: &report, cancellation: cancellation)
         }
         try cancellation?.check()
 
@@ -755,8 +794,9 @@ public final class PhotoEngine {
     }
 
     /// Lowest recipe version that can encode `adjustments`/`automatic` without a
-    /// silent downgrade. Version 11 is required when a v11-only field (color
-    /// tools, lens effects or liquify) can take effect anywhere; version 10 when
+    /// silent downgrade. Version 12 is required when a v12-only field
+    /// (`certificatePhoto`, `repairBrush`) can take effect anywhere; version 11 when a v11-only
+    /// field (color tools, lens effects or liquify) can; version 10 when
     /// a v10-only field (portrait refinement or reference color) can. A
     /// reference-color profile is stored as v10 data even at zero strength, so a
     /// present (non-nil) setting also requires v10. Neutral optional groups stay
@@ -769,6 +809,14 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let certificateGroups = [adjustments.certificatePhoto,
+                                 automatic?.baseline.certificatePhoto,
+                                 automatic?.referenceSettings.certificatePhoto]
+        if certificateGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 12 }
+        let repairGroups = [adjustments.repairBrush,
+                            automatic?.baseline.repairBrush,
+                            automatic?.referenceSettings.repairBrush]
+        if repairGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 12 }
         let liquifyGroups = [adjustments.liquify,
                              automatic?.baseline.liquify,
                              automatic?.referenceSettings.liquify]
@@ -1172,6 +1220,98 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
         return working
+    }
+
+    // MARK: - Certificate photo / background replacement (P1-B)
+
+    /// Replaces the background and optionally crops to a certificate-photo size.
+    ///
+    /// Detection failures (no person / no face for the requested crop) are explicit
+    /// skips recorded in the report and warnings; configuration errors such as a
+    /// missing local background image throw instead of silently ignoring the
+    /// setting. Prepared matte/face box are test/advanced-caller seams and skip the
+    /// corresponding Vision pass.
+    private func applyCertificatePhoto(_ image: CIImage,
+                                       settings: CertificatePhotoSettings,
+                                       preparedMatte: PersonMatte?,
+                                       preparedFaceBox: CGRect?,
+                                       report: inout ProcessingReport,
+                                       cancellation: CancellationToken?) throws -> CIImage {
+        try cancellation?.check()
+        let extent = try validExtent(of: image)
+        func skip(_ note: String) -> CIImage {
+            report.certificatePhoto = CertificatePhotoReport(applied: false,
+                                                             background: "",
+                                                             coverage: 0,
+                                                             outputPixelSize: extent.size,
+                                                             note: note)
+            report.warnings.append(note)
+            return image
+        }
+
+        let matte: PersonMatte
+        if let preparedMatte {
+            matte = preparedMatte
+        } else {
+            do {
+                matte = try PersonMatting.detect(in: image)
+            } catch {
+                return skip("未检测到可用人物（\(error.localizedDescription)）；证件照/换背景已跳过，原图保持不变。")
+            }
+        }
+        guard matte.hasPerson else {
+            return skip("未检测到可用人物（蒙版覆盖率 \(String(format: "%.2f%%", matte.coverage * 100))）；证件照/换背景已跳过，原图保持不变。")
+        }
+
+        var faceBox = preparedFaceBox
+        if settings.size != nil, faceBox == nil {
+            faceBox = FaceSemanticAnalyzer.detect(in: image, maxFaces: 1).first?.boundingBox
+            guard faceBox != nil else {
+                return skip("检测到人物但未检测到可用人脸，无法按证件照尺寸裁剪；证件照/换背景已跳过，原图保持不变。")
+            }
+        }
+
+        let fill: BackgroundFill
+        switch settings.backgroundSource {
+        case .preset:
+            fill = .preset(settings.backgroundPreset)
+        case .customColor:
+            fill = .color(settings.customBackground)
+        case .image:
+            guard let path = settings.backgroundImagePath,
+                  !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AtelierError.invalidConfiguration("证件照背景图片来源为本地图片，但背景图片路径为空。")
+            }
+            fill = .image(try BackgroundReplacement.backgroundImage(
+                contentsOf: URL(fileURLWithPath: path)))
+        }
+
+        var output = try BackgroundReplacement.apply(foreground: image, matte: matte,
+                                                     fill: fill, settings: settings.shadow)
+        var note: String?
+        if let size = settings.size, let faceBox {
+            var crop = settings.crop
+            crop.size = size
+            output = try IDPhotoLayout.render(photo: output, faceBox: faceBox, settings: crop)
+            note = "证件照裁剪已改变画布尺寸为 \(Int(output.extent.width))×\(Int(output.extent.height))；局部蒙版/细节现按新 extent 归一化，请复核依赖位置的调整。"
+        }
+        let backgroundDescription: String
+        switch settings.backgroundSource {
+        case .preset:
+            backgroundDescription = "预设·\(settings.backgroundPreset.title)"
+        case .customColor:
+            backgroundDescription = "自定义·\(settings.customBackground.hexString)"
+        case .image:
+            backgroundDescription = "本地图片·\((settings.backgroundImagePath as NSString?)?.lastPathComponent ?? "")"
+        }
+        report.certificatePhoto = CertificatePhotoReport(applied: true,
+                                                         background: backgroundDescription,
+                                                         coverage: matte.coverage,
+                                                         outputPixelSize: output.extent.size,
+                                                         note: note)
+        if let note { report.warnings.append(note) }
+        try cancellation?.check()
+        return output
     }
 
     private func autoStraighten(_ image: CIImage, report: inout ProcessingReport,

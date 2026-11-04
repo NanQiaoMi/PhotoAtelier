@@ -855,4 +855,210 @@ final class PortraitRetouchTests: XCTestCase {
         XCTAssertEqual(liquify["presetApplied"] as? Bool, false)
         XCTAssertNotNil(liquify["note"] as? String)
     }
+
+    // MARK: - P1-B manual repair / clone brush (v12)
+
+    /// Paints a source with a dark defect, then checks: absent/empty repair is a
+    /// pixel-identical pre-v12 path; a heal stroke reduces the defect contrast
+    /// inside its footprint while leaving far pixels untouched; the report records
+    /// the applied stroke counts for batch manifests.
+    func testRepairBrushNeutralIsIdentityAndHealRunsInPipeline() throws {
+        let width = 96, height = 64
+        let source = makeImage(width: width, height: height) { column, row in
+            let x = Float(column) / Float(width - 1)
+            let y = Float(row) / Float(height - 1)
+            // Dark 8×8 defect at the centre of a smooth gradient.
+            if (44..<52).contains(column), (28..<36).contains(row) {
+                return (0.05, 0.05, 0.05, 1)
+            }
+            return (0.25 + 0.5 * x, 0.30 + 0.4 * y, 0.35 + 0.3 * x, 1)
+        }
+        let engine = PhotoEngine()
+        var baseline = AdjustmentSettings()
+        baseline.exposureEV = 0.2
+        baseline.contrast = 1.3
+        var neutral = baseline
+        neutral.repairBrush = RepairBrushSettings()
+        let baseOut = try engine.process(source, settings: baseline, lut: nil)
+        let neutralOut = try engine.process(source, settings: neutral, lut: nil)
+        assertPixelsEqual(try render(baseOut.image), try render(neutralOut.image),
+                          message: "空笔迹列表必须与缺少修复字段像素完全一致")
+        XCTAssertNil(baseOut.report.repairBrush)
+        XCTAssertNil(neutralOut.report.repairBrush)
+
+        var withRepair = baseline
+        withRepair.repairBrush = RepairBrushSettings(strokes: [
+            RepairStroke(mode: .heal,
+                         points: [MaskPoint(x: 0.5, y: 0.35), MaskPoint(x: 0.5, y: 0.65)],
+                         radius: 0.12, feather: 0.5, strength: 1)
+        ])
+        let repaired = try engine.process(source, settings: withRepair, lut: nil)
+        let report = try XCTUnwrap(repaired.report.repairBrush,
+                                   "heal 笔迹必须记录到 ProcessingReport")
+        XCTAssertTrue(report.applied)
+        XCTAssertEqual(report.strokeCount, 1)
+        XCTAssertEqual(report.healStrokeCount, 1)
+        XCTAssertEqual(report.cloneStrokeCount, 0)
+
+        let before = try render(baseOut.image)
+        let after = try render(repaired.image)
+        func meanLuma(_ pixels: [Float], column0: Int, row0: Int, w: Int, h: Int) -> Float {
+            var total: Float = 0
+            var count: Float = 0
+            for row in row0..<(row0 + h) {
+                for column in column0..<(column0 + w) {
+                    total += luminance(pixels, width: width, column: column, row: row)
+                    count += 1
+                }
+            }
+            return total / count
+        }
+        // Defect vs a clean ring right of the vertical stroke (stroke x range is
+        // roughly 40...56 px, so column 60...68 stays outside the healed footprint).
+        let defectBefore = meanLuma(before, column0: 44, row0: 28, w: 8, h: 8)
+        let ringBefore = meanLuma(before, column0: 60, row0: 28, w: 8, h: 8)
+        let defectAfter = meanLuma(after, column0: 44, row0: 28, w: 8, h: 8)
+        let ringAfter = meanLuma(after, column0: 60, row0: 28, w: 8, h: 8)
+        XCTAssertLessThan(abs(defectAfter - ringAfter), abs(defectBefore - ringBefore) * 0.6,
+                          "heal 后缺陷与邻域对比应至少下降 40%")
+        XCTAssertEqual(ringAfter, ringBefore, accuracy: 0.01,
+                       "heal 足迹外的干净区域不应被改变")
+
+        // Far outside the stroke the pixels must stay byte-identical.
+        XCTAssertEqual(try render(baseOut.image)[0], before[0], accuracy: 1e-6)
+        let farDifference = maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                      region: { column, _ in column < 30 || column > 66 })
+        XCTAssertLessThan(farDifference, 1e-4,
+                          "修复笔迹不应影响足迹之外的像素")
+    }
+
+    /// The clone stage must sample the image *after* lens effects: the copied
+    /// centre equals the lens-only output at the source position, not the original.
+    func testRepairBrushRunsAfterLensEffectsAndCopiesPostStagePixels() throws {
+        let width = 120, height = 80
+        let source = makeImage(width: width, height: height) { column, row in
+            let x = Float(column) / Float(width - 1)
+            let y = Float(row) / Float(height - 1)
+            return (0.15 + 0.6 * x, 0.12 + 0.5 * y, 0.18 + 0.4 * x * y, 1)
+        }
+        var lens = AdjustmentSettings()
+        var effects = LensEffectsSettings()
+        effects.vignetteAmount = -0.85
+        lens.lensEffects = effects
+        let engine = PhotoEngine()
+        let lensOnly = try engine.process(source, settings: lens, lut: nil)
+
+        var clone = RepairStroke(mode: .clone,
+                                 points: [MaskPoint(x: 0.25, y: 0.5)],
+                                 radius: 0.08, feather: 0, strength: 1)
+        clone.cloneOffset = MaskPoint(x: 0.6, y: 0) // source centre x = 0.85
+        var combined = lens
+        combined.repairBrush = RepairBrushSettings(strokes: [clone])
+        let repaired = try engine.process(source, settings: combined, lut: nil)
+        XCTAssertEqual(repaired.report.repairBrush?.cloneStrokeCount, 1)
+
+        let lensPixels = try render(lensOnly.image)
+        let repairedPixels = try render(repaired.image)
+        func meanRGB(_ pixels: [Float], column0: Int, row0: Int, w: Int, h: Int) -> (Float, Float, Float) {
+            var r: Float = 0, g: Float = 0, b: Float = 0, count: Float = 0
+            for row in row0..<(row0 + h) {
+                for column in column0..<(column0 + w) {
+                    let offset = (row * width + column) * 4
+                    r += pixels[offset]; g += pixels[offset + 1]; b += pixels[offset + 2]
+                    count += 1
+                }
+            }
+            return (r / count, g / count, b / count)
+        }
+        let sourceMean = meanRGB(lensPixels, column0: 100, row0: 38, w: 4, h: 4)  // x≈0.85
+        let targetBefore = meanRGB(lensPixels, column0: 28, row0: 38, w: 4, h: 4) // x≈0.25
+        let targetAfter = meanRGB(repairedPixels, column0: 28, row0: 38, w: 4, h: 4)
+        XCTAssertGreaterThan(abs(targetBefore.0 - sourceMean.0), 0.01,
+                             "镜头暗角必须让来源与目标原本不同，否则顺序断言无意义")
+        XCTAssertEqual(targetAfter.0, sourceMean.0, accuracy: 0.01,
+                       "clone 必须复制镜头效果之后的像素（修复在镜头效果之后）")
+        XCTAssertEqual(targetAfter.1, sourceMean.1, accuracy: 0.01)
+        XCTAssertEqual(targetAfter.2, sourceMean.2, accuracy: 0.01)
+
+        // Documented boundary: "before portrait" is guaranteed by the documented
+        // stage order (lens → repair → portrait); observing it from pixels would
+        // require a real face, which synthetic fixtures deliberately avoid.
+    }
+
+    /// B2 review F1: strength/feather blending happens in the engine working space
+    /// (extended linear sRGB here), not in encoded sRGB. This pins the semantics
+    /// that were previously only measured in an sRGB-space probe.
+    func testRepairBrushPartialStrengthBlendsInEngineWorkingSpace() throws {
+        let width = 80, height = 80
+        let source = makeImage(width: width, height: height) { column, _ in
+            if column < width / 2 { return (0.18, 0.18, 0.18, 1) }
+            return (0.60, 0.02, 0.02, 1)
+        }
+        var settings = AdjustmentSettings()
+        var stroke = RepairStroke(mode: .clone,
+                                  points: [MaskPoint(x: 0.25, y: 0.5)],
+                                  radius: 0.15, feather: 0, strength: 0.5)
+        stroke.cloneOffset = MaskPoint(x: 0.5, y: 0)
+        settings.repairBrush = RepairBrushSettings(strokes: [stroke])
+        let output = try PhotoEngine().process(source, settings: settings, lut: nil)
+        let pixels = try render(output.image)
+        let offset = (40 * width + 20) * 4
+        let red = pixels[offset], green = pixels[offset + 1], blue = pixels[offset + 2]
+        // Linear-space mix: 0.5 × red donor + 0.5 × grey background.
+        XCTAssertEqual(red, 0.5 * 0.60 + 0.5 * 0.18, accuracy: 0.02,
+                       "强度 0.5 应在 working space（线性）混合")
+        XCTAssertEqual(green, 0.5 * 0.02 + 0.5 * 0.18, accuracy: 0.02)
+        XCTAssertEqual(blue, 0.5 * 0.02 + 0.5 * 0.18, accuracy: 0.02)
+        // A naive encoded-sRGB mix would land clearly lower for red; keep this as
+        // a guard that the blend is not silently moved into sRGB space later.
+        func encodeSRGB(_ value: Float) -> Float {
+            value <= 0.0031308 ? 12.92 * value : 1.055 * pow(value, 1 / 2.4) - 0.055
+        }
+        func decodeSRGB(_ value: Float) -> Float {
+            value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        let srgbMix = decodeSRGB(0.5 * encodeSRGB(0.60) + 0.5 * encodeSRGB(0.18))
+        XCTAssertGreaterThan(abs(red - srgbMix), 0.02,
+                             "若在 sRGB 编码空间混合会得到 \(srgbMix)，与线性工作空间明显不同")
+    }
+
+    func testBatchManifestRecordsPerPhotoRepairBrushStatus() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        let context = PhotoEngine().context
+        let image = CIImage(color: CIColor(red: 0.3, green: 0.25, blue: 0.2, alpha: 1,
+                                          colorSpace: linearColorSpace)!)
+            .cropped(to: CGRect(x: 0, y: 0, width: 48, height: 48))
+        var export = ExportSettings()
+        export.format = .png
+        try PhotoExporter.write(image: image, to: input.appendingPathComponent("flat.png"),
+                                settings: export, sourceProperties: [:], context: context)
+
+        var settings = AdjustmentSettings()
+        settings.repairBrush = RepairBrushSettings(strokes: [
+            RepairStroke(mode: .heal, points: [MaskPoint(x: 0.5, y: 0.5)], radius: 0.2)
+        ])
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 12
+        let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
+                                               inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let recipePayload = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(recipePayload["version"] as? Int, 12)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let report = try XCTUnwrap(try XCTUnwrap(entries.first)["report"] as? [String: Any])
+        let repair = try XCTUnwrap(report["repairBrush"] as? [String: Any],
+                                   "batch manifest must record the per-photo repair status")
+        XCTAssertEqual(repair["applied"] as? Bool, true)
+        XCTAssertEqual(repair["strokeCount"] as? Int, 1)
+        XCTAssertEqual(repair["healStrokeCount"] as? Int, 1)
+        XCTAssertEqual(repair["cloneStrokeCount"] as? Int, 0)
+    }
 }

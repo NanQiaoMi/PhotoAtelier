@@ -8,6 +8,7 @@ private enum CanvasDragAction: Equatable {
     case pan
     case compare
     case liquify
+    case repair
     case ignore
 }
 
@@ -54,11 +55,15 @@ struct PhotoCanvas: View {
         .onChange(of: model.maskKind) { _ in cancelCanvasGesture() }
         .onChange(of: model.maskDrawMode) { _ in cancelCanvasGesture() }
         .onChange(of: model.liquifyBrushActive) { _ in cancelCanvasGesture() }
+        .onChange(of: model.repairBrushActive) { _ in cancelCanvasGesture() }
         .onChange(of: model.batchRunning) { running in
             if running { cancelCanvasGesture() }
         }
         .onExitCommand {
-            if model.liquifyBrushActive {
+            if model.repairBrushActive {
+                model.toggleRepairBrush()
+                cancelCanvasGesture()
+            } else if model.liquifyBrushActive {
                 model.toggleLiquifyBrush()
                 cancelCanvasGesture()
             } else if model.maskInteractionActive {
@@ -80,6 +85,12 @@ struct PhotoCanvas: View {
                 if model.pickingMaskColor {
                     Label("点击照片取样颜色", systemImage: "eyedropper")
                         .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
+                } else if model.repairBrushActive {
+                    Label(model.repairSamplingCloneSource
+                          ? "点击照片选择仿制来源"
+                          : "拖动涂抹修复/仿制（松开应用）",
+                          systemImage: "bandage")
+                        .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
                 } else if model.liquifyBrushActive {
                     Label("拖动绘制液化笔迹（松开应用）", systemImage: "drop")
                         .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
@@ -100,7 +111,8 @@ struct PhotoCanvas: View {
     }
 
     private func photoContent(_ after: NSImage, size: CGSize) -> some View {
-        let comparisonVisible = compare && !model.maskInteractionActive && !model.liquifyBrushActive
+        let comparisonVisible = compare && !model.maskInteractionActive
+            && !model.liquifyBrushActive && !model.repairBrushActive
         return ZStack(alignment: .topLeading) {
             Image(nsImage: after).resizable().frame(width: size.width, height: size.height)
 
@@ -131,6 +143,7 @@ struct PhotoCanvas: View {
             }
             if !draft.isEmpty { draftOutline(size) }
             if model.liquifyBrushActive { liquifyOverlay(size) }
+            if model.repairBrushActive { repairOverlay(size) }
             if model.maskEditMode { geometryHandles(size) }
         }
         .frame(width: size.width, height: size.height)
@@ -169,6 +182,13 @@ struct PhotoCanvas: View {
                 model.beginLiquifyStroke(at: normalized(event.startLocation, size: size))
             }
             model.extendLiquifyStroke(to: point)
+        case .repair:
+            if model.repairSamplingCloneSource { break }
+            let point = normalized(event.location, size: size)
+            if !model.repairStrokeInProgress {
+                model.beginRepairStroke(at: normalized(event.startLocation, size: size))
+            }
+            model.extendRepairStroke(to: point)
         case .moveStart(let id):
             moveGeometry(id: id, handle: .start, to: event.location, size: size)
         case .moveEnd(let id):
@@ -183,7 +203,12 @@ struct PhotoCanvas: View {
     }
 
     private func handleDragEnded(_ event: DragGesture.Value, size: CGSize) {
-        if case .liquify? = dragAction {
+        if case .repair? = dragAction {
+            if model.repairStrokeInProgress {
+                model.extendRepairStroke(to: normalized(event.location, size: size))
+                model.endRepairStroke()
+            }
+        } else if case .liquify? = dragAction {
             model.extendLiquifyStroke(to: normalized(event.location, size: size))
             model.endLiquifyStroke()
         } else if case .draw? = dragAction, !model.batchRunning, model.drawingMask {
@@ -199,6 +224,7 @@ struct PhotoCanvas: View {
 
     private func actionForDrag(startLocation: CGPoint, size: CGSize) -> CanvasDragAction {
         if model.pickingMaskColor || model.batchRunning { return .ignore }
+        if model.repairBrushActive { return .repair }
         if model.liquifyBrushActive { return .liquify }
         if model.maskEditMode {
             return geometryHandle(at: startLocation, size: size) ?? .ignore
@@ -214,6 +240,16 @@ struct PhotoCanvas: View {
         let point = normalized(location, size: size)
         if model.pickingMaskColor {
             model.pickMaskColor(at: point)
+            return
+        }
+        if model.repairBrushActive {
+            if model.repairSamplingCloneSource {
+                model.sampleRepairCloneSource(at: point)
+            } else {
+                // A click without drag is a valid one-point heal dot.
+                model.beginRepairStroke(at: point)
+                model.endRepairStroke()
+            }
             return
         }
         guard model.drawingMask else { return }
@@ -315,6 +351,57 @@ struct PhotoCanvas: View {
                 context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
             } else {
                 context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round, dash: [5, 3]))
+            }
+        }.allowsHitTesting(false)
+    }
+
+    /// Repair brush overlay: committed strokes in orange (heal) / cyan (clone),
+    /// the in-flight draft in the accent colour, plus the clone source marker.
+    /// The circle radius mirrors `RepairStroke.pixelRadius` (short image edge), so
+    /// the guide matches the mask footprint instead of a per-axis ellipse.
+    private func repairOverlay(_ size: CGSize) -> some View {
+        Canvas { context, canvasSize in
+            func drawStroke(_ stroke: RepairStroke, color: Color, opacity: Double) {
+                let radius = max(1.5, CGFloat(stroke.radius) * min(canvasSize.width, canvasSize.height))
+                guard let first = stroke.points.first else { return }
+                var path = Path()
+                path.move(to: screen(first, size: canvasSize))
+                for point in stroke.points.dropFirst() {
+                    path.addLine(to: screen(point, size: canvasSize))
+                }
+                context.stroke(path, with: .color(color.opacity(opacity)),
+                               style: StrokeStyle(lineWidth: radius * 2,
+                                                  lineCap: .round, lineJoin: .round,
+                                                  dash: [radius * 2 + 2, radius * 2 + 2]))
+                if stroke.points.count == 1 {
+                    let center = screen(first, size: canvasSize)
+                    context.stroke(Path(ellipseIn: CGRect(x: center.x - radius,
+                                                          y: center.y - radius,
+                                                          width: radius * 2,
+                                                          height: radius * 2)),
+                                   with: .color(color.opacity(opacity)), lineWidth: 1)
+                }
+            }
+            for stroke in model.repairBrushSettings.strokes {
+                let color: Color = stroke.mode == .heal ? .orange : .cyan
+                drawStroke(stroke, color: color, opacity: 0.45)
+            }
+            if let draft = model.repairDraftStroke {
+                let color: Color = draft.mode == .heal ? .orange : .cyan
+                drawStroke(draft, color: color, opacity: 0.95)
+            }
+            if let source = model.repairCloneSource {
+                let center = screen(source, size: canvasSize)
+                let radius: CGFloat = 7
+                var cross = Path()
+                cross.move(to: CGPoint(x: center.x - radius - 3, y: center.y))
+                cross.addLine(to: CGPoint(x: center.x + radius + 3, y: center.y))
+                cross.move(to: CGPoint(x: center.x, y: center.y - radius - 3))
+                cross.addLine(to: CGPoint(x: center.x, y: center.y + radius + 3))
+                context.stroke(cross, with: .color(.white.opacity(0.9)), lineWidth: 1.2)
+                context.stroke(Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius,
+                                                      width: radius * 2, height: radius * 2)),
+                               with: .color(.white.opacity(0.9)), lineWidth: 1.2)
             }
         }.allowsHitTesting(false)
     }

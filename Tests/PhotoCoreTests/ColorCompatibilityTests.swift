@@ -285,14 +285,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughElevenAndRejectsTwelve() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughTwelveAndRejectsThirteen() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...11 {
+        for version in 1...12 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,8 +305,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 12
-        let rejectedOutput = root.appendingPathComponent("output-12", isDirectory: true)
+        futureRecipe.version = 13
+        let rejectedOutput = root.appendingPathComponent("output-13", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -1320,5 +1320,153 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(legacy.format, .jpeg)
         XCTAssertEqual(legacy.suffix, "_graded")
         XCTAssertTrue(legacy.stripMetadata)
+    }
+
+    // MARK: - P1-B certificate photo / background replacement (v12)
+
+    func testCertificatePhotoRequiresV12RoundTripsAndNeutralStaysLegacy() throws {
+        var settings = AdjustmentSettings()
+        // Keep the stored floats binary-exact so the Codable roundtrip equality
+        // check is not defeated by decimal literals (e.g. -0.035).
+        settings.certificatePhoto = CertificatePhotoSettings(
+            enabled: true, backgroundSource: .preset, backgroundPreset: .blue,
+            shadow: BackgroundReplacementSettings(shadowEnabled: true,
+                                                  shadowOpacity: 0.5,
+                                                  shadowBlur: 0.25,
+                                                  shadowOffsetX: 0,
+                                                  shadowOffsetY: 0,
+                                                  edgeDecontamination: 0.5),
+            size: .oneInch)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 11
+        XCTAssertThrowsError(try recipe.validateVersion()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("证件照"),
+                          "a v11 recipe with an active certificate stage must be rejected")
+        }
+        recipe.version = 12
+        XCTAssertNoThrow(try recipe.validateVersion())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 12)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: try JSONEncoder().encode(recipe))
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.adjustments.certificatePhoto?.size, .oneInch)
+        XCTAssertEqual(decoded.adjustments.certificatePhoto?.backgroundPreset, .blue)
+        XCTAssertEqual(decoded.adjustments.certificatePhoto?.enabled, true)
+
+        // Enabled=false is explicitly neutral: old payloads/pixel path stay valid.
+        var neutral = AdjustmentSettings()
+        neutral.certificatePhoto = CertificatePhotoSettings(enabled: false, size: .oneInch)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutral, automatic: nil), 9)
+        XCTAssertNoThrow(try Recipe(adjustments: neutral).validateVersion())
+        var legacyV11 = Recipe(adjustments: neutral)
+        legacyV11.version = 11
+        XCTAssertNoThrow(try legacyV11.validateVersion())
+        XCTAssertTrue(neutral.certificatePhoto?.isNeutral == true)
+
+        // Absent field decodes as nil and keeps the legacy path.
+        let absent = try JSONDecoder().decode(Recipe.self,
+            from: try JSONEncoder().encode(Recipe(adjustments: AdjustmentSettings())))
+        XCTAssertNil(absent.adjustments.certificatePhoto)
+        XCTAssertNoThrow(try absent.validateVersion())
+
+        // Automatic recipe baseline/reference branches are gated too.
+        let automatic = AutomaticBatchRecipe(styleID: "balanced",
+                                             baseline: settings,
+                                             referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automatic), 12)
+        var automaticRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automatic)
+        automaticRecipe.version = 11
+        XCTAssertThrowsError(try automaticRecipe.validateVersion())
+        automaticRecipe.version = 12
+        XCTAssertNoThrow(try automaticRecipe.validateVersion())
+
+        // Version range and malformed settings fail loudly.
+        var future = Recipe(adjustments: AdjustmentSettings())
+        future.version = 13
+        XCTAssertThrowsError(try future.validateVersion())
+        var invalid = CertificatePhotoSettings(enabled: true)
+        invalid.shadow.shadowOpacity = 2
+        XCTAssertThrowsError(try PhotoEngine.validate({
+            var value = AdjustmentSettings(); value.certificatePhoto = invalid; return value
+        }()))
+        var imageSource = CertificatePhotoSettings(enabled: true, backgroundSource: .image,
+                                                   backgroundImagePath: "   ")
+        XCTAssertThrowsError(try imageSource.validated())
+    }
+
+    // MARK: - P1-B manual repair / clone brush (v12)
+
+    func testRepairBrushRequiresV12RoundTripsAndNeutralStaysLegacy() throws {
+        var settings = AdjustmentSettings()
+        var heal = RepairStroke(mode: .heal,
+                                points: [MaskPoint(x: 0.25, y: 0.5), MaskPoint(x: 0.75, y: 0.5)],
+                                radius: 0.08, feather: 0.4, strength: 0.9)
+        heal.id = UUID(uuidString: "00000000-0000-0000-0000-00000000B501")!
+        var clone = RepairStroke(mode: .clone,
+                                 points: [MaskPoint(x: 0.5, y: 0.4), MaskPoint(x: 0.5, y: 0.6)],
+                                 radius: 0.05, feather: 0.2, strength: 1)
+        clone.id = UUID(uuidString: "00000000-0000-0000-0000-00000000B502")!
+        clone.cloneOffset = MaskPoint(x: 0.25, y: -0.1)
+        settings.repairBrush = RepairBrushSettings(strokes: [heal, clone])
+
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 11
+        XCTAssertThrowsError(try recipe.validateVersion()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("修复"),
+                          "a v11 recipe with stored repair strokes must be rejected")
+        }
+        recipe.version = 12
+        XCTAssertNoThrow(try recipe.validateVersion())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 12)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: try JSONEncoder().encode(recipe))
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.adjustments.repairBrush?.strokes.count, 2)
+        XCTAssertEqual(decoded.adjustments.repairBrush?.strokes.first?.mode, .heal)
+        XCTAssertEqual(decoded.adjustments.repairBrush?.strokes.last?.cloneOffset,
+                       MaskPoint(x: 0.25, y: -0.1),
+                       "clone source offset must survive the recipe roundtrip")
+
+        // Empty stroke list is explicitly neutral: legacy version + pixel path.
+        var neutral = AdjustmentSettings()
+        neutral.repairBrush = RepairBrushSettings()
+        XCTAssertTrue(neutral.repairBrush?.isNeutral == true)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutral, automatic: nil), 9)
+        var neutralV11 = Recipe(adjustments: neutral)
+        neutralV11.version = 11
+        XCTAssertNoThrow(try neutralV11.validateVersion())
+        XCTAssertNoThrow(try Recipe(adjustments: neutral).validateVersion())
+
+        // Absent field decodes as nil and keeps the legacy path.
+        let absent = try JSONDecoder().decode(Recipe.self,
+            from: try JSONEncoder().encode(Recipe(adjustments: AdjustmentSettings())))
+        XCTAssertNil(absent.adjustments.repairBrush)
+        XCTAssertNoThrow(try absent.validateVersion())
+
+        // Automatic baseline/reference branches are gated too.
+        let automatic = AutomaticBatchRecipe(styleID: "balanced", baseline: settings,
+                                             referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automatic), 12)
+        var automaticRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automatic)
+        automaticRecipe.version = 11
+        XCTAssertThrowsError(try automaticRecipe.validateVersion())
+        automaticRecipe.version = 12
+        XCTAssertNoThrow(try automaticRecipe.validateVersion())
+
+        // Malformed settings fail loudly through the shared engine validation.
+        var tooManyStrokes = RepairBrushSettings(strokes: [heal])
+        tooManyStrokes.strokes = (0..<(RepairBrushEngine.maximumStrokeCount + 1)).map { _ in heal }
+        XCTAssertThrowsError(try PhotoEngine.validate({
+            var value = AdjustmentSettings()
+            value.repairBrush = tooManyStrokes
+            return value
+        }()))
+        XCTAssertThrowsError(try RepairStroke(mode: .heal, points: []).validate())
+        XCTAssertThrowsError(try RepairStroke(mode: .heal,
+                                              points: [MaskPoint(x: 0.5, y: 0.5)],
+                                              radius: 0.9).validate())
+        XCTAssertThrowsError(try RepairStroke(mode: .clone,
+                                              points: [MaskPoint(x: 0.5, y: 0.5)],
+                                              cloneOffset: MaskPoint(x: -2, y: 0)).validate())
     }
 }

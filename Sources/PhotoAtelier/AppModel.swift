@@ -135,6 +135,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var liquifyDraftStroke: WarpStroke?
     private var liquifyStrokeUndoBase: UndoSnapshot?
     private var liquifyStrokeLastPoint: MaskPoint?
+    // P1-B manual repair / clone brush editing state (settings live in adjustments.repairBrush).
+    @Published var repairBrushActive = false
+    @Published var repairBrushMode: RepairBrushMode = .heal
+    @Published var repairBrushRadius: Double = 0.06
+    @Published var repairBrushFeather: Double = 0.5
+    @Published var repairBrushStrength: Double = 1
+    @Published var repairCloneSource: MaskPoint?
+    @Published var repairSamplingCloneSource = false
+    @Published private(set) var repairStrokeInProgress = false
+    @Published private(set) var repairDraftStroke: RepairStroke?
+    private var repairStrokeUndoBase: UndoSnapshot?
+    private var repairStrokeLastPoint: MaskPoint?
     @Published var maskOverlayOpacity: Double = 0.55
     @Published var maskOverlayImage: NSImage?
     @Published var maskInspection: MaskInspection?
@@ -306,12 +318,17 @@ final class AppModel: ObservableObject {
             liquifyProbe.liquify = FaceReshapeSettings(preset: .youthful)
             let liquifyVersion = PhotoEngine.requiredRecipeVersion(adjustments: liquifyProbe,
                                                                    automatic: nil)
+            var certificateProbe = AdjustmentSettings()
+            certificateProbe.certificatePhoto = CertificatePhotoSettings(enabled: true, size: .oneInch)
+            let certificateVersion = PhotoEngine.requiredRecipeVersion(adjustments: certificateProbe,
+                                                                       automatic: nil)
             print("PORTRAIT_CONTRACT_SELF_CHECK \(portraitContractFailure == nil ? "PASS" : "FAIL")"
                 + " · maxFaces=\(Self.portraitMaximumFaces)"
                 + " · minSkinCoverage=\(Self.portraitMinimumSkinCoverage)"
                 + " · neutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings()))"
                 + " · nonNeutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)))"
-                + " · liquifyVersion=\(liquifyVersion)")
+                + " · liquifyVersion=\(liquifyVersion)"
+                + " · certificateVersion=\(certificateVersion)")
         }
         #endif
     }
@@ -352,6 +369,8 @@ final class AppModel: ObservableObject {
         cancelMaskInteraction()
         cancelLiquifyStroke()
         liquifyBrushActive = false
+        cancelRepairStroke()
+        repairBrushActive = false
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
@@ -604,6 +623,8 @@ final class AppModel: ObservableObject {
         cancelMaskInteraction()
         cancelLiquifyStroke()
         liquifyBrushActive = false
+        cancelRepairStroke()
+        repairBrushActive = false
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         invalidatePortraitDetection()
@@ -1538,6 +1559,60 @@ final class AppModel: ObservableObject {
         if Self.collapsedLiquifySettings(unprotected) == nil {
             return "neutral liquify with protection disabled must be kept"
         }
+        // P1-B certificate photo contract: active settings require v12, while an
+        // explicitly disabled (neutral) field keeps the legacy version path.
+        var activeCertificate = AdjustmentSettings()
+        activeCertificate.certificatePhoto = CertificatePhotoSettings(enabled: true,
+                                                                      size: .oneInch)
+        if PhotoEngine.requiredRecipeVersion(adjustments: activeCertificate, automatic: nil) != 12 {
+            return "active certificate photo settings must require recipe v12"
+        }
+        var neutralCertificate = AdjustmentSettings()
+        neutralCertificate.certificatePhoto = CertificatePhotoSettings(enabled: false,
+                                                                        size: .oneInch)
+        if PhotoEngine.requiredRecipeVersion(adjustments: neutralCertificate, automatic: nil) != 9 {
+            return "explicitly neutral certificate settings must not require v12"
+        }
+        var legacyCertificateRecipe = Recipe(adjustments: activeCertificate)
+        legacyCertificateRecipe.version = 11
+        if (try? legacyCertificateRecipe.validateVersion()) != nil {
+            return "v11 recipe must reject an active certificate stage"
+        }
+        var v12CertificateRecipe = legacyCertificateRecipe
+        v12CertificateRecipe.version = 12
+        if (try? v12CertificateRecipe.validateVersion()) == nil {
+            return "v12 recipe must accept an active certificate stage"
+        }
+        if (try? CertificatePhotoSettings().validated()) == nil {
+            return "default certificate settings must validate"
+        }
+        // P1-B v12 manual repair contract: non-empty strokes require v12, while an
+        // empty/absent stroke list keeps the legacy version and v11 recipes reject it.
+        var activeRepair = AdjustmentSettings()
+        activeRepair.repairBrush = RepairBrushSettings(strokes: [
+            RepairStroke(mode: .heal, points: [MaskPoint(x: 0.5, y: 0.5)], radius: 0.05)
+        ])
+        if PhotoEngine.requiredRecipeVersion(adjustments: activeRepair, automatic: nil) != 12 {
+            return "non-empty repair brush strokes must require recipe v12"
+        }
+        var neutralRepair = AdjustmentSettings()
+        neutralRepair.repairBrush = RepairBrushSettings()
+        if PhotoEngine.requiredRecipeVersion(adjustments: neutralRepair, automatic: nil) != 9 {
+            return "empty repair brush settings must not require v12"
+        }
+        var legacyRepairRecipe = Recipe(adjustments: activeRepair)
+        legacyRepairRecipe.version = 11
+        if (try? legacyRepairRecipe.validateVersion()) != nil {
+            return "v11 recipe must reject non-empty repair brush strokes"
+        }
+        var v12RepairRecipe = legacyRepairRecipe
+        v12RepairRecipe.version = 12
+        if (try? v12RepairRecipe.validateVersion()) == nil {
+            return "v12 recipe must accept repair brush strokes"
+        }
+        if (try? RepairBrushSettings().validate()) == nil {
+            return "default repair brush settings must validate"
+        }
         return nil
     }
 
@@ -1649,6 +1724,8 @@ final class AppModel: ObservableObject {
         } else {
             cancelMaskInteraction()
             selectedMask = nil
+            repairBrushActive = false
+            cancelRepairStroke()
             liquifyBrushActive = true
             status = "手动液化画笔已开启（\(liquifyBrushMode.title)）；在画布拖动绘制，松开后应用预览，⌘Z 可撤销整笔。"
         }
@@ -1719,6 +1796,256 @@ final class AppModel: ObservableObject {
         liquifyDraftStroke = nil
         liquifyStrokeLastPoint = nil
         liquifyStrokeUndoBase = nil
+    }
+
+    // MARK: Certificate photo / background replacement (P1-B)
+
+    /// Current certificate-photo settings; the field is optional for v1–v11
+    /// recipe pixel compatibility and `enabled == false` is the neutral state.
+    var certificatePhotoSettings: CertificatePhotoSettings {
+        adjustments.certificatePhoto ?? CertificatePhotoSettings()
+    }
+
+    var certificateIsActive: Bool {
+        adjustments.certificatePhoto.map { !$0.isNeutral } ?? false
+    }
+
+    /// Applies one certificate-photo edit. The field is kept while the panel is
+    /// used (even disabled, which is explicitly neutral) so the UI state and
+    /// background/shadow choices survive; reset removes it entirely.
+    func updateCertificatePhoto(_ mutate: (inout CertificatePhotoSettings) -> Void) {
+        var settings = adjustments.certificatePhoto ?? CertificatePhotoSettings()
+        mutate(&settings)
+        adjustments.certificatePhoto = settings
+    }
+
+    func setCertificatePhotoEnabled(_ enabled: Bool) {
+        updateCertificatePhoto { settings in
+            settings.enabled = enabled
+            if enabled, settings.size == nil { settings.size = .oneInch }
+        }
+        status = enabled
+            ? "证件照/换背景已启用：预览会逐张检测人物；无人物时显式跳过并说明。"
+            : "证件照/换背景已关闭（显式中性）：不改像素，旧配方路径保持不变。"
+    }
+
+    func resetCertificatePhoto() {
+        adjustments.certificatePhoto = nil
+        status = "已移除证件照/换背景设置（配方回到 v1–v11 兼容路径）。"
+    }
+
+    /// Imports a local background image via the standard open panel. Only local
+    /// image files are stored; nothing is uploaded or fetched from the network.
+    func importCertificateBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.title = "选择本地背景图片"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .tiff]
+        panel.prompt = "使用"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        updateCertificatePhoto { settings in
+            settings.backgroundSource = .image
+            settings.backgroundImagePath = url.path
+            settings.enabled = true
+            if settings.size == nil { settings.size = .oneInch }
+        }
+        status = "已选择本地背景图片：\(url.lastPathComponent)；预览按比例裁切填满画面。"
+    }
+
+    // MARK: Manual repair / clone brush (P1-B)
+
+    /// Current manual repair-brush settings; `nil` means the pre-v12 path.
+    var repairBrushSettings: RepairBrushSettings {
+        adjustments.repairBrush ?? RepairBrushSettings()
+    }
+
+    var repairBrushIsActive: Bool {
+        adjustments.repairBrush.map { !$0.isNeutral } ?? false
+    }
+
+    var canDrawRepairBrush: Bool {
+        !batchRunning && afterImage != nil && selectedPhoto != nil
+    }
+
+    var repairStatusNote: String {
+        if batchRunning { return "批处理进行中，修复画笔暂不可用。" }
+        if afterImage == nil { return "打开照片后可手动修补/仿制；画笔只改预览与导出像素，不改原图。" }
+        let strokes = repairBrushSettings.strokes
+        guard !strokes.isEmpty else {
+            return "尚未添加修复笔迹：heal 为启发式局部修补（非生成式），clone 原样复制来源像素。"
+        }
+        let heal = strokes.filter { $0.mode == .heal }.count
+        return "共 \(strokes.count) 笔（修补 \(heal) · 仿制 \(strokes.count - heal)）；每笔可整体撤销。"
+    }
+
+    /// Applies one repair-brush edit. An empty stroke list collapses back to `nil`
+    /// so recipes without manual repair keep the exact pre-v12 payload.
+    func updateRepairBrushSettings(_ mutate: (inout RepairBrushSettings) -> Void) {
+        var settings = adjustments.repairBrush ?? RepairBrushSettings()
+        mutate(&settings)
+        adjustments.repairBrush = settings.isNeutral ? nil : settings
+    }
+
+    func toggleRepairBrush() {
+        guard canDrawRepairBrush || repairBrushActive else {
+            status = "当前没有可编辑的照片，无法进入修复画笔。"
+            return
+        }
+        if repairBrushActive {
+            cancelRepairStroke()
+            repairBrushActive = false
+            repairSamplingCloneSource = false
+            status = "已退出修复画笔。"
+        } else {
+            cancelMaskInteraction()
+            selectedMask = nil
+            cancelLiquifyStroke()
+            liquifyBrushActive = false
+            repairBrushActive = true
+            repairSamplingCloneSource = repairBrushMode == .clone && repairCloneSource == nil
+            status = repairBrushMode == .heal
+                ? "修复画笔已开启（启发式修补，非生成式）：在画布拖动涂抹，松开后应用 1 笔，⌘Z 可撤销整笔。"
+                : "仿制画笔已开启：先设置来源点，再拖动涂抹；松开后应用 1 笔，⌘Z 可撤销整笔。"
+        }
+    }
+
+    func setRepairBrushMode(_ mode: RepairBrushMode) {
+        repairBrushMode = mode
+        repairSamplingCloneSource = mode == .clone && repairCloneSource == nil
+        status = mode == .heal
+            ? "修复画笔：拖动涂抹需要修补的区域。"
+            : "仿制画笔：点击「设置仿制来源」后在画布选择来源点，再拖动涂抹。"
+    }
+
+    func beginRepairSamplingCloneSource() {
+        guard canDrawRepairBrush else {
+            status = "当前没有可编辑的照片，无法设置仿制来源。"
+            return
+        }
+        if liquifyBrushActive {
+            cancelLiquifyStroke()
+            liquifyBrushActive = false
+        }
+        cancelMaskInteraction()
+        repairBrushActive = true
+        repairSamplingCloneSource = true
+        status = "点击画布选择仿制来源点（之后的笔迹会从该点偏移复制）；Esc 可退出画笔。"
+    }
+
+    func sampleRepairCloneSource(at point: MaskPoint) {
+        guard repairSamplingCloneSource else { return }
+        guard point.x.isFinite, point.y.isFinite,
+              (0...1).contains(point.x), (0...1).contains(point.y) else { return }
+        let formattedX = String(format: "%.2f", point.x)
+        let formattedY = String(format: "%.2f", point.y)
+        repairCloneSource = point
+        repairSamplingCloneSource = false
+        status = "仿制来源已设为 (\(formattedX), \(formattedY))；拖动涂抹即可复制。"
+    }
+
+    func beginRepairStroke(at point: MaskPoint) {
+        guard repairBrushActive, canDrawRepairBrush, !repairStrokeInProgress else { return }
+        if repairSamplingCloneSource {
+            sampleRepairCloneSource(at: point)
+            return
+        }
+        guard point.x.isFinite, point.y.isFinite,
+              (0...1).contains(point.x), (0...1).contains(point.y) else { return }
+        if repairBrushMode == .clone, repairCloneSource == nil {
+            status = "仿制画笔需要先设置来源点：点击「设置仿制来源」后在画布选择。"
+            return
+        }
+        var stroke = RepairStroke(mode: repairBrushMode,
+                                  points: [point],
+                                  radius: min(0.5, max(0.0005, repairBrushRadius)),
+                                  feather: min(1, max(0, repairBrushFeather)),
+                                  strength: min(1, max(0, repairBrushStrength)))
+        if repairBrushMode == .clone, let source = repairCloneSource {
+            stroke.cloneOffset = MaskPoint(x: source.x - point.x, y: source.y - point.y)
+        }
+        repairDraftStroke = stroke
+        repairStrokeLastPoint = point
+        repairStrokeUndoBase = currentUndoSnapshot
+        repairStrokeInProgress = true
+    }
+
+    func extendRepairStroke(to point: MaskPoint) {
+        guard repairStrokeInProgress, var stroke = repairDraftStroke else { return }
+        guard point.x.isFinite, point.y.isFinite,
+              (0...1).contains(point.x), (0...1).contains(point.y) else { return }
+        if let last = repairStrokeLastPoint {
+            let dx = point.x - last.x
+            let dy = point.y - last.y
+            guard (dx * dx + dy * dy).squareRoot() >= 0.002 else { return }
+        }
+        guard stroke.points.count < RepairBrushEngine.maximumPointsPerStroke else { return }
+        stroke.points.append(point)
+        repairDraftStroke = stroke
+        repairStrokeLastPoint = point
+    }
+
+    /// Commits the draft stroke as one undoable edit and lets ContentView's single
+    /// debounced preview request render it. A single click is a valid one-point heal.
+    func endRepairStroke() {
+        guard repairStrokeInProgress else { return }
+        repairStrokeInProgress = false
+        defer {
+            repairDraftStroke = nil
+            repairStrokeLastPoint = nil
+            repairStrokeUndoBase = nil
+        }
+        guard let stroke = repairDraftStroke, !stroke.points.isEmpty else { return }
+        undoSuppressed = true
+        var settings = adjustments.repairBrush ?? RepairBrushSettings()
+        settings.strokes.append(stroke)
+        adjustments.repairBrush = settings.isNeutral ? nil : settings
+        undoSuppressed = false
+        if let base = repairStrokeUndoBase {
+            let now = Date()
+            let after = currentUndoSnapshot
+            if after != base {
+                seedUndoBaseline(base, at: now)
+                undoHistory.push(after, key: "repair.stroke", at: now)
+                refreshUndoAvailability()
+            }
+        }
+        let modeTitle = stroke.mode == .heal ? "修补" : "仿制"
+        status = "已添加 1 笔\(modeTitle)笔迹（共 \(repairBrushSettings.strokes.count) 笔）；⌘Z 可撤销整笔。"
+    }
+
+    func cancelRepairStroke() {
+        repairStrokeInProgress = false
+        repairDraftStroke = nil
+        repairStrokeLastPoint = nil
+        repairStrokeUndoBase = nil
+        repairSamplingCloneSource = false
+    }
+
+    func removeLastRepairStroke() {
+        guard var settings = adjustments.repairBrush, !settings.strokes.isEmpty else { return }
+        settings.strokes.removeLast()
+        adjustments.repairBrush = settings.isNeutral ? nil : settings
+        status = settings.isNeutral
+            ? "已删除最后一笔修复笔迹；配方回到 v1–v11 兼容路径。"
+            : "已删除最后一笔修复笔迹。"
+    }
+
+    func clearRepairStrokes() {
+        guard let settings = adjustments.repairBrush, !settings.strokes.isEmpty else { return }
+        let base = currentUndoSnapshot
+        undoSuppressed = true
+        adjustments.repairBrush = nil
+        undoSuppressed = false
+        let now = Date()
+        let after = currentUndoSnapshot
+        if after != base {
+            seedUndoBaseline(base, at: now)
+            undoHistory.push(after, key: "repair.clear", at: now)
+            refreshUndoAvailability()
+        }
+        status = "已清除全部修复笔迹（配方回到 v1–v11 兼容路径）。"
     }
 
     // MARK: Portrait refinement

@@ -82,9 +82,14 @@ struct PortraitRetouchPanel: View {
             liquifySection
 
             separator
-            Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸、或皮肤蒙版覆盖不足（低于 \(String(format: "%.2f", AppModel.portraitMinimumSkinCoverage * 100))%% 画面）时整段跳过且不改像素，控件保持禁用。效果不保证，请逐张预览。")
-                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
+            repairSection
+
+            Group {
+                separator
+                Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸、或皮肤蒙版覆盖不足（低于 \(String(format: "%.2f", AppModel.portraitMinimumSkinCoverage * 100))%% 画面）时整段跳过且不改像素，控件保持禁用。效果不保证，请逐张预览。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                    .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
+            }
         }
         .onAppear { model.requestPortraitDetection(force: false) }
     }
@@ -231,6 +236,98 @@ struct PortraitRetouchPanel: View {
                 }
             }
         }
+    }
+
+    /// P1-B manual repair / clone brush. Heuristic and non-generative: heal paints
+    /// a low-frequency + nearby-donor patch, clone copies the offset source. It is
+    /// a v12 recipe field; an empty stroke list keeps the pre-v12 pixel path.
+    private var repairSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Label("修复 / 仿制画笔 v1", systemImage: "bandage")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.9))
+            Text("手动指定涂抹区域：修补（heal）用低频与邻近纹理做启发式填充，非生成式、不重建结构；仿制（clone）按偏移原样复制来源像素。画笔只改预览与导出像素，不改原图；无笔迹时配方保持 v1–v11 兼容。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+            HStack(spacing: 8) {
+                Button(model.repairBrushActive ? "关闭修复画笔" : "修复画笔") {
+                    model.toggleRepairBrush()
+                }
+                .font(.system(size: 10)).buttonStyle(.bordered)
+                .disabled(!model.canDrawRepairBrush && !model.repairBrushActive)
+                if model.repairBrushIsActive {
+                    Text("\(model.repairBrushSettings.strokes.count) 笔")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(AtelierPalette.muted)
+                    Button("撤销一笔") { model.removeLastRepairStroke() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                        .disabled(model.batchRunning)
+                    Button("清空") { model.clearRepairStrokes() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.muted)
+                        .disabled(model.batchRunning)
+                }
+                Spacer(minLength: 0)
+            }.padding(.top, 10)
+            Text(model.repairStatusNote)
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+            if model.repairBrushActive {
+                VStack(alignment: .leading, spacing: 0) {
+                    Picker("模式", selection: repairModeBinding) {
+                        ForEach(RepairBrushMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }.pickerStyle(.segmented).font(.system(size: 10)).padding(.top, 10)
+                    if model.repairBrushMode == .clone {
+                        HStack(spacing: 6) {
+                            Button(model.repairSamplingCloneSource ? "点击画布选择来源…" : "设置仿制来源") {
+                                model.beginRepairSamplingCloneSource()
+                            }
+                            .font(.system(size: 9)).buttonStyle(.plain)
+                            .foregroundColor(AtelierPalette.accent)
+                            if let source = model.repairCloneSource {
+                                Text("来源 \(String(format: "%.2f", source.x)), \(String(format: "%.2f", source.y))")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(AtelierPalette.muted)
+                            }
+                            Spacer(minLength: 0)
+                        }.padding(.top, 8)
+                    }
+                    AdjustmentSlider(title: "画笔半径", value: repairRadiusBinding,
+                                     range: 0.002...0.3, percent: true).padding(.top, 10)
+                    AdjustmentSlider(title: "羽化", value: repairFeatherBinding,
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "强度", value: repairStrengthBinding,
+                                     range: 0...1, percent: true)
+                    Text("每笔松开后应用一次预览并生成一个撤销步骤（⌘Z 撤销整笔）；Esc 退出画笔。无笔迹时预览与旧配方像素完全一致。")
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        .lineSpacing(3).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                }
+            }
+        }
+    }
+
+    private var repairModeBinding: Binding<RepairBrushMode> {
+        Binding(get: { model.repairBrushMode }, set: { model.setRepairBrushMode($0) })
+    }
+
+    private var repairRadiusBinding: Binding<Double> {
+        Binding(get: { model.repairBrushRadius },
+                set: { model.repairBrushRadius = min(0.3, max(0.002, $0)) })
+    }
+
+    private var repairFeatherBinding: Binding<Double> {
+        Binding(get: { model.repairBrushFeather },
+                set: { model.repairBrushFeather = min(1, max(0, $0)) })
+    }
+
+    private var repairStrengthBinding: Binding<Double> {
+        Binding(get: { model.repairBrushStrength },
+                set: { model.repairBrushStrength = min(1, max(0, $0)) })
     }
 
     private var liquifyPresetBinding: Binding<FaceShapePreset> {
