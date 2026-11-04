@@ -24,7 +24,9 @@ public enum WarpFalloff: String, Codable, CaseIterable {
 /// A manual liquify stroke in normalized image coordinates (bottom-left origin).
 ///
 /// The stroke is a polyline of `points`; `radius` is the brush radius as a
-/// fraction of the shorter image edge and `strength` is `0...1`. Modes:
+/// fraction of **each image axis**, so the footprint is an ellipse with pixel
+/// radii `(radius × imageWidth, radius × imageHeight)` (radiusX = radiusY =
+/// normalized `radius`); `strength` is `0...1`. Modes:
 /// - `push`: drag content along the stroke direction;
 /// - `rebuild`: locally remove warp and return toward the original pixels;
 /// - `smooth`: locally blend the displacement field toward its smoothed version.
@@ -44,7 +46,10 @@ public struct WarpStroke: Codable, Equatable {
     public var id: UUID
     public var mode: Mode
     public var points: [MaskPoint]
-    /// Brush radius as a fraction of the shorter image edge.
+    /// Brush radius as a fraction of each image axis. The rasterized footprint is
+    /// an ellipse: pixel radiusX = `radius × image width`, pixel radiusY =
+    /// `radius × image height` (not a short-edge circle). The canvas overlay uses
+    /// the same ellipse (`LiquifyBrushGeometry`).
     public var radius: Double
     /// `0...1` stroke strength.
     public var strength: Double
