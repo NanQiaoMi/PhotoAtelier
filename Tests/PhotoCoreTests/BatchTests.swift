@@ -882,6 +882,31 @@ final class BatchTests: XCTestCase {
 
     // MARK: - P1-C C6 parallel batch integration
 
+    /// F5: `BatchSummary` gained `skipped`; older JSON without that key must still
+    /// decode (as zero) so persisted/old summary consumers keep working.
+    func testBatchSummaryDecodesLegacyJSONWithoutSkipped() throws {
+        let legacyJSON = """
+        {"succeeded": 2, "failed": 1, "cancelled": false}
+        """
+        let decoded = try JSONDecoder().decode(BatchSummary.self,
+                                               from: Data(legacyJSON.utf8))
+        XCTAssertEqual(decoded.succeeded, 2)
+        XCTAssertEqual(decoded.failed, 1)
+        XCTAssertFalse(decoded.cancelled)
+        XCTAssertEqual(decoded.skipped, 0, "旧 JSON 缺 skipped 必须解码为 0")
+        XCTAssertNil(decoded.manifestURL)
+
+        let current = BatchSummary(succeeded: 3, failed: 0, cancelled: false,
+                                   manifestURL: URL(fileURLWithPath: "/tmp/batch-x.json"),
+                                   skipped: 4)
+        let roundTrip = try JSONDecoder().decode(BatchSummary.self,
+                                                 from: try JSONEncoder().encode(current))
+        XCTAssertEqual(roundTrip.succeeded, current.succeeded)
+        XCTAssertEqual(roundTrip.skipped, current.skipped)
+        XCTAssertEqual(roundTrip.manifestURL, current.manifestURL)
+        XCTAssertEqual(roundTrip.cancelled, current.cancelled)
+    }
+
     func testParallelAndSerialBatchExportsAreByteIdenticalAndKeepManifestOrder() throws {
         let temp = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: temp) }

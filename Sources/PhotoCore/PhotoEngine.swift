@@ -361,6 +361,11 @@ public final class PhotoEngine {
                         preparedLUTContext: LUTSemanticContext? = nil,
                         preparedPersonMatte: PersonMatte? = nil,
                         preparedCertificateFaceBox: CGRect? = nil,
+                        /// Optional pre-computed face landmarks for the make-up stage.
+                        /// Pass to skip this engine's own Vision detection (tests or
+                        /// advanced callers that already detected faces); `nil` reuses
+                        /// the landmarks detected for portrait/reference-color, or runs
+                        /// one detection when make-up is the only face-aware stage.
                         preparedMakeupFaces: [FaceLandmarkSet]? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
@@ -455,9 +460,9 @@ public final class PhotoEngine {
         let referenceColor = settings.referenceColor
         let referenceColorActive = referenceColor.map { !$0.isNeutral } ?? false
         let makeupActive = settings.makeup.map { !$0.isNeutral } ?? false
-        let needsFaceMasks = portraitActive
+        let needsPortraitMasks = portraitActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-            || makeupActive
+        let needsFaceMasks = needsPortraitMasks || makeupActive
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
@@ -470,11 +475,15 @@ public final class PhotoEngine {
         } else {
             detectedFaces = []
         }
-        let preparedFaceMasks = detectedFaces.prefix(4).map { landmarks in
-            FaceSemanticAnalyzer.masks(image: working,
-                                       faceBounds: landmarks.boundingBox,
-                                       landmarks: landmarks)
-        }.filter { !$0.isEmpty }
+        // Only portrait/refcolor consume masks: a make-up-only photo detects faces
+        // for the make-up stage but must not pay for four unused semantic mats.
+        let preparedFaceMasks = needsPortraitMasks
+            ? detectedFaces.prefix(4).map { landmarks in
+                FaceSemanticAnalyzer.masks(image: working,
+                                           faceBounds: landmarks.boundingBox,
+                                           landmarks: landmarks)
+            }.filter { !$0.isEmpty }
+            : []
         let preparedLandmarks = detectedFaces
         if let portrait = settings.portrait, portraitActive {
             let faces = preparedFaceMasks
@@ -519,11 +528,23 @@ public final class PhotoEngine {
                 do {
                     let madeUp = try MakeupEngine.apply(to: working, faces: faces,
                                                         settings: makeup)
-                    if renderedDifference(working, madeUp) > 0.0001 {
+                    let strength = max(max(makeup.lipIntensity, makeup.browDensity),
+                                       max(makeup.cheekIntensity, makeup.eyeshadowIntensity))
+                    // Below ~5% strength a 48px probe cannot reliably distinguish a
+                    // real (tiny) change from a mask miss, so keep the stage recorded
+                    // as applied instead of false-reporting "mask not hit".
+                    let difference = renderedDifference(working, madeUp)
+                    let threshold = max(Float(0.000001), Float(0.0001 * strength))
+                    if difference > threshold {
                         working = madeUp
                         report.makeup = MakeupReport(applied: true, faceCount: faces.count)
+                    } else if strength < 0.05 {
+                        working = madeUp
+                        report.makeup = MakeupReport(
+                            applied: true, faceCount: faces.count,
+                            note: "妆容强度极低（\(String(format: "%.3f", strength))），未检测到可测量的像素变化。")
                     } else {
-                        let note = "检测到人脸但妆容掩码未命中有效区域（启发式蒙版为空/过小），该段未改变像素。"
+                        let note = "检测到人脸但妆容掩码未命中有效区域（启发式蒙版为空/过小或强度极低），该段未改变像素。"
                         working = madeUp
                         report.makeup = MakeupReport(applied: false, faceCount: faces.count,
                                                      note: note)

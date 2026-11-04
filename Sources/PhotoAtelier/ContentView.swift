@@ -229,8 +229,9 @@ struct ContentView: View {
         }.padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 2)
     }
 
-    /// Preview-toolbar rating controls (keyboard shortcuts 1–5 / X). They edit
-    /// session culling state only.
+    /// Preview-toolbar rating controls (keyboard shortcuts Option+1–5 / Option+X,
+    /// deliberately modified so plain digits/x still type into text fields). They
+    /// edit session culling state only.
     private var ratingControls: some View {
         HStack(spacing: 4) {
             Rectangle().fill(AtelierPalette.line).frame(width: 1, height: 12)
@@ -243,9 +244,9 @@ struct ContentView: View {
                         .foregroundColor((model.selectedPhoto?.rating ?? 0) >= star
                                          ? .yellow.opacity(0.9) : AtelierPalette.muted)
                 }.buttonStyle(.plain)
-                    .keyboardShortcut(KeyEquivalent(Character("\(star)")), modifiers: [])
+                    .keyboardShortcut(KeyEquivalent(Character("\(star)")), modifiers: [.option])
                     .disabled(model.selectedPhoto == nil)
-                    .help("\(star) 星（快捷键 \(star)；会话状态，不写配方）")
+                    .help("\(star) 星（快捷键 Option+\(star)；会话状态，不写配方）")
             }
             Button {
                 model.toggleSelectedRejection()
@@ -256,9 +257,9 @@ struct ContentView: View {
                     .foregroundColor(model.selectedPhoto?.isRejected == true
                                      ? .red.opacity(0.9) : AtelierPalette.muted)
             }.buttonStyle(.plain)
-                .keyboardShortcut("x", modifiers: [])
+                .keyboardShortcut("x", modifiers: [.option])
                 .disabled(model.selectedPhoto == nil)
-                .help("切换废片标记（快捷键 X；导出可跳过废片）")
+                .help("切换废片标记（快捷键 Option+X；导出可跳过废片）")
         }
     }
 

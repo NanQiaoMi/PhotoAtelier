@@ -1154,7 +1154,7 @@ final class AppModel: ObservableObject {
     /// Runs the heuristic culling analysis in the background. Results are applied
     /// on the main thread; manual ratings/rejections are never overwritten.
     func runAutoCull() {
-        guard !batchRunning, !autoCullBusy, !photos.isEmpty else { return }
+        guard !batchRunning, !autoCullBusy, !photos.isEmpty, !scanning else { return }
         let token = CancellationToken()
         autoCullToken = token
         autoCullBusy = true
@@ -1177,7 +1177,12 @@ final class AppModel: ObservableObject {
                     unreadable += 1
                 }
                 let progress = Double(offset + 1) / Double(items.count)
-                DispatchQueue.main.async { self?.autoCullProgress = progress }
+                DispatchQueue.main.async { [weak self] in
+                    // A library transition nils the token; do not let a stale
+                    // in-flight loop write progress over a newer library/session.
+                    guard let self = self, self.autoCullToken === token else { return }
+                    self.autoCullProgress = progress
+                }
             }
             DispatchQueue.main.async {
                 // A library transition nils the token: never apply stale results

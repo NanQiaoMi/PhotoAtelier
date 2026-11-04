@@ -249,16 +249,27 @@ final class PhotoSelectionTests: XCTestCase {
         let aiReject = photo("ai-reject.png", quality: quality(.reject))
         let manualWaste = photo("waste.png", rating: 1, rejected: true)
         let starred = photo("star.png", rating: 5)
+        let starredWaste = photo("star-waste.png", rating: 5, rejected: true)
+        // Auto-cull rated it keep, then the user manually marked it as waste.
+        let autoKeepThenWaste = photo("auto-keep-waste.png", rating: 5, rejected: true,
+                                      quality: quality(.keep))
         let unrated = photo("unrated.png")
-        let all = [keep, review, aiReject, manualWaste, starred, unrated]
+        let all = [keep, review, aiReject, manualWaste, starred, starredWaste,
+                   autoKeepThenWaste, unrated]
 
-        XCTAssertEqual(PhotoSelection.filtered(all, filter: .all).count, 6)
+        XCTAssertEqual(PhotoSelection.filtered(all, filter: .all).count, 8)
         XCTAssertEqual(PhotoSelection.filtered(all, filter: .recommended).map(\.relativePath),
                        ["keep.png", "star.png"],
-                       "推荐=启发式 keep 或手动 4-5 星")
+                       "推荐=启发式 keep 或手动 4-5 星；已标废片的照片不得出现在推荐里（无论评级或 report）")
         XCTAssertEqual(PhotoSelection.filtered(all, filter: .kept).count, 5)
         XCTAssertEqual(PhotoSelection.filtered(all, filter: .rejected).map(\.relativePath),
-                       ["waste.png"])
+                       ["waste.png", "star-waste.png", "auto-keep-waste.png"],
+                       "5★/keep report 但已标废片的照片只能出现在废片筛选")
+        XCTAssertFalse(PhotoCullFilter.recommended.matches(starredWaste),
+                       "recommended 必须排除 isRejected（纯手动 5★ 废片）")
+        XCTAssertFalse(PhotoCullFilter.recommended.matches(autoKeepThenWaste),
+                       "recommended 必须排除 isRejected（自动 keep + 手动废片）")
+        XCTAssertTrue(PhotoCullFilter.rejected.matches(autoKeepThenWaste))
     }
 
     func testExportSelectionOptionsSkipLogic() {

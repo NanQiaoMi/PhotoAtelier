@@ -265,6 +265,10 @@ public enum PhotoCullFilter: String, Codable, CaseIterable, Identifiable, Equata
         case .all:
             return true
         case .recommended:
+            // An explicit waste mark always wins: a photo auto-rated keep (or a
+            // manual 4–5 star one) that the user later marked as waste must only
+            // appear under the rejected filter.
+            guard !item.isRejected else { return false }
             return item.qualityRecommendation == .keep || item.rating >= 4
         case .kept:
             return !item.isRejected
