@@ -298,7 +298,7 @@ struct PortraitRetouchPanel: View {
                         }.padding(.top, 8)
                     }
                     AdjustmentSlider(title: "画笔半径", value: repairRadiusBinding,
-                                     range: 0.002...0.3, percent: true).padding(.top, 10)
+                                     range: AppModel.repairBrushRadiusRange, percent: true).padding(.top, 10)
                     AdjustmentSlider(title: "羽化", value: repairFeatherBinding,
                                      range: 0...1, percent: true)
                     AdjustmentSlider(title: "强度", value: repairStrengthBinding,
@@ -317,7 +317,7 @@ struct PortraitRetouchPanel: View {
 
     private var repairRadiusBinding: Binding<Double> {
         Binding(get: { model.repairBrushRadius },
-                set: { model.repairBrushRadius = min(0.3, max(0.002, $0)) })
+                set: { model.repairBrushRadius = AppModel.clampedRepairBrushRadius($0) })
     }
 
     private var repairFeatherBinding: Binding<Double> {

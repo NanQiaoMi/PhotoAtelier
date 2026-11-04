@@ -1022,6 +1022,38 @@ final class PortraitRetouchTests: XCTestCase {
                              "若在 sRGB 编码空间混合会得到 \(srgbMix)，与线性工作空间明显不同")
     }
 
+    /// S4: the panel slider/clamp range (app target, not unit-testable here) must
+    /// stay aligned with the engine-accepted radius bounds; pin those bounds and
+    /// make sure both extremes are usable in the real pipeline.
+    func testRepairBrushRadiusBoundsMatchEngineContract() throws {
+        for radius in [0.0005, 0.001, 0.06, 0.25, 0.5] {
+            XCTAssertNoThrow(try RepairStroke(mode: .heal,
+                                              points: [MaskPoint(x: 0.5, y: 0.5)],
+                                              radius: radius).validate(),
+                             "radius \(radius) must be accepted by the engine contract")
+        }
+        for radius in [0.000_499, 0.500_001, 0.0, -0.1, .nan, .infinity] {
+            XCTAssertThrowsError(try RepairStroke(mode: .heal,
+                                                  points: [MaskPoint(x: 0.5, y: 0.5)],
+                                                  radius: radius).validate(),
+                                 "radius \(radius) must be rejected by the engine contract")
+        }
+        // Both extremes run through the real pipeline without error and keep extent.
+        let source = makeImage(width: 64, height: 48) { column, row in
+            let x = Float(column) / 63, y = Float(row) / 47
+            return (0.2 + 0.5 * x, 0.25 + 0.4 * y, 0.3 + 0.3 * x, 1)
+        }
+        for radius in [0.0005, 0.5] {
+            var settings = AdjustmentSettings()
+            settings.repairBrush = RepairBrushSettings(strokes: [
+                RepairStroke(mode: .heal, points: [MaskPoint(x: 0.5, y: 0.5)], radius: radius)
+            ])
+            let output = try PhotoEngine().process(source, settings: settings, lut: nil)
+            XCTAssertEqual(output.image.extent, source.extent)
+            XCTAssertEqual(output.report.repairBrush?.strokeCount, 1)
+        }
+    }
+
     func testBatchManifestRecordsPerPhotoRepairBrushStatus() throws {
         let temp = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: temp) }

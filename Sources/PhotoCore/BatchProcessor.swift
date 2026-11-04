@@ -42,12 +42,25 @@ public final class BatchProcessor {
 
         let runID = UUID().uuidString.lowercased()
         let manifestURL = output.appendingPathComponent("batch-\(runID).json", isDirectory: false)
+        // Export-level effective settings must be known before the manifest is
+        // created: the watermark stage changes the delivery previews, and the
+        // manifest must record the settings that actually produced the artefacts
+        // (never the raw recipe value that was overridden at runtime).
+        let watermarkActive = WatermarkRenderer.shouldApply(recipe.export.watermark)
+        var effectiveDeliverySettings = recipe.export.deliveryPage
+        if watermarkActive, effectiveDeliverySettings != nil {
+            // The primary exported file contains the watermark, so the previews
+            // shown to the client are watermarked too; keep the honest notice.
+            effectiveDeliverySettings?.watermarkedPreviews = true
+        }
+        var effectiveExportSettings = recipe.export
+        effectiveExportSettings.deliveryPage = effectiveDeliverySettings
         var manifest = BatchManifest(
             version: 4,
             runID: runID,
             createdAt: ISO8601DateFormatter().string(from: Date()),
             recipe: recipe,
-            exportSummary: describeExportSettings(recipe.export),
+            exportSummary: describeExportSettings(effectiveExportSettings),
             warnings: recipe.lutPath == nil && recipe.lutIdentifier == nil && lut != nil
                 ? ["当前配方未记录 LUT 路径或内置标识符，快照不能独立重放。"] : [],
             cancelled: false,
@@ -66,7 +79,6 @@ public final class BatchProcessor {
         // Watermark is an export-level stage: PhotoExporter applies it from
         // `recipe.export.watermark`. "Dual version" additionally writes a clean
         // copy of every photo, so a delivery can ship both variants in one run.
-        let watermarkActive = WatermarkRenderer.shouldApply(recipe.export.watermark)
         let dualWatermark = recipe.export.exportsDualWatermarkVersion
         var cleanExportSettings = recipe.export
         cleanExportSettings.watermark = nil
@@ -75,12 +87,6 @@ public final class BatchProcessor {
         // exported files (already colour-managed and metadata-stripped), so an
         // album never holds full-resolution CI graphs in memory. The delivery
         // settings themselves are validated before the output directory exists.
-        var effectiveDeliverySettings = recipe.export.deliveryPage
-        if watermarkActive, effectiveDeliverySettings != nil {
-            // The primary exported file contains the watermark, so the previews
-            // shown to the client are watermarked too; keep the honest notice.
-            effectiveDeliverySettings?.watermarkedPreviews = true
-        }
         var deliveredFileURLs: [URL] = []
 
         for (offset, item) in items.enumerated() {
@@ -233,15 +239,29 @@ public final class BatchProcessor {
                 manifest.warnings.append("客户交付页未生成：本次没有成功导出的照片。")
             } else {
                 do {
-                    let directory = try uniqueDirectoryURL(named: "delivery", under: output)
-                    let result = try DeliveryGalleryWriter.write(fileURLs: deliveredFileURLs,
-                                                                 settings: deliverySettings,
-                                                                 outputDirectory: directory,
-                                                                 context: engine.context)
+                    // Generate inside a hidden temporary directory and only install
+                    // it under its final `delivery[-N]` name once every artefact is
+                    // complete; a failure removes the temporary folder and never
+                    // leaves a half-written delivery behind.
+                    let installed = try DeliveryDirectoryInstaller.install(under: output,
+                                                                          baseName: "delivery") { temporaryDirectory in
+                        try DeliveryGalleryWriter.write(fileURLs: deliveredFileURLs,
+                                                        settings: deliverySettings,
+                                                        outputDirectory: temporaryDirectory,
+                                                        context: engine.context)
+                    }
+                    let directory = installed.directory
+                    let result = installed.value
+                    // `result` still points at the temporary directory that was
+                    // renamed away; re-base its top-level artefacts on the final
+                    // directory (writer puts index.html/contact-sheet.pdf there).
+                    let htmlURL = directory.appendingPathComponent(result.indexHTMLURL.lastPathComponent)
+                    let contactSheetURL = result.contactSheetURL
+                        .map { directory.appendingPathComponent($0.lastPathComponent) }
                     manifest.deliveryPage = BatchDeliveryPageRecord(
                         directory: relativePath(of: directory, under: output) ?? directory.lastPathComponent,
-                        html: relativePath(of: result.indexHTMLURL, under: output) ?? result.indexHTMLURL.lastPathComponent,
-                        contactSheet: result.contactSheetURL.flatMap { relativePath(of: $0, under: output) },
+                        html: relativePath(of: htmlURL, under: output) ?? htmlURL.lastPathComponent,
+                        contactSheet: contactSheetURL.flatMap { relativePath(of: $0, under: output) },
                         photoCount: result.photoCount,
                         settings: deliverySettings
                     )
@@ -452,17 +472,55 @@ private func describeExportSettings(_ settings: ExportSettings) -> [String] {
     return summary
 }
 
-/// Creates a new, never-overwriting delivery-page directory under the output
-/// root. Uses the same symlink/path safety checks as per-photo output folders.
-private func uniqueDirectoryURL(named baseName: String, under root: URL) throws -> URL {
-    for index in 1...10_000 {
-        let name = index == 1 ? baseName : "\(baseName)-\(index)"
-        let candidate = root.appendingPathComponent(name, isDirectory: true)
-        guard !pathEntryExists(candidate) else { continue }
-        try ensureSafeDirectory(candidate, under: root)
-        return candidate
+/// Generates a whole-run artefact directory atomically.
+///
+/// `body` writes into a hidden temporary directory under `root`; only when it
+/// returns successfully is that directory renamed to an unoccupied
+/// `baseName[-N]` name with `RENAME_EXCL`. Any failure removes the temporary
+/// directory, so a failed delivery generation cannot leave a partial folder
+/// behind (and the already exported per-photo files are never touched).
+enum DeliveryDirectoryInstaller {
+    static func install<T>(under root: URL,
+                           baseName: String,
+                           body: (URL) throws -> T) throws -> (directory: URL, value: T) {
+        let fileManager = FileManager.default
+        let temporary = root.appendingPathComponent(
+            ".\(baseName)-\(UUID().uuidString.lowercased()).tmp",
+            isDirectory: true
+        )
+        do {
+            try fileManager.createDirectory(at: temporary, withIntermediateDirectories: false)
+        } catch {
+            throw AtelierError.imageWrite("无法创建交付页临时目录：\(error.localizedDescription)")
+        }
+        do {
+            let value = try body(temporary)
+            let directory = try installTemporary(temporary, under: root, baseName: baseName)
+            return (directory, value)
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
     }
-    throw AtelierError.imageWrite("无法找到未占用的交付页目录名")
+
+    private static func installTemporary(_ temporary: URL,
+                                         under root: URL,
+                                         baseName: String) throws -> URL {
+        for index in 1...10_000 {
+            let name = index == 1 ? baseName : "\(baseName)-\(index)"
+            let target = root.appendingPathComponent(name, isDirectory: true)
+            guard !pathEntryExists(target) else { continue }
+            let result = temporary.path.withCString { sourcePath in
+                target.path.withCString { destinationPath in
+                    Darwin.renamex_np(sourcePath, destinationPath, UInt32(RENAME_EXCL))
+                }
+            }
+            if result == 0 { return target }
+            if errno == EEXIST { continue }
+            throw AtelierError.imageWrite("无法安装客户交付页目录：\(String(cString: strerror(errno)))")
+        }
+        throw AtelierError.imageWrite("无法找到未占用的交付页目录名")
+    }
 }
 
 /// Base URL for the watermark-free copy of the dual-version batch switch.

@@ -657,6 +657,90 @@ final class BatchTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: v11Output.path))
     }
 
+    // MARK: - S5 delivery directory install contract
+
+    func testDeliveryDirectoryInstallerIsAtomicAndCleansUpOnFailure() throws {
+        let root = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        let first = try DeliveryDirectoryInstaller.install(under: output, baseName: "delivery") { temporary in
+            try "hello".write(to: temporary.appendingPathComponent("index.html"),
+                              atomically: true, encoding: .utf8)
+        }
+        XCTAssertEqual(first.directory.lastPathComponent, "delivery")
+        XCTAssertEqual(try String(contentsOf: first.directory.appendingPathComponent("index.html"),
+                                  encoding: .utf8), "hello")
+
+        let second = try DeliveryDirectoryInstaller.install(under: output, baseName: "delivery") { temporary in
+            try "second".write(to: temporary.appendingPathComponent("index.html"),
+                               atomically: true, encoding: .utf8)
+        }
+        XCTAssertEqual(second.directory.lastPathComponent, "delivery-2", "已存在的交付目录不得被覆盖")
+
+        struct InstallFailure: Error {}
+        XCTAssertThrowsError(try DeliveryDirectoryInstaller.install(under: output, baseName: "delivery") { temporary in
+            try "partial".write(to: temporary.appendingPathComponent("partial.html"),
+                                atomically: true, encoding: .utf8)
+            throw InstallFailure()
+        }, "body 失败必须向上抛错") { error in
+            XCTAssertTrue(error is InstallFailure)
+        }
+        let entries = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
+            .map(\.lastPathComponent).sorted()
+        XCTAssertEqual(entries, ["delivery", "delivery-2"],
+                       "失败后不得残留半成品 delivery 目录或 .delivery-*.tmp 临时目录")
+        XCTAssertEqual(try String(contentsOf: first.directory.appendingPathComponent("index.html"),
+                                  encoding: .utf8), "hello",
+                       "失败的安装不得改动先前成功的交付目录")
+    }
+
+    func testBatchDeliveryPageSummaryUsesEffectiveWatermarkedPreviewSettings() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("one.png"), width: 64, height: 48)
+
+        var export = ExportSettings()
+        export.format = .png
+        export.watermark = WatermarkSettings(text: "WM", anchor: .bottomRight, opacity: 1, scale: 2)
+        var delivery = DeliverySettings()
+        delivery.title = "客户交付"
+        delivery.columnCount = 2
+        delivery.thumbnailMaxDimension = 320
+        delivery.previewMaxDimension = 640
+        delivery.watermarkedPreviews = false
+        export.deliveryPage = delivery
+        var recipe = Recipe(export: export)
+        recipe.version = 12
+
+        let summary = try BatchProcessor().run(
+            items: PhotoLoader.scan(folder: input, recursive: false),
+            inputRoot: input, outputRoot: output, recipe: recipe, lut: nil,
+            cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        let manifest = try manifestObject(summary)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("deliveryWatermarkedPreviews=true"),
+                      "summary 必须记录生效后的水印提示：\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("watermark=text"), "\(exportSummary)")
+
+        let record = try XCTUnwrap(manifest["deliveryPage"] as? [String: Any])
+        let recordedSettings = try XCTUnwrap(record["settings"] as? [String: Any])
+        XCTAssertEqual(recordedSettings["watermarkedPreviews"] as? Bool, true,
+                       "manifest 记录的生效设置必须与 summary 一致（预览图实际带水印）")
+        let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        let recipeExport = try XCTUnwrap(manifestRecipe["export"] as? [String: Any])
+        let rawDelivery = try XCTUnwrap(recipeExport["deliveryPage"] as? [String: Any])
+        XCTAssertEqual(rawDelivery["watermarkedPreviews"] as? Bool, false,
+                       "配方快照保留用户原始设置，运行结果记录生效设置")
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.first?["watermarkApplied"] as? Bool, true)
+    }
+
     private func manifestObject(_ summary: BatchSummary) throws -> [String: Any] {
         let data = try Data(contentsOf: XCTUnwrap(summary.manifestURL))
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])

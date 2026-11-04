@@ -573,9 +573,10 @@ struct PhotoCanvas: View {
         dragAction = nil
         dragStartPoint = nil
         panOrigin = pan
-        // A cancelled drag must not leave a half-finished liquify stroke that
-        // would keep suppressing previews.
+        // A cancelled drag must not leave a half-finished liquify or repair
+        // stroke that would keep suppressing previews / block the next stroke.
         model.cancelLiquifyStroke()
+        model.cancelRepairStroke()
     }
 
     private enum GeometryHandle: Equatable { case start, end }

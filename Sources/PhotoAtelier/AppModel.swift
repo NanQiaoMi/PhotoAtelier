@@ -378,6 +378,7 @@ final class AppModel: ObservableObject {
         liquifyBrushActive = false
         cancelRepairStroke()
         repairBrushActive = false
+        repairCloneSource = nil
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
@@ -632,6 +633,7 @@ final class AppModel: ObservableObject {
         liquifyBrushActive = false
         cancelRepairStroke()
         repairBrushActive = false
+        repairCloneSource = nil
         maskOverlayImage = nil; maskInspection = nil
         styleReference = nil; stylePreviews.cancel()
         invalidatePortraitDetection()
@@ -1078,6 +1080,15 @@ final class AppModel: ObservableObject {
     func exportDeliveryPage() {
         guard !batchRunning, !deliveryPageBusy, lutContractReady,
               let photo = selectedPhoto, let delivery = exportSettings.deliveryPage else { return }
+        // Validate before the folder picker and before any background render: an
+        // invalid title/range must never create an empty "客户交付-*" folder or
+        // spend time rendering a page that cannot be written.
+        do {
+            try delivery.validate()
+        } catch {
+            present(error)
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = "选择客户交付页的导出位置（会新建独立子文件夹）"
         panel.canChooseDirectories = true
@@ -1115,9 +1126,16 @@ final class AppModel: ObservableObject {
                     effective.watermarkedPreviews = true
                 }
                 let directory = try Self.createDeliveryDirectory(in: parent, photo: photo)
-                let result = try DeliveryGalleryWriter.write(images: [image], settings: effective,
+                let result: DeliveryGalleryResult
+                do {
+                    result = try DeliveryGalleryWriter.write(images: [image], settings: effective,
                                                              outputDirectory: directory,
                                                              context: self.engine.context)
+                } catch {
+                    // Never leave a partially written "客户交付-*" folder behind.
+                    try? FileManager.default.removeItem(at: directory)
+                    throw error
+                }
                 DispatchQueue.main.async {
                     self.deliveryPageBusy = false
                     self.lastDeliveryPage = result.indexHTMLURL
@@ -1704,6 +1722,18 @@ final class AppModel: ObservableObject {
         if (try? RepairBrushSettings().validate()) == nil {
             return "default repair brush settings must validate"
         }
+        // S4: the repair-brush radius UI range must stay aligned with the engine
+        // 0.0005...0.5 bounds; the clamp also guards non-finite slider input.
+        if Self.repairBrushRadiusRange != 0.0005...0.5 {
+            return "repair brush radius UI range must match the engine bounds"
+        }
+        if Self.clampedRepairBrushRadius(0.0005) != 0.0005
+            || Self.clampedRepairBrushRadius(0.5) != 0.5
+            || Self.clampedRepairBrushRadius(0.9) != 0.5
+            || Self.clampedRepairBrushRadius(-1) != 0.0005
+            || Self.clampedRepairBrushRadius(.nan) != 0.06 {
+            return "repair brush radius clamp must match the engine 0.0005...0.5 bounds"
+        }
         return nil
     }
 
@@ -1947,6 +1977,20 @@ final class AppModel: ObservableObject {
 
     // MARK: Manual repair / clone brush (P1-B)
 
+    /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`
+    /// bounds (fraction of the shorter image edge). One source of truth for the
+    /// panel slider, its binding clamp and the committed draft stroke.
+    static let repairBrushRadiusRange: ClosedRange<Double> = 0.0005...0.5
+    static let repairBrushDefaultRadius: Double = 0.06
+
+    /// Clamps a slider value into the engine-accepted radius range; non-finite
+    /// input (SwiftUI can hand us NaN while typing) falls back to the default.
+    static func clampedRepairBrushRadius(_ value: Double) -> Double {
+        guard value.isFinite else { return repairBrushDefaultRadius }
+        return min(repairBrushRadiusRange.upperBound,
+                   max(repairBrushRadiusRange.lowerBound, value))
+    }
+
     /// Current manual repair-brush settings; `nil` means the pre-v12 path.
     var repairBrushSettings: RepairBrushSettings {
         adjustments.repairBrush ?? RepairBrushSettings()
@@ -2050,7 +2094,7 @@ final class AppModel: ObservableObject {
         }
         var stroke = RepairStroke(mode: repairBrushMode,
                                   points: [point],
-                                  radius: min(0.5, max(0.0005, repairBrushRadius)),
+                                  radius: Self.clampedRepairBrushRadius(repairBrushRadius),
                                   feather: min(1, max(0, repairBrushFeather)),
                                   strength: min(1, max(0, repairBrushStrength)))
         if repairBrushMode == .clone, let source = repairCloneSource {
