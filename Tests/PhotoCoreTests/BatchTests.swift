@@ -1,6 +1,9 @@
 import XCTest
 import Foundation
+import CoreGraphics
 import CoreImage
+import ImageIO
+import UniformTypeIdentifiers
 @testable import PhotoCore
 
 final class BatchTests: XCTestCase {
@@ -304,7 +307,7 @@ final class BatchTests: XCTestCase {
 
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
-        XCTAssertEqual(manifest["version"] as? Int, 3)
+        XCTAssertEqual(manifest["version"] as? Int, 4)
         let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
         XCTAssertTrue(exportSummary.contains("format=png"), "\(exportSummary)")
         XCTAssertTrue(exportSummary.contains("resize=none"), "\(exportSummary)")
@@ -402,7 +405,7 @@ final class BatchTests: XCTestCase {
 
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
-        XCTAssertEqual(manifest["version"] as? Int, 3, "水印双版本清单需记录到当前 schema 版本")
+        XCTAssertEqual(manifest["version"] as? Int, 4, "水印双版本清单需记录到当前 schema 版本")
         let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
         XCTAssertEqual(manifestRecipe["version"] as? Int, 11)
         let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
@@ -517,5 +520,214 @@ final class BatchTests: XCTestCase {
             }
         }
         return count
+    }
+
+    // MARK: - B6 customer delivery page integration (manifest v4)
+
+    func testBatchDeliveryPageGeneratesAlbumAndManifestV4() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try makeMetadataFixtureJPEG(at: input.appendingPathComponent("one.jpg"), width: 600, height: 400)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("two.png"), width: 64, height: 48)
+
+        var export = ExportSettings()
+        export.format = .png
+        var delivery = DeliverySettings()
+        delivery.title = "客户交付"
+        delivery.columnCount = 2
+        delivery.thumbnailMaxDimension = 320
+        delivery.previewMaxDimension = 640
+        delivery.includeContactSheet = true
+        delivery.contactSheetColumns = 2
+        export.deliveryPage = delivery
+        var recipe = Recipe(export: export)
+        recipe.version = 12
+
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+        let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                                recipe: recipe, lut: nil,
+                                                cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 2)
+        XCTAssertEqual(summary.failed, 0)
+
+        let manifest = try manifestObject(summary)
+        XCTAssertEqual(manifest["version"] as? Int, 4, "交付页集成需要清单 schema v4")
+        let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(manifestRecipe["version"] as? Int, 12)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("deliveryPage=on"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("deliveryColumns=2"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("deliveryContactSheet=true"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("deliveryWatermarkedPreviews=false"), "\(exportSummary)")
+
+        let record = try XCTUnwrap(manifest["deliveryPage"] as? [String: Any])
+        let directory = try XCTUnwrap(record["directory"] as? String)
+        let htmlRelative = try XCTUnwrap(record["html"] as? String)
+        let contactRelative = try XCTUnwrap(record["contactSheet"] as? String)
+        XCTAssertEqual(record["photoCount"] as? Int, 2)
+        let recordedSettings = try XCTUnwrap(record["settings"] as? [String: Any])
+        XCTAssertEqual(recordedSettings["title"] as? String, "客户交付")
+        XCTAssertEqual(recordedSettings["columnCount"] as? Int, 2)
+        XCTAssertEqual(recordedSettings["thumbnailMaxDimension"] as? Int, 320)
+        XCTAssertEqual(recordedSettings["includeContactSheet"] as? Bool, true)
+        XCTAssertFalse(directory.hasPrefix("/"), "清单必须记录相对路径而不是绝对路径")
+
+        let deliveryDirectory = output.appendingPathComponent(directory)
+        let htmlURL = output.appendingPathComponent(htmlRelative)
+        let pdfURL = output.appendingPathComponent(contactRelative)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: htmlURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pdfURL.path))
+        let html = try readLatin1(htmlURL)
+        XCTAssertEqual(occurrences(of: "<img ", in: html), 2, "HTML 图片数量必须等于成功导出的照片数")
+        XCTAssertFalse(html.lowercased().contains("http"), "交付页不得包含外链")
+        XCTAssertFalse(html.contains("://"))
+        XCTAssertFalse(html.contains(output.path), "交付页不得泄漏本地绝对路径")
+        let pdfDocument = try XCTUnwrap(CGPDFDocument(pdfURL as CFURL))
+        XCTAssertGreaterThanOrEqual(pdfDocument.numberOfPages, 1)
+
+        // Privacy: the source JPEG carried GPS/camera/serial metadata; all delivery
+        // artefacts (HTML/PDF/thumbs/previews) are re-encoded and must be clean.
+        let deliveryFiles = try regularFiles(in: deliveryDirectory)
+        XCTAssertFalse(deliveryFiles.isEmpty)
+        for url in deliveryFiles {
+            let text = try readLatin1(url).lowercased()
+            for marker in ["secretcam", "secretartist", "serial12345",
+                           "gpslatitude", "gpslongitude", "http://", "https://"] {
+                XCTAssertFalse(text.contains(marker), "\(url.lastPathComponent) 泄漏 \(marker)")
+            }
+            XCTAssertFalse(text.contains(temp.path.lowercased()),
+                           "\(url.lastPathComponent) 泄漏临时目录绝对路径")
+        }
+
+        // A second run must never overwrite the first delivery folder.
+        let firstHTMLData = try Data(contentsOf: htmlURL)
+        let second = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(second.succeeded, 2)
+        let secondManifest = try manifestObject(second)
+        let secondRecord = try XCTUnwrap(secondManifest["deliveryPage"] as? [String: Any])
+        let secondDirectory = try XCTUnwrap(secondRecord["directory"] as? String)
+        XCTAssertNotEqual(secondDirectory, directory, "交付页目录必须唯一，不覆盖第一次交付")
+        XCTAssertEqual(try Data(contentsOf: htmlURL), firstHTMLData, "第一次交付页 HTML 被覆盖")
+        let deliveryFolders = try FileManager.default.contentsOfDirectory(at: output,
+                                                                          includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { $0.lastPathComponent.hasPrefix("delivery") && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        XCTAssertEqual(deliveryFolders.count, 2)
+    }
+
+    func testInvalidDeliverySettingsAndV11GateRejectBeforeOutputDirectory() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("one.png"), width: 32, height: 24)
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+
+        // Invalid delivery settings must fail before the output folder exists.
+        var invalidExport = ExportSettings()
+        var invalidDelivery = DeliverySettings()
+        invalidDelivery.title = "   "
+        invalidExport.deliveryPage = invalidDelivery
+        var invalidRecipe = Recipe(export: invalidExport)
+        invalidRecipe.version = 12
+        let invalidOutput = temp.appendingPathComponent("output-invalid", isDirectory: true)
+        XCTAssertThrowsError(try BatchProcessor().run(
+            items: items, inputRoot: input, outputRoot: invalidOutput, recipe: invalidRecipe,
+            lut: nil, cancellation: CancellationToken(), onEvent: { _ in })) { error in
+            XCTAssertTrue(error.localizedDescription.contains("交付页标题"), error.localizedDescription)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: invalidOutput.path))
+
+        // A v11 recipe must reject a non-neutral delivery payload (v12 gate).
+        var v11Export = ExportSettings()
+        v11Export.deliveryPage = DeliverySettings()
+        var v11Recipe = Recipe(export: v11Export)
+        v11Recipe.version = 11
+        let v11Output = temp.appendingPathComponent("output-v11", isDirectory: true)
+        XCTAssertThrowsError(try BatchProcessor().run(
+            items: items, inputRoot: input, outputRoot: v11Output, recipe: v11Recipe,
+            lut: nil, cancellation: CancellationToken(), onEvent: { _ in })) { error in
+            XCTAssertTrue(error.localizedDescription.contains("客户交付页"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("12"), error.localizedDescription)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: v11Output.path))
+    }
+
+    private func manifestObject(_ summary: BatchSummary) throws -> [String: Any] {
+        let data = try Data(contentsOf: XCTUnwrap(summary.manifestURL))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func occurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var range = haystack.startIndex..<haystack.endIndex
+        while let found = haystack.range(of: needle, range: range) {
+            count += 1
+            range = found.upperBound..<haystack.endIndex
+        }
+        return count
+    }
+
+    private func readLatin1(_ url: URL) throws -> String {
+        String(data: try Data(contentsOf: url), encoding: .isoLatin1) ?? ""
+    }
+
+    private func regularFiles(in directory: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(at: directory,
+                                                              includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return []
+        }
+        var urls: [URL] = []
+        for case let url as URL in enumerator {
+            if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                urls.append(url)
+            }
+        }
+        return urls.sorted { $0.path < $1.path }
+    }
+
+    /// JPEG carrying GPS / camera model / serial / artist metadata so the delivery
+    /// privacy test proves those markers never survive export + re-encode.
+    private func makeMetadataFixtureJPEG(at url: URL, width: Int, height: Int) throws {
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw AtelierError.imageWrite("测试图像上下文创建失败")
+        }
+        context.setFillColor(CGColor(gray: 0.5, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+        let properties: [CFString: Any] = [
+            kCGImagePropertyGPSDictionary: [
+                kCGImagePropertyGPSLatitude: 35.6812,
+                kCGImagePropertyGPSLongitude: 139.7671,
+                kCGImagePropertyGPSLatitudeRef: "N",
+                kCGImagePropertyGPSLongitudeRef: "E"
+            ],
+            kCGImagePropertyTIFFDictionary: [
+                kCGImagePropertyTIFFMake: "SECRETCAM",
+                kCGImagePropertyTIFFModel: "SECRETMODEL",
+                kCGImagePropertyTIFFArtist: "SECRETARTIST"
+            ],
+            kCGImagePropertyExifDictionary: [
+                kCGImagePropertyExifBodySerialNumber: "SERIAL12345"
+            ],
+            kCGImageDestinationLossyCompressionQuality: 0.9
+        ]
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL,
+                                                                UTType.jpeg.identifier as CFString,
+                                                                1, nil) else {
+            throw AtelierError.imageWrite("测试 JPEG 编码器创建失败")
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw AtelierError.imageWrite("测试 JPEG 写入失败")
+        }
     }
 }

@@ -43,7 +43,7 @@ public final class BatchProcessor {
         let runID = UUID().uuidString.lowercased()
         let manifestURL = output.appendingPathComponent("batch-\(runID).json", isDirectory: false)
         var manifest = BatchManifest(
-            version: 3,
+            version: 4,
             runID: runID,
             createdAt: ISO8601DateFormatter().string(from: Date()),
             recipe: recipe,
@@ -71,6 +71,17 @@ public final class BatchProcessor {
         var cleanExportSettings = recipe.export
         cleanExportSettings.watermark = nil
         cleanExportSettings.watermarkDualVersion = nil
+        // Customer delivery page: generated after the loop from the primary
+        // exported files (already colour-managed and metadata-stripped), so an
+        // album never holds full-resolution CI graphs in memory. The delivery
+        // settings themselves are validated before the output directory exists.
+        var effectiveDeliverySettings = recipe.export.deliveryPage
+        if watermarkActive, effectiveDeliverySettings != nil {
+            // The primary exported file contains the watermark, so the previews
+            // shown to the client are watermarked too; keep the honest notice.
+            effectiveDeliverySettings?.watermarkedPreviews = true
+        }
+        var deliveredFileURLs: [URL] = []
 
         for (offset, item) in items.enumerated() {
             let index = offset + 1
@@ -177,6 +188,7 @@ public final class BatchProcessor {
                     let cleanupError = NSError(domain: NSPOSIXErrorDomain, code: Int(errno)).localizedDescription
                     throw AtelierError.imageWrite("批次清单更新失败：\(error.localizedDescription)；撤销本项输出也失败：\(cleanupError)")
                 }
+                deliveredFileURLs.append(outputURL)
                 summary.succeeded += 1
                 onEvent(BatchEvent(kind: .completed, index: index, total: items.count, input: item.url,
                                    output: outputURL, report: report))
@@ -214,6 +226,33 @@ public final class BatchProcessor {
             if summary.cancelled { break }
         }
 
+        if let deliverySettings = effectiveDeliverySettings {
+            if summary.cancelled {
+                manifest.warnings.append("客户交付页未生成：批次已取消（已导出的照片仍保留）。")
+            } else if deliveredFileURLs.isEmpty {
+                manifest.warnings.append("客户交付页未生成：本次没有成功导出的照片。")
+            } else {
+                do {
+                    let directory = try uniqueDirectoryURL(named: "delivery", under: output)
+                    let result = try DeliveryGalleryWriter.write(fileURLs: deliveredFileURLs,
+                                                                 settings: deliverySettings,
+                                                                 outputDirectory: directory,
+                                                                 context: engine.context)
+                    manifest.deliveryPage = BatchDeliveryPageRecord(
+                        directory: relativePath(of: directory, under: output) ?? directory.lastPathComponent,
+                        html: relativePath(of: result.indexHTMLURL, under: output) ?? result.indexHTMLURL.lastPathComponent,
+                        contactSheet: result.contactSheetURL.flatMap { relativePath(of: $0, under: output) },
+                        photoCount: result.photoCount,
+                        settings: deliverySettings
+                    )
+                } catch {
+                    // The exported photos and the manifest are still valid; record
+                    // the failure instead of discarding successful per-photo work.
+                    manifest.warnings.append("客户交付页生成失败：\(error.localizedDescription)")
+                }
+            }
+        }
+
         do {
             try updateManifest(manifest, at: manifestURL)
         } catch {
@@ -241,6 +280,20 @@ private struct BatchManifest: Codable {
     var warnings: [String]
     var cancelled: Bool
     var entries: [BatchManifestEntry]
+    /// Customer delivery page generated for this run (v4). Nil when the recipe
+    /// did not request one or when a cancelled/failed run produced no page.
+    var deliveryPage: BatchDeliveryPageRecord? = nil
+}
+
+/// Manifest record of the generated offline customer delivery page. Paths are
+/// relative to the output root (never absolute local paths) and `settings` is the
+/// effective settings actually used, so a delivery can be audited/replayed.
+private struct BatchDeliveryPageRecord: Codable {
+    var directory: String
+    var html: String
+    var contactSheet: String?
+    var photoCount: Int
+    var settings: DeliverySettings
 }
 
 private struct BatchManifestEntry: Codable {
@@ -304,6 +357,11 @@ private func validateExportExtensions(_ settings: ExportSettings) throws {
     // so one bad path does not abort the whole batch.
     if let watermark = settings.watermark {
         try watermark.validate()
+    }
+    // The delivery page is a whole-run artefact: validate it before creating the
+    // output directory too (empty title, invalid column/size ranges).
+    if let delivery = settings.deliveryPage {
+        try delivery.validate()
     }
 }
 
@@ -379,7 +437,32 @@ private func describeExportSettings(_ settings: ExportSettings) -> [String] {
         summary.append("watermark=none")
     }
     summary.append("watermarkDualVersion=\(settings.exportsDualWatermarkVersion)")
+    if let delivery = settings.deliveryPage {
+        summary.append("deliveryPage=on")
+        summary.append("deliveryTitle=\(delivery.title)")
+        summary.append("deliveryColumns=\(delivery.columnCount)")
+        summary.append("deliveryThumbnail=\(delivery.thumbnailMaxDimension)")
+        summary.append("deliveryPreview=\(delivery.previewMaxDimension)")
+        summary.append("deliveryContactSheet=\(delivery.includeContactSheet)")
+        summary.append("deliveryPaper=\(delivery.paper.rawValue)")
+        summary.append("deliveryWatermarkedPreviews=\(delivery.watermarkedPreviews)")
+    } else {
+        summary.append("deliveryPage=off")
+    }
     return summary
+}
+
+/// Creates a new, never-overwriting delivery-page directory under the output
+/// root. Uses the same symlink/path safety checks as per-photo output folders.
+private func uniqueDirectoryURL(named baseName: String, under root: URL) throws -> URL {
+    for index in 1...10_000 {
+        let name = index == 1 ? baseName : "\(baseName)-\(index)"
+        let candidate = root.appendingPathComponent(name, isDirectory: true)
+        guard !pathEntryExists(candidate) else { continue }
+        try ensureSafeDirectory(candidate, under: root)
+        return candidate
+    }
+    throw AtelierError.imageWrite("无法找到未占用的交付页目录名")
 }
 
 /// Base URL for the watermark-free copy of the dual-version batch switch.

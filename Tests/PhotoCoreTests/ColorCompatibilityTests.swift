@@ -1469,4 +1469,61 @@ final class ColorCompatibilityTests: XCTestCase {
                                               points: [MaskPoint(x: 0.5, y: 0.5)],
                                               cloneOffset: MaskPoint(x: -2, y: 0)).validate())
     }
+
+    // MARK: - B6 customer delivery page (v12)
+
+    func testDeliveryPageRequiresV12RoundTripsAndLegacyStaysNeutral() throws {
+        var delivery = DeliverySettings()
+        delivery.title = "客户交付 · 离线预览"
+        delivery.columnCount = 2
+        delivery.thumbnailMaxDimension = 320
+        delivery.previewMaxDimension = 640
+        delivery.includeContactSheet = true
+        delivery.contactSheetColumns = 2
+        delivery.paper = .letter
+        delivery.pageMarginFraction = 0.05
+        delivery.watermarkedPreviews = true
+
+        var export = ExportSettings()
+        export.format = .png
+        export.deliveryPage = delivery
+        var recipe = Recipe(export: export)
+        recipe.version = 11
+        XCTAssertThrowsError(try recipe.validateVersion(), "v11 配方不得接受客户交付页") { error in
+            XCTAssertTrue(error.localizedDescription.contains("客户交付页"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("12"), error.localizedDescription)
+        }
+        recipe.version = 12
+        XCTAssertNoThrow(try recipe.validateVersion())
+        let decoded = try JSONDecoder().decode(Recipe.self, from: JSONEncoder().encode(recipe))
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(try XCTUnwrap(decoded.export.deliveryPage), delivery)
+        XCTAssertEqual(decoded.export.deliveryPage?.paper, .letter)
+        XCTAssertEqual(decoded.export.deliveryPage?.watermarkedPreviews, true)
+
+        // Predicates: any stored delivery payload needs v12, both for the gate and
+        // for the save path's auto-upgrade (mirrors the v10/v11 rules).
+        XCTAssertFalse(ExportSettings().requiresVersion12Recipe)
+        XCTAssertFalse(ExportSettings().storesDeliveryPageData)
+        XCTAssertNil(ExportSettings().deliveryPage)
+        XCTAssertTrue(export.requiresVersion12Recipe)
+        XCTAssertTrue(export.storesDeliveryPageData)
+        var defaultExport = ExportSettings()
+        defaultExport.watermark = WatermarkSettings(text: "WM")
+        XCTAssertFalse(defaultExport.requiresVersion12Recipe, "水印只要求 v11，不应误触 v12")
+
+        // Legacy payloads stay loadable: missing key decodes as nil, v11 recipes
+        // without the field keep the old export path.
+        let legacyJSON = """
+        {"format":"jpeg","colorSpace":"sRGB","jpegQuality":0.94,"recursive":false,
+         "suffix":"_graded","stripMetadata":true}
+        """
+        let legacy = try JSONDecoder().decode(ExportSettings.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.deliveryPage)
+        XCTAssertFalse(legacy.requiresVersion12Recipe)
+        var legacyRecipe = Recipe(export: legacy)
+        legacyRecipe.version = 11
+        XCTAssertNoThrow(try legacyRecipe.validateVersion(), "缺 deliveryPage 的旧导出设置必须保持 v11 可加载")
+        XCTAssertEqual(legacy.suffix, "_graded")
+    }
 }

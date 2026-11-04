@@ -575,6 +575,12 @@ public struct ExportSettings: Codable, Equatable {
     /// batch run writes both a watermarked and an unwatermarked copy per photo.
     /// Optional so recipes written before v11 keep decoding unchanged.
     public var watermarkDualVersion: Bool? = nil
+    /// Optional offline customer delivery page generated from the exported files
+    /// (static HTML album with thumbnails/previews + optional contact-sheet PDF).
+    /// Nil keeps the legacy export path; a stored value requires recipe version
+    /// 12 (`Recipe.validateVersion`). The gallery itself never touches the
+    /// network and re-encodes images without metadata.
+    public var deliveryPage: DeliverySettings? = nil
     public init() {}
 }
 
@@ -610,13 +616,28 @@ public extension ExportSettings {
     var exportsDualWatermarkVersion: Bool {
         watermarkDualVersion == true && requiresVersion11Recipe
     }
+
+    /// True when a customer delivery page is configured. The delivery payload is
+    /// only represented in v12 recipes, so any stored value needs the v12 gate
+    /// (there is no "neutral" delivery page: nil is the legacy path).
+    var requiresVersion12Recipe: Bool {
+        deliveryPage != nil
+    }
+
+    /// True when any delivery-page payload is stored. The save path bumps the
+    /// recipe to v12 so the recipe can be loaded back instead of being rejected
+    /// by the app's own v12 gate.
+    var storesDeliveryPageData: Bool {
+        deliveryPage != nil
+    }
 }
 
 public struct Recipe: Codable, Equatable {
     /// Version 9 adds opt-in per-photo LUT candidate evaluation.
     /// Version 10 adds portrait refinement, reference color and export extensions.
     /// Version 11 adds the P1 color tools, liquify and watermark fields.
-    /// Version 12 adds certificate photo / background replacement fields.
+    /// Version 12 adds certificate photo / background replacement, manual repair
+    /// brush strokes and the customer delivery page export.
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -684,6 +705,9 @@ public struct Recipe: Codable, Equatable {
         }
         guard version >= 11 || !exportSettings.requiresVersion11Recipe else {
             throw AtelierError.invalidConfiguration("水印导出需要配方版本 11，不能静默降级。")
+        }
+        guard version >= 12 || !exportSettings.requiresVersion12Recipe else {
+            throw AtelierError.invalidConfiguration("客户交付页导出需要配方版本 12，不能静默降级。")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
             throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")

@@ -474,9 +474,12 @@ struct ContentView: View {
                     set: { model.exportSettings.fileNameTemplate = $0.isEmpty ? nil : $0 }))
                     .textFieldStyle(.roundedBorder).font(.system(size: 11))
             }
-            Text("模板占位符：{name} 原名、{suffix} 后缀、{index} 序号；缩放/模板/HEIC 需要配方 v10；水印需要配方 v11。")
+            Text("模板占位符：{name} 原名、{suffix} 后缀、{index} 序号；缩放/模板/HEIC 需要配方 v10；水印需要配方 v11；客户交付页需要配方 v12。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
-            watermarkSection
+            Group {
+                watermarkSection
+                deliveryPageSection
+            }
             Toggle("移除位置与相机隐私信息", isOn: $model.exportSettings.stripMetadata)
                 .toggleStyle(.checkbox).font(.system(size: 10))
             Text("始终写入正确的输出色彩配置和方向。关闭隐私清理后，可保留原片中的部分拍摄参数。")
@@ -488,10 +491,70 @@ struct ContentView: View {
                 safetyRow("生成配方快照与逐张处理报告", icon: "doc.text")
                 safetyRow("支持随时安全取消", icon: "pause.circle")
             }
+            if let delivery = model.lastDeliveryPage {
+                Button("在 Finder 查看客户交付页") { NSWorkspace.shared.activateFileViewerSelecting([delivery]) }
+                    .font(.system(size: 11))
+            }
             if let manifest = model.lastManifest {
                 Button("在 Finder 查看处理报告") { NSWorkspace.shared.activateFileViewerSelecting([manifest]) }
                     .font(.system(size: 11)).padding(.top, 8)
             }
+            }
+        }
+    }
+
+    /// Exit-panel customer delivery page settings. The page itself is generated
+    /// by `DeliveryGalleryWriter` (static HTML + relative thumbnails/previews +
+    /// optional contact-sheet PDF); this section only edits the settings and
+    /// triggers the one-off export action for the selected photo.
+    private var deliveryPageSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Toggle("导出客户交付页（HTML + 接触表 PDF）", isOn: Binding(
+                get: { model.exportSettings.deliveryPage != nil },
+                set: { enabled in
+                    model.exportSettings.deliveryPage = enabled ? DeliverySettings() : nil
+                }))
+                .toggleStyle(.checkbox).font(.system(size: 11))
+            if let delivery = model.exportSettings.deliveryPage {
+                HStack {
+                    Text("标题").font(.system(size: 11))
+                    TextField("客户交付", text: Binding(
+                        get: { delivery.title },
+                        set: { model.exportSettings.deliveryPage?.title = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                }
+                Stepper("缩略图列数：\(delivery.columnCount)", value: Binding(
+                    get: { delivery.columnCount },
+                    set: { model.exportSettings.deliveryPage?.columnCount = min(8, max(1, $0)) }),
+                    in: 1...8).font(.system(size: 11))
+                Picker("缩略图长边", selection: Binding(
+                    get: { delivery.thumbnailMaxDimension },
+                    set: { value in
+                        guard let current = model.exportSettings.deliveryPage else { return }
+                        model.exportSettings.deliveryPage?.thumbnailMaxDimension = value
+                        model.exportSettings.deliveryPage?.previewMaxDimension = max(current.previewMaxDimension, value)
+                    })) {
+                    Text("480 px").tag(480)
+                    Text("640 px").tag(640)
+                    Text("960 px").tag(960)
+                    Text("1440 px").tag(1440)
+                }.font(.system(size: 11))
+                Toggle("生成接触表 PDF", isOn: Binding(
+                    get: { delivery.includeContactSheet },
+                    set: { model.exportSettings.deliveryPage?.includeContactSheet = $0 }))
+                    .toggleStyle(.checkbox).font(.system(size: 10))
+                Toggle("预览图含水印提示", isOn: Binding(
+                    get: { delivery.watermarkedPreviews },
+                    set: { model.exportSettings.deliveryPage?.watermarkedPreviews = $0 }))
+                    .toggleStyle(.checkbox).font(.system(size: 10))
+                Button(model.deliveryPageBusy ? "正在生成客户交付页…" : "导出客户交付页（当前照片）…") {
+                    model.exportDeliveryPage()
+                }
+                .buttonStyle(.bordered)
+                .font(.system(size: 10))
+                .disabled(model.batchRunning || model.deliveryPageBusy || model.selectedPhoto == nil)
+                Text("生成独立文件夹（不覆盖既有交付页）：index.html 内嵌样式、只用相对路径缩略图/预览图，无外链/无网络请求；图片重新编码并剥离 GPS/相机序列号等元数据；接触表 PDF 为 A4 网格。GUI 点选未自动化，实际按钮交互需人工验证。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             }
         }
     }

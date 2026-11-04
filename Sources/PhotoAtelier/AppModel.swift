@@ -153,6 +153,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var regionalSuggestions: [RegionalAdjustmentSuggestion] = []
     @Published var thumbnails: [String: NSImage] = [:]
     @Published var lastManifest: URL?
+    /// Last generated customer delivery page (its index.html); nil until the
+    /// "导出客户交付页" action succeeds once.
+    @Published var lastDeliveryPage: URL?
+    @Published private(set) var deliveryPageBusy = false
     @Published var analysis: PhotoAnalysis?
     @Published var analysisBusy = false
     @Published var analysisError: String?
@@ -267,6 +271,9 @@ final class AppModel: ObservableObject {
         // a saved recipe can be loaded back instead of failing our own v11 gate.
         // Approved P1-7 scope extension: this is the only AppModel change.
         if exportSettings.storesWatermarkData { requiredVersion = max(requiredVersion, 11) }
+        // The delivery page payload only exists in v12 recipes; bumping on save
+        // keeps the recipe loadable by our own v12 gate.
+        if exportSettings.storesDeliveryPageData { requiredVersion = max(requiredVersion, 12) }
         if requiredVersion > recipe.version { recipe.version = requiredVersion }
         return recipe
     }
@@ -1059,6 +1066,90 @@ final class AppModel: ObservableObject {
     }
 
     func cancelBatch() { batchToken?.cancel(); status = "正在安全停止；已完成的照片保留。" }
+
+    // MARK: - Customer delivery page
+
+    /// Exports the currently selected photo as a standalone offline customer
+    /// delivery page (static HTML album + optional contact-sheet PDF) into a new,
+    /// never-overwritten folder under a user-chosen parent directory. Rendering
+    /// runs on the shared preview queue, so the UI stays responsive; the file
+    /// format itself is the B3 `DeliveryGalleryWriter` (no network, metadata-free
+    /// JPEGs, relative paths only).
+    func exportDeliveryPage() {
+        guard !batchRunning, !deliveryPageBusy, lutContractReady,
+              let photo = selectedPhoto, let delivery = exportSettings.deliveryPage else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择客户交付页的导出位置（会新建独立子文件夹）"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "选择位置"
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        let snapshot = recipe
+        let cube = selectedOption?.cube
+        deliveryPageBusy = true
+        status = "正在生成客户交付页…"
+        errorMessage = nil
+        previewQueue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let token = CancellationToken()
+                let loaded = try PhotoLoader.load(url: photo.url,
+                                                  lensCorrection: snapshot.adjustments.lensCorrection,
+                                                  lensProfileID: snapshot.adjustments.lensProfileID,
+                                                  lensCropFactor: snapshot.adjustments.lensCropFactor,
+                                                  lensFocalLength: snapshot.adjustments.lensFocalLength)
+                let processed = try self.engine.process(loaded.image,
+                                                        settings: snapshot.adjustments,
+                                                        lut: cube,
+                                                        initialReport: loaded.report,
+                                                        outputColorSpace: snapshot.export.colorSpace,
+                                                        cancellation: token)
+                var image = processed.image
+                var effective = delivery
+                if let watermark = snapshot.export.watermark, !watermark.isNeutral {
+                    image = try WatermarkRenderer.render(on: image, canvasExtent: image.extent,
+                                                        settings: watermark)
+                    // The preview file itself is watermarked; keep the notice honest.
+                    effective.watermarkedPreviews = true
+                }
+                let directory = try Self.createDeliveryDirectory(in: parent, photo: photo)
+                let result = try DeliveryGalleryWriter.write(images: [image], settings: effective,
+                                                             outputDirectory: directory,
+                                                             context: self.engine.context)
+                DispatchQueue.main.async {
+                    self.deliveryPageBusy = false
+                    self.lastDeliveryPage = result.indexHTMLURL
+                    self.status = "客户交付页已生成 · \(result.indexHTMLURL.deletingLastPathComponent().lastPathComponent)"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.deliveryPageBusy = false
+                    self.present(error)
+                }
+            }
+        }
+    }
+
+    /// Creates a fresh `客户交付-<photo stem>` folder. Existing folders are never
+    /// reused, so a delivery page can never overwrite an earlier delivery.
+    private static func createDeliveryDirectory(in parent: URL, photo: PhotoItem) throws -> URL {
+        let stem = (photo.url.lastPathComponent as NSString).deletingPathExtension
+        let base = "客户交付-\(stem.isEmpty ? "照片" : stem)"
+        for index in 1...10_000 {
+            let name = index == 1 ? base : "\(base)-\(index)"
+            let candidate = parent.appendingPathComponent(name, isDirectory: true)
+            if FileManager.default.fileExists(atPath: candidate.path) { continue }
+            do {
+                try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
+                return candidate
+            } catch {
+                throw AtelierError.imageWrite("无法创建客户交付页目录：\(error.localizedDescription)")
+            }
+        }
+        throw AtelierError.imageWrite("无法找到未占用的客户交付页目录名")
+    }
 
     func openNativeInspection() {
         guard !batchRunning, !scanning, selectedPhoto != nil else { return }
