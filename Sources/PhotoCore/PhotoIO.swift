@@ -381,6 +381,9 @@ public enum PhotoExporter {
         guard url.isFileURL else { throw AtelierError.imageWrite("导出路径必须是本地文件") }
         try validate(settings)
         guard isUsableExtent(image.extent) else { throw AtelierError.imageWrite("导出图像尺寸无效") }
+        // Lanczos resize happens once, in the working colour space, before the
+        // output profile and bounds checks below.
+        let source = try resizeIfNeeded(image, settings: settings)
 
         let destination = url.standardizedFileURL
         let parent = destination.deletingLastPathComponent()
@@ -404,7 +407,7 @@ public enum PhotoExporter {
             colorSpace = value
         }
 
-        let bounds = image.extent.integral
+        let bounds = source.extent.integral
         guard bounds.width > 0, bounds.height > 0,
               bounds.width <= 32_768, bounds.height <= 32_768,
               bounds.width * bounds.height <= 120_000_000 else {
@@ -413,12 +416,13 @@ public enum PhotoExporter {
         let outputImage: CIImage
         let outputFormat: CIFormat
         switch settings.format {
-        case .jpeg:
+        case .jpeg, .heic:
+            // Both lossy formats are encoded opaque: flatten alpha on white.
             let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: bounds)
-            outputImage = image.composited(over: white).cropped(to: bounds)
+            outputImage = source.composited(over: white).cropped(to: bounds)
             outputFormat = .RGBA8
         case .tiff, .png:
-            outputImage = image.cropped(to: bounds)
+            outputImage = source.cropped(to: bounds)
             outputFormat = .RGBA16
         }
 
@@ -435,6 +439,7 @@ public enum PhotoExporter {
         case .jpeg: typeIdentifier = UTType.jpeg.identifier
         case .tiff: typeIdentifier = UTType.tiff.identifier
         case .png: typeIdentifier = UTType.png.identifier
+        case .heic: typeIdentifier = UTType.heic.identifier
         }
 
         var outputProperties: [String: Any] = [:]
@@ -447,7 +452,7 @@ public enum PhotoExporter {
         var exifProperties = outputProperties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
         exifProperties["ColorSpace"] = settings.colorSpace == .sRGB ? 1 : 65_535
         outputProperties[kCGImagePropertyExifDictionary as String] = exifProperties
-        if settings.format == .jpeg {
+        if settings.format == .jpeg || settings.format == .heic {
             outputProperties[kCGImageDestinationLossyCompressionQuality as String] = settings.jpegQuality
         }
 
@@ -486,6 +491,59 @@ public enum PhotoExporter {
               !settings.suffix.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw AtelierError.invalidConfiguration("导出后缀包含无效字符或过长")
         }
+        if let resize = settings.resize, !resize.isNeutral {
+            switch resize.mode {
+            case .none:
+                break
+            case .longEdge:
+                guard (16...32_768).contains(resize.longEdge) else {
+                    throw AtelierError.invalidConfiguration("导出长边必须是 16 到 32768 像素")
+                }
+            case .percent:
+                guard resize.percent.isFinite, (1...400).contains(resize.percent) else {
+                    throw AtelierError.invalidConfiguration("导出尺寸百分比必须在 1 到 400 之间")
+                }
+            }
+        }
+    }
+
+    /// Scales with Core Image's Lanczos filter so exported pixels are not just
+    /// nearest/bilinear-resampled. Returns the original image when resize is off.
+    private static func resizeIfNeeded(_ image: CIImage, settings: ExportSettings) throws -> CIImage {
+        guard let resize = settings.resize, !resize.isNeutral else { return image }
+        let extent = image.extent
+        let longEdge = max(extent.width, extent.height)
+        guard longEdge.isFinite, longEdge > 0 else {
+            throw AtelierError.imageWrite("导出图像尺寸无效，无法缩放")
+        }
+        let scale: CGFloat
+        switch resize.mode {
+        case .none:
+            return image
+        case .longEdge:
+            scale = CGFloat(resize.longEdge) / longEdge
+        case .percent:
+            scale = CGFloat(resize.percent / 100)
+        }
+        guard scale.isFinite, scale > 0 else {
+            throw AtelierError.imageWrite("导出缩放比例无效")
+        }
+        let scaled = image.clampedToExtent()
+            .applyingFilter("CILanczosScaleTransform", parameters: [
+                kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0
+            ])
+        // CILanczosScaleTransform samples outside the finite extent; without
+        // clamping first, the outermost pixel ring is resampled against
+        // transparent pixels and every resized export loses its edge quality.
+        let targetWidth = max(1, Int((extent.width * scale).rounded()))
+        let targetHeight = max(1, Int((extent.height * scale).rounded()))
+        let target = CGRect(x: extent.origin.x * scale, y: extent.origin.y * scale,
+                            width: CGFloat(targetWidth), height: CGFloat(targetHeight))
+        let cropped = scaled.cropped(to: target)
+        guard cropped.extent.width >= 1, cropped.extent.height >= 1 else {
+            throw AtelierError.imageWrite("导出缩放后尺寸无效")
+        }
+        return cropped
     }
 
     private static func retainedMetadata(from source: [String: Any]) -> [String: Any] {

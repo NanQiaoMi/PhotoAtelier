@@ -224,3 +224,24 @@
 - P1：液化美型、证件照/换背景、妆容/修复画笔、调色工具扩展（HSL/曲线/分级）、本地交付页、水印、AI 挑图。
 - P2：头发/衣物/宠物/天空、联机拍摄、RAW 引擎、生成式、多端/云。
 - 真实照片审美验收：需要用户提供授权样片集后单独执行。
+
+---
+
+## 11. 执行状态（2026-11-04 更新）
+
+| 工作项 | 状态 | 说明与证据 |
+|---|---|---|
+| W1 格式与导入 | ✅ approved | HEIC/HEIF/WebP/AVIF 候选、拖放/多选/二次导入；`artifacts/w1-verification/`；F1/F2 nit 已在 W2 修复 |
+| W2 撤销/重做 | ✅ approved | UndoHistory 16/16 + 应用自检；菜单 ⌘Z/⇧⌘Z；`artifacts/w2-verify/` |
+| W3 人脸语义蒙版 | ✅ approved | FaceSemanticTests 6/6 |
+| W4 人像修复引擎 | ✅ approved | PortraitRetouchTests 7/7；配方 v10 门禁；合成图边界测试 |
+| W5 人像 UI/配方/批量 | ✅ approved | 人像页签、v10 保存/载入、批量清单；APP_SMOKE PASS 35 checks；`artifacts/w5-verify/` |
+| W6 AI 追色核心 | ✅ approved | ReferenceColorMatchTests 14/14 |
+| W7 AI 追色 UI/配方/批量 | ✅ approved | 追色页签、skinOnly、批量清单；APP_SMOKE PASS 36 checks；`artifacts/w7-verify/` |
+| W8 导出增强 | ✅ approved | resize/模板/HEIC；IOTests 17/17、BatchTests 11/11；F1 边缘像素缺陷已修 |
+| W9 基准与 UI 冒烟 | ✅ approved | `artifacts/p0-20261103/{benchmark,ui-smoke}/`；重建 bundle 上 5 页签/7 截图 PASS |
+| S1 配方 v10 边界回归 | ✅ approved | LocalMaskTests 19/19、SceneAdaptiveTests 15/15 |
+| S2 人像 UI 状态诚实性 | ✅ approved | maxFaces=4、皮肤覆盖阈值、v10 自动升级断言；`artifacts/p0-20261103/verify-s2/` |
+| S3 追色评审遗留修复 | 进行中 | skinOnly 覆盖阈值、v10 automatic 分支、来源名/测量竞态 |
+
+**最终验收待办**：全量 `make check`、`bash Scripts/build_app.sh`、重建包 `bash Scripts/ui_smoke.sh`、最终树 benchmark、README/[P0 交付说明](p0-release-notes.md) 更新、提交到 `feat/p0-gap-closure`。

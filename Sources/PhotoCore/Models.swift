@@ -34,9 +34,16 @@ public enum LUTColorSpace: String, Codable, CaseIterable {
 }
 
 public enum ExportFormat: String, Codable, CaseIterable {
-    case jpeg, tiff, png
+    case jpeg, tiff, png, heic
     public var fileExtension: String { self == .jpeg ? "jpg" : rawValue }
-    public var title: String { self == .tiff ? "TIFF · 16 bit" : (self == .png ? "PNG · 16 bit" : "JPEG · 高品质") }
+    public var title: String {
+        switch self {
+        case .jpeg: return "JPEG · 高品质"
+        case .tiff: return "TIFF · 16 bit"
+        case .png: return "PNG · 16 bit"
+        case .heic: return "HEIC · 高效有损"
+        }
+    }
 }
 
 public enum OutputColorSpace: String, Codable, CaseIterable {
@@ -262,8 +269,65 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v10.
     /// Absent or neutral settings keep the pre-v10 render path untouched.
     public var portrait: PortraitRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v10.
+    /// Absent or neutral reference-color settings keep the pre-v10 render path.
+    public var referenceColor: ReferenceColorSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
+}
+
+/// User-facing reference-color ("AI 追色") settings stored in a v10 recipe.
+///
+/// The profile is measured from the reference image once and stored as plain
+/// data, so applying the look never requires the reference photo to exist. This
+/// is a global OKLab distribution match, not semantic segmentation and not a
+/// guarantee of a commercial-grade aesthetic result.
+///
+/// `strength` is the OKLab blend amount (`0...1`); a strength of 0 is a neutral
+/// no-op. `skinOnly` restricts the match to detected facial skin (Vision
+/// landmarks plus colour rules). When no usable skin mask exists the pipeline
+/// skips the stage explicitly and records why instead of silently applying the
+/// match globally.
+///
+/// Non-neutral settings require recipe version 10 (`Recipe.validateVersion`).
+public struct ReferenceColorSettings: Codable, Equatable {
+    public var profile: ReferenceColorProfile
+    public var strength: Double
+    public var skinOnly: Bool
+
+    public init(profile: ReferenceColorProfile, strength: Double = 0.65, skinOnly: Bool = false) {
+        self.profile = profile
+        self.strength = strength
+        self.skinOnly = skinOnly
+    }
+
+    /// True when the setting cannot change pixels (zero or negative strength).
+    public var isNeutral: Bool { !(strength > 0) }
+}
+
+/// Optional export resizing. A `.none` mode is the neutral value that keeps
+/// legacy recipes on the unmodified full-size path.
+public enum ExportResizeMode: String, Codable, CaseIterable {
+    case none, longEdge, percent
+    public var title: String {
+        switch self {
+        case .none: return "原始尺寸"
+        case .longEdge: return "按长边像素"
+        case .percent: return "按百分比"
+        }
+    }
+}
+
+public struct ExportResizeSettings: Codable, Equatable {
+    public var mode: ExportResizeMode = .none
+    /// Long edge in pixels; 16...32768 when `mode == .longEdge`.
+    public var longEdge: Int = 4096
+    /// Percentage of the processed size; 1...400 when `mode == .percent`.
+    public var percent: Double = 100
+    public init(mode: ExportResizeMode = .none, longEdge: Int = 4096, percent: Double = 100) {
+        self.mode = mode; self.longEdge = longEdge; self.percent = percent
+    }
+    public var isNeutral: Bool { mode == .none }
 }
 
 public struct ExportSettings: Codable, Equatable {
@@ -274,7 +338,24 @@ public struct ExportSettings: Codable, Equatable {
     public var suffix = "_graded"
     /// Removes camera identifiers, location and all original EXIF on export when true.
     public var stripMetadata = true
+    /// Optional so recipes written before v10 keep their original export path.
+    public var resize: ExportResizeSettings? = nil
+    /// Optional template with {name}, {suffix} and {index}; nil keeps the legacy
+    /// "<name><suffix>.<ext>" naming.
+    public var fileNameTemplate: String? = nil
     public init() {}
+}
+
+public extension ExportSettings {
+    /// True when any export extension field requires a v10 recipe. The app
+    /// uses this predicate to auto-upgrade a recipe it is about to save, so a
+    /// HEIC/resize/template export can be saved and loaded again instead of
+    /// being rejected by its own version gate.
+    var requiresVersion10Recipe: Bool {
+        format == .heic
+            || (resize.map { !$0.isNeutral } ?? false)
+            || (fileNameTemplate?.isEmpty == false)
+    }
 }
 
 public struct Recipe: Codable, Equatable {
@@ -303,6 +384,17 @@ public struct Recipe: Codable, Equatable {
                                 automatic?.referenceSettings.portrait]
         guard version >= 10 || portraitSettings.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("非中性的人像修复需要配方版本 10，不能静默降级。")
+        }
+        let referenceColors = [adjustments.referenceColor,
+                               automatic?.baseline.referenceColor,
+                               automatic?.referenceSettings.referenceColor]
+        guard version >= 10 || referenceColors.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("参考图追色需要配方版本 10，不能静默降级。")
+        }
+        let exportSettings = self.export
+        let usesExtendedExport = exportSettings.requiresVersion10Recipe
+        guard version >= 10 || !usesExtendedExport else {
+            throw AtelierError.invalidConfiguration("HEIC 输出、导出缩放与文件名模板需要配方版本 10，不能静默降级。")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
             throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")
@@ -361,6 +453,10 @@ public struct ProcessingReport: Codable, Equatable {
     /// Per-photo portrait pass status; batch manifests use it to record
     /// "applied" versus "no usable face" without re-running detection.
     public var portrait: PortraitRefinementReport?
+    /// Per-photo reference-color ("AI 追色") status. `nil` when the recipe has no
+    /// active reference color; batch manifests use it to record whether the
+    /// shared profile was applied or explicitly skipped.
+    public var referenceColor: ReferenceColorReport?
     public init() {}
 }
 

@@ -554,4 +554,439 @@ final class ColorCompatibilityTests: XCTestCase {
 
     private func maxComponent(_ rgb: [Double]) -> Double { rgb.max() ?? 0 }
     private func minComponent(_ rgb: [Double]) -> Double { rgb.min() ?? 0 }
+
+    // MARK: - Reference color ("AI 追色", v10)
+
+    func testReferenceColorRequiresV10RoundTripsAndLegacyPayloadsKeepOldPath() throws {
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+        var settings = AdjustmentSettings()
+        settings.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.7)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 9
+        XCTAssertThrowsError(try recipe.validateVersion(),
+                             "v9 配方不得静默接受非中性参考图追色")
+        recipe.version = 10
+        XCTAssertNoThrow(try recipe.validateVersion())
+
+        let encoded = try JSONEncoder().encode(recipe)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: encoded)
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.adjustments.referenceColor, settings.referenceColor)
+        XCTAssertEqual(decoded.version, 10)
+
+        // A zero-strength reference color cannot change pixels, so a v9 recipe is
+        // allowed to carry it (the gate rejects only non-neutral settings).
+        var neutralSettings = settings
+        neutralSettings.referenceColor?.strength = 0
+        var neutralRecipe = Recipe(adjustments: neutralSettings)
+        neutralRecipe.version = 9
+        XCTAssertNoThrow(try neutralRecipe.validateVersion())
+
+        // Old recipes carry no referenceColor key: they decode as nil and keep
+        // the pre-v10 pixel path (identical to a neutral current recipe).
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var adjustments = try XCTUnwrap(object["adjustments"] as? [String: Any])
+        adjustments.removeValue(forKey: "referenceColor")
+        object["adjustments"] = adjustments
+        object["version"] = 9
+        let legacy = try JSONDecoder().decode(Recipe.self,
+                                              from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(legacy.adjustments.referenceColor)
+        XCTAssertNoThrow(try legacy.validateVersion())
+
+        let extent = CGRect(x: 0, y: 0, width: 4, height: 4)
+        let source = solid([0.32, 0.20, 0.14], extent: extent)
+        let legacyImage = try PhotoEngine().process(source, settings: legacy.adjustments, lut: nil).image
+        let neutralImage = try PhotoEngine().process(source, settings: AdjustmentSettings(), lut: nil).image
+        let legacyPixel = try pixel(legacyImage, x: 1, y: 1)
+        let neutralPixel = try pixel(neutralImage, x: 1, y: 1)
+        for channel in 0..<4 {
+            XCTAssertEqual(legacyPixel[channel], neutralPixel[channel], accuracy: 1e-9)
+        }
+    }
+
+    func testReferenceColorValidationRejectsBrokenProfilesAndOutOfRangeStrength() throws {
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+        var settings = AdjustmentSettings()
+        settings.referenceColor = ReferenceColorSettings(profile: profile, strength: 1.5)
+        XCTAssertThrowsError(try PhotoEngine.validate(settings), "追色强度必须在 0...1")
+
+        var nonFinite = settings
+        nonFinite.referenceColor = ReferenceColorSettings(
+            profile: ReferenceColorProfile(
+                luminanceQuantiles: Array(repeating: .nan, count: 17),
+                aQuantiles: profile.aQuantiles, bQuantiles: profile.bQuantiles,
+                meanL: profile.meanL, meanA: profile.meanA, meanB: profile.meanB,
+                sampleCount: profile.sampleCount),
+            strength: 0.5)
+        XCTAssertThrowsError(try PhotoEngine.validate(nonFinite), "损坏的 profile 必须在配方/引擎校验期拒绝")
+    }
+
+    func testReferenceColorNoReferenceAndZeroStrengthAreExactNoOps() throws {
+        let candidate = coolCandidate()
+        let engine = PhotoEngine()
+        let baseline = try engine.process(candidate, settings: AdjustmentSettings(), lut: nil)
+        XCTAssertNil(baseline.report.referenceColor, "无参考图时不写入追色报告")
+
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+        var zero = AdjustmentSettings()
+        zero.referenceColor = ReferenceColorSettings(profile: profile, strength: 0)
+        let zeroOutput = try engine.process(candidate, settings: zero, lut: nil)
+        XCTAssertNil(zeroOutput.report.referenceColor, "强度 0 为中性，不应执行追色")
+        for (x, y) in sampleGrid(width: 64, height: 48) {
+            let before = try pixel(baseline.image, x: x, y: y)
+            let after = try pixel(zeroOutput.image, x: x, y: y)
+            for channel in 0..<4 {
+                XCTAssertEqual(after[channel], before[channel], accuracy: 1e-9,
+                               "强度 0 必须逐像素恒等（\(x),\(y) channel \(channel)）")
+            }
+        }
+
+        var half = zero
+        half.referenceColor?.strength = 0.5
+        let halfOutput = try engine.process(candidate, settings: half, lut: nil)
+        var maximumChange: Float = 0
+        for (x, y) in sampleGrid(width: 64, height: 48) {
+            let before = try pixel(baseline.image, x: x, y: y)
+            let after = try pixel(halfOutput.image, x: x, y: y)
+            maximumChange = max(maximumChange, Float(maxRGBDistance(after, before)))
+        }
+        XCTAssertGreaterThan(maximumChange, 0.0005, "非零强度必须产生可测变化（前后对比）")
+        XCTAssertEqual(halfOutput.image.extent, candidate.extent)
+    }
+
+    func testReferenceColorMovesCandidateTowardReferenceAndRecordsReport() throws {
+        let reference = warmReference(width: 64, height: 48)
+        let profile = try ReferenceColorMatcher.profile(reference: reference)
+        let candidate = coolCandidate(width: 64, height: 48)
+        var settings = AdjustmentSettings()
+        settings.referenceColor = ReferenceColorSettings(profile: profile, strength: 1)
+
+        let output = try PhotoEngine().process(candidate, settings: settings, lut: nil)
+        let before = chromaDistance(try meanOKLabChroma(candidate), profile)
+        let after = chromaDistance(try meanOKLabChroma(output.image), profile)
+        XCTAssertGreaterThan(before, 0.02, "合成夹具必须有可测的冷暖偏移")
+        XCTAssertLessThan(after, before * 0.5,
+                          "追色后 OKLab a/b 均值应明显向参考收敛（前 \(before) 后 \(after)）")
+        XCTAssertEqual(output.report.referenceColor?.applied, true)
+        XCTAssertEqual(output.report.referenceColor?.strength ?? -1, 1, accuracy: 1e-9)
+        XCTAssertEqual(output.report.referenceColor?.skinOnly, false)
+        XCTAssertEqual(output.report.referenceColor?.algorithmVersion,
+                       ReferenceColorProfile.currentAlgorithmVersion)
+        XCTAssertEqual(output.image.extent, candidate.extent)
+
+        var half = settings
+        half.referenceColor?.strength = 0.5
+        let halfOutput = try PhotoEngine().process(candidate, settings: half, lut: nil)
+        let halfDistance = chromaDistance(try meanOKLabChroma(halfOutput.image), profile)
+        XCTAssertGreaterThan(halfDistance, after, "半强度应比全强度更接近原图")
+        XCTAssertLessThan(halfDistance, before, "半强度应比原图更接近参考")
+    }
+
+    func testReferenceColorSkinOnlyWithoutFaceSkipsExplicitly() throws {
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+        let candidate = coolCandidate()
+        var settings = AdjustmentSettings()
+        settings.referenceColor = ReferenceColorSettings(profile: profile, strength: 1, skinOnly: true)
+        let output = try PhotoEngine().process(candidate, settings: settings, lut: nil)
+
+        // No face in the synthetic fixture: the stage must not fall back to a
+        // global match the user did not ask for.
+        XCTAssertEqual(output.report.referenceColor?.applied, false)
+        XCTAssertEqual(output.report.referenceColor?.skinOnly, true)
+        XCTAssertTrue(output.report.referenceColor?.note?.contains("皮肤限定") == true,
+                      "跳过原因必须写入报告：\(String(describing: output.report.referenceColor))")
+        XCTAssertTrue(output.report.warnings.contains { $0.contains("皮肤限定") })
+        let baseline = try PhotoEngine().process(candidate, settings: AdjustmentSettings(), lut: nil)
+        for (x, y) in sampleGrid(width: 64, height: 48) {
+            let before = try pixel(baseline.image, x: x, y: y)
+            let after = try pixel(output.image, x: x, y: y)
+            for channel in 0..<4 {
+                XCTAssertEqual(after[channel], before[channel], accuracy: 1e-9,
+                               "皮肤限定无脸时必须保持原图（\(x),\(y)）")
+            }
+        }
+    }
+
+    func testReferenceColorStageRunsBeforeLUT() throws {
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+        let candidate = coolCandidate()
+        var matchOnly = AdjustmentSettings()
+        matchOnly.referenceColor = ReferenceColorSettings(profile: profile, strength: 1)
+        let matched = try PhotoEngine().process(candidate, settings: matchOnly, lut: nil).image
+
+        // A non-identity LUT: if the reference match ran after the LUT, applying
+        // the match to the LUT output would not reproduce this expected result.
+        let lut = try colorCube(size: 2) { r, g, b in
+            (min(1, 0.05 + 0.90 * r), min(1, 0.02 + 0.85 * g), min(1, 0.03 + 0.95 * b))
+        }
+        var both = matchOnly
+        both.lutIntensity = 1
+        let bothOutput = try PhotoEngine().process(candidate, settings: both, lut: lut).image
+        var lutOnly = AdjustmentSettings()
+        lutOnly.lutIntensity = 1
+        let expected = try PhotoEngine().process(matched, settings: lutOnly, lut: lut).image
+        for (x, y) in sampleGrid(width: 64, height: 48) {
+            let actual = try pixel(bothOutput, x: x, y: y)
+            let wanted = try pixel(expected, x: x, y: y)
+            for channel in 0..<4 {
+                XCTAssertEqual(actual[channel], wanted[channel], accuracy: 0.002,
+                               "追色应在 LUT 之前应用（\(x),\(y) channel \(channel)）")
+            }
+        }
+    }
+
+    private func warmReference(width: Int = 32, height: Int = 32) -> CIImage {
+        gradient(width: width, height: height) { x, y in
+            let t = Float(x) / Float(max(width - 1, 1))
+            let u = Float(y) / Float(max(height - 1, 1))
+            return (0.55 + 0.30 * t, 0.38 + 0.25 * u, 0.22 + 0.18 * t)
+        }
+    }
+
+    private func coolCandidate(width: Int = 64, height: Int = 48) -> CIImage {
+        gradient(width: width, height: height) { x, y in
+            let t = Float(x) / Float(max(width - 1, 1))
+            let u = Float(y) / Float(max(height - 1, 1))
+            return (0.30 + 0.35 * t, 0.38 + 0.30 * u, 0.55 + 0.20 * t)
+        }
+    }
+
+    private func gradient(width: Int, height: Int,
+                          pixel: (Int, Int) -> (Float, Float, Float)) -> CIImage {
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let (r, g, b) = pixel(x, y)
+                let offset = (y * width + x) * 4
+                pixels[offset] = r
+                pixels[offset + 1] = g
+                pixels[offset + 2] = b
+                pixels[offset + 3] = 1
+            }
+        }
+        return bitmap(pixels, width: width, height: height)
+    }
+
+    private func sampleGrid(width: Int, height: Int) -> [(Int, Int)] {
+        [(width / 4, height / 4), (width / 2, height / 2),
+         (width * 3 / 4, height / 4), (width / 4, height * 3 / 4),
+         (width * 3 / 4, height * 3 / 4)]
+    }
+
+    private func meanOKLabChroma(_ image: CIImage) throws -> (Double, Double) {
+        let width = Int(image.extent.width)
+        let height = Int(image.extent.height)
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        pixels.withUnsafeMutableBytes { buffer in
+            renderContext.render(image, toBitmap: buffer.baseAddress!,
+                                 rowBytes: width * 4 * MemoryLayout<Float>.size,
+                                 bounds: CGRect(x: 0, y: 0, width: width, height: height),
+                                 format: .RGBAf, colorSpace: linearColorSpace)
+        }
+        var sumA = 0.0, sumB = 0.0, count = 0.0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            guard pixels[offset + 3] > 0.5 else { continue }
+            let r = Double(pixels[offset]), g = Double(pixels[offset + 1]), b = Double(pixels[offset + 2])
+            func root(_ value: Double) -> Double { copysign(pow(abs(value), 1.0 / 3.0), value) }
+            let l = root(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+            let m = root(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+            let s = root(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+            let a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+            let bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+            sumA += a; sumB += bb; count += 1
+        }
+        return (sumA / count, sumB / count)
+    }
+
+    private func chromaDistance(_ mean: (Double, Double), _ profile: ReferenceColorProfile) -> Double {
+        let da = mean.0 - profile.meanA
+        let db = mean.1 - profile.meanB
+        return (da * da + db * db).squareRoot()
+    }
+
+    func testPortraitVersionUpgradeContractForSavePath() throws {
+        // Mirrors AppModel.portraitRecipeNeedsVersion10 / portraitRecipeVersion;
+        // the app asserts the same rules directly in debug builds
+        // (PORTRAIT_CONTRACT_SELF_CHECK) because this test target only links PhotoCore.
+        var nilPortrait = AdjustmentSettings()
+        XCTAssertNil(nilPortrait.portrait)
+        var neutralPortrait = AdjustmentSettings()
+        neutralPortrait.portrait = PortraitRefinementSettings()
+        XCTAssertEqual(neutralPortrait.portrait?.isNeutral, true)
+        var nonNeutralPortrait = AdjustmentSettings()
+        nonNeutralPortrait.portrait = PortraitRefinementSettings(blemishStrength: 0.2)
+        XCTAssertEqual(nonNeutralPortrait.portrait?.isNeutral, false)
+
+        // Neutral payloads keep the v9 shape and pass the v9 gate.
+        var neutralRecipe = Recipe(adjustments: neutralPortrait)
+        neutralRecipe.version = 9
+        XCTAssertNoThrow(try neutralRecipe.validateVersion())
+
+        // Non-neutral portrait payloads must be written as v10.
+        var legacyRecipe = Recipe(adjustments: nonNeutralPortrait)
+        legacyRecipe.version = 9
+        XCTAssertThrowsError(try legacyRecipe.validateVersion())
+        var upgradedRecipe = Recipe(adjustments: nonNeutralPortrait)
+        upgradedRecipe.version = 10
+        XCTAssertNoThrow(try upgradedRecipe.validateVersion())
+
+        // The upgraded payload keeps the portrait field; the neutral/absent one
+        // keeps the old recipe shape (no portrait key).
+        let upgradedJSON = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(upgradedRecipe)) as? [String: Any])
+        XCTAssertEqual(upgradedJSON["version"] as? Int, 10)
+        XCTAssertNotNil((upgradedJSON["adjustments"] as? [String: Any])?["portrait"])
+
+        var absentRecipe = Recipe(adjustments: nilPortrait)
+        absentRecipe.version = 9
+        let absentJSON = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(absentRecipe)) as? [String: Any])
+        XCTAssertNil((absentJSON["adjustments"] as? [String: Any])?["portrait"])
+        XCTAssertNoThrow(try absentRecipe.validateVersion())
+    }
+
+    // MARK: - S3: skin coverage, automatic v10 gate, measurement merge
+
+    func testSkinOnlyReferenceColorTreatsLowCoverageSkinMaskAsUnusable() throws {
+        let engine = PhotoEngine()
+        let extent = CGRect(x: 0, y: 0, width: 64, height: 48)
+
+        // A non-nil but empty matte is what a grayscale/low-chroma face produces:
+        // it must be rejected before any matching work.
+        let empty = matteImage(width: 64, height: 48, extent: extent) { _, _ in 0 }
+        XCTAssertEqual(PhotoEngine.skinMaskCoverage(of: empty, context: engine.context), 0, accuracy: 1e-9)
+        XCTAssertNil(engine.usableSkinMask([maskSet(skin: empty, extent: extent)], extent: extent),
+                     "全零皮肤蒙版必须判定为不可用")
+
+        // A single covered pixel out of 3072 is below the 0.0005 threshold.
+        let tiny = matteImage(width: 64, height: 48, extent: extent) { x, y in
+            x == 0 && y == 0 ? 1 : 0
+        }
+        XCTAssertNil(engine.usableSkinMask([maskSet(skin: tiny, extent: extent)], extent: extent),
+                     "覆盖低于 0.0005 的皮肤蒙版必须判定为不可用")
+
+        // A real matte passes and its coverage is reported.
+        let filled = matteImage(width: 64, height: 48, extent: extent) { _, _ in 0.5 }
+        XCTAssertNotNil(engine.usableSkinMask([maskSet(skin: filled, extent: extent)], extent: extent))
+        XCTAssertEqual(PhotoEngine.skinMaskCoverage(of: filled, context: engine.context), 0.5, accuracy: 0.002)
+
+        // Threshold boundary behaviour is shared with the portrait inspector.
+        XCTAssertEqual(PhotoEngine.minimumSkinMaskCoverage, 0.0005, accuracy: 1e-12)
+        XCTAssertFalse(PhotoEngine.isUsableSkinCoverage(0))
+        XCTAssertFalse(PhotoEngine.isUsableSkinCoverage(PhotoEngine.minimumSkinMaskCoverage))
+        XCTAssertTrue(PhotoEngine.isUsableSkinCoverage(PhotoEngine.minimumSkinMaskCoverage * 2))
+        XCTAssertFalse(PhotoEngine.isUsableSkinCoverage(.nan))
+        XCTAssertFalse(PhotoEngine.isUsableSkinCoverage(.infinity))
+    }
+
+    func testAutomaticRecipeV10GateCoversAutomaticBaselineAndReferenceBranches() throws {
+        let profile = try ReferenceColorMatcher.profile(reference: warmReference())
+
+        // Non-neutral reference color in the automatic baseline: saving as v9
+        // would be rejected by our own v10 gate on load.
+        var referenceBaseline = AdjustmentSettings()
+        referenceBaseline.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.6)
+        let automaticReference = AutomaticBatchRecipe(styleID: "balanced",
+                                                      baseline: referenceBaseline,
+                                                      referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automaticReference), 10)
+        var referenceRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automaticReference)
+        referenceRecipe.version = 9
+        XCTAssertThrowsError(try referenceRecipe.validateVersion(),
+                             "automatic baseline 的非中性追色也需要配方 v10")
+        referenceRecipe.version = 10
+        XCTAssertNoThrow(try referenceRecipe.validateVersion())
+
+        // Non-neutral portrait in the automatic baseline.
+        var portraitBaseline = AdjustmentSettings()
+        portraitBaseline.portrait = PortraitRefinementSettings(blemishStrength: 0.3)
+        let automaticPortrait = AutomaticBatchRecipe(styleID: "balanced",
+                                                     baseline: portraitBaseline,
+                                                     referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automaticPortrait), 10)
+        var portraitRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automaticPortrait)
+        portraitRecipe.version = 9
+        XCTAssertThrowsError(try portraitRecipe.validateVersion())
+
+        // Non-neutral reference color in the automatic reference settings.
+        var referenceSettings = AdjustmentSettings()
+        referenceSettings.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.4)
+        let automaticReferenceSettings = AutomaticBatchRecipe(styleID: "balanced",
+                                                              baseline: AdjustmentSettings(),
+                                                              referenceSettings: referenceSettings)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automaticReferenceSettings), 10)
+
+        // Neutral payloads keep v9.
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: nil), 9)
+        var neutralPortrait = AdjustmentSettings()
+        neutralPortrait.portrait = PortraitRefinementSettings()
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutralPortrait,
+                                                         automatic: nil), 9)
+
+        // Live adjustments are covered too (the W7 behaviour must not regress).
+        var liveReference = AdjustmentSettings()
+        liveReference.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.7)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: liveReference,
+                                                         automatic: nil), 10)
+        var livePortrait = AdjustmentSettings()
+        livePortrait.portrait = PortraitRefinementSettings(teethWhiten: 0.2)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: livePortrait,
+                                                         automatic: nil), 10)
+    }
+
+    func testMergedReferenceColorSettingsKeepsEditsMadeDuringMeasurement() throws {
+        let measured = try ReferenceColorMatcher.profile(reference: warmReference())
+        let previousProfile = try ReferenceColorMatcher.profile(reference: coolCandidate())
+
+        // A strength/skin-only edit made while the reference image was being
+        // measured must survive; only the profile is replaced.
+        let edited = ReferenceColorSettings(profile: previousProfile, strength: 0.3, skinOnly: true)
+        let merged = PhotoEngine.mergedReferenceColorSettings(measured: measured, current: edited)
+        XCTAssertEqual(merged.profile, measured)
+        XCTAssertEqual(merged.strength, 0.3, accuracy: 1e-12)
+        XCTAssertEqual(merged.skinOnly, true)
+
+        // First import (no current settings) keeps the documented defaults.
+        let defaults = PhotoEngine.mergedReferenceColorSettings(measured: measured, current: nil)
+        XCTAssertEqual(defaults.profile, measured)
+        XCTAssertEqual(defaults.strength, 0.65, accuracy: 1e-12)
+        XCTAssertEqual(defaults.skinOnly, false)
+    }
+
+    private func maskSet(skin: CIImage, extent: CGRect) -> FaceSemanticMaskSet {
+        FaceSemanticMaskSet(extent: extent,
+                            resolution: CGSize(width: Int(extent.width), height: Int(extent.height)),
+                            faceBounds: CGRect(x: 0, y: 0, width: 0.5, height: 0.5),
+                            confidence: 1, faceCount: 1,
+                            skin: skin, teeth: nil, sclera: nil, iris: nil,
+                            lips: nil, brows: nil)
+    }
+
+    private func matteImage(width: Int, height: Int, extent: CGRect,
+                            coverage: (Int, Int) -> Double) -> CIImage {
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Float(min(max(coverage(x, y), 0), 1))
+                let offset = (y * width + x) * 4
+                pixels[offset] = value
+                pixels[offset + 1] = value
+                pixels[offset + 2] = value
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        let image = CIImage(bitmapData: data,
+                            bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                            size: CGSize(width: width, height: height),
+                            format: .RGBAf,
+                            colorSpace: linearColorSpace)
+        guard extent.origin != .zero else { return image }
+        return image.transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+    }
 }

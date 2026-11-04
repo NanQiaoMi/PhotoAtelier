@@ -186,4 +186,192 @@ final class BatchTests: XCTestCase {
         let note = try XCTUnwrap(portraitReport["note"] as? String)
         XCTAssertTrue(note.contains("人像修复已跳过"), "跳过原因必须可在清单中复核：\(note)")
     }
+
+    func testReferenceColorV10BatchAppliesSharedProfileAndRecordsSkip() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("color-1.png"), width: 48, height: 32)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("color-2.png"), width: 40, height: 40)
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+        XCTAssertEqual(items.count, 2)
+
+        // A shared reference profile, measured once and stored in the v10 recipe.
+        let profile = try ReferenceColorMatcher.profile(reference: syntheticReference())
+        var settings = AdjustmentSettings()
+        settings.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.8)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 10
+
+        let appliedOutput = temp.appendingPathComponent("output-applied", isDirectory: true)
+        let appliedSummary = try BatchProcessor().run(items: items, inputRoot: input,
+                                                      outputRoot: appliedOutput,
+                                                      recipe: recipe, lut: nil,
+                                                      cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(appliedSummary.succeeded, 2)
+        XCTAssertEqual(appliedSummary.failed, 0)
+
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(appliedSummary.manifestURL))) as? [String: Any])
+        let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(manifestRecipe["version"] as? Int, 10, "含参考图追色的批量配方必须记录为 v10")
+        let manifestAdjustments = try XCTUnwrap(manifestRecipe["adjustments"] as? [String: Any])
+        let manifestReference = try XCTUnwrap(manifestAdjustments["referenceColor"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(manifestReference["strength"] as? Double), 0.8, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(manifestReference["skinOnly"] as? Bool), false)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 2, "每张照片都必须有自己的追色状态记录")
+        for entry in entries {
+            let report = try XCTUnwrap(entry["report"] as? [String: Any])
+            let referenceReport = try XCTUnwrap(report["referenceColor"] as? [String: Any],
+                                                "追色应用状态必须写入清单，而不是省略")
+            XCTAssertEqual(referenceReport["applied"] as? Bool, true)
+            XCTAssertEqual(try XCTUnwrap(referenceReport["strength"] as? Double), 0.8, accuracy: 1e-9)
+            XCTAssertEqual(referenceReport["algorithmVersion"] as? Int,
+                           ReferenceColorProfile.currentAlgorithmVersion)
+        }
+
+        // Skin-limited recipes on a face-less synthetic corpus must record an
+        // explicit skip instead of silently applying a global match.
+        var skinOnly = AdjustmentSettings()
+        skinOnly.referenceColor = ReferenceColorSettings(profile: profile, strength: 0.8, skinOnly: true)
+        var skinRecipe = Recipe(adjustments: skinOnly)
+        skinRecipe.version = 10
+        let skippedOutput = temp.appendingPathComponent("output-skipped", isDirectory: true)
+        let skippedSummary = try BatchProcessor().run(items: items, inputRoot: input,
+                                                      outputRoot: skippedOutput,
+                                                      recipe: skinRecipe, lut: nil,
+                                                      cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(skippedSummary.succeeded, 2)
+        let skippedManifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(skippedSummary.manifestURL))) as? [String: Any])
+        let skippedEntries = try XCTUnwrap(skippedManifest["entries"] as? [[String: Any]])
+        for entry in skippedEntries {
+            let report = try XCTUnwrap(entry["report"] as? [String: Any])
+            let referenceReport = try XCTUnwrap(report["referenceColor"] as? [String: Any])
+            XCTAssertEqual(referenceReport["applied"] as? Bool, false)
+            XCTAssertEqual(referenceReport["skinOnly"] as? Bool, true)
+            let note = try XCTUnwrap(referenceReport["note"] as? String)
+            XCTAssertTrue(note.contains("皮肤限定"), "跳过原因必须可在清单中复核：\(note)")
+        }
+    }
+
+    private func syntheticReference(width: Int = 32, height: Int = 32) -> CIImage {
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let t = Float(x) / Float(max(width - 1, 1))
+                let offset = (y * width + x) * 4
+                pixels[offset] = 0.55 + 0.30 * t
+                pixels[offset + 1] = 0.38
+                pixels[offset + 2] = 0.22 + 0.18 * t
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        return CIImage(bitmapData: data,
+                       bytesPerRow: width * 4 * MemoryLayout<Float>.size,
+                       size: CGSize(width: width, height: height),
+                       format: .RGBAf,
+                       colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
+    }
+
+    func testFileNameTemplateExpandsTokensAndManifestRecordsExportPlan() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("alpha.png"), width: 8, height: 6)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("beta.png"), width: 8, height: 6)
+
+        var export = ExportSettings()
+        export.format = .png
+        export.suffix = "_v"
+        export.fileNameTemplate = "{name}{suffix}-{index}"
+        var recipe = Recipe()
+        recipe.version = 10
+        recipe.export = export
+        let summary = try BatchProcessor().run(
+            items: PhotoLoader.scan(folder: input, recursive: false),
+            inputRoot: input, outputRoot: output, recipe: recipe, lut: nil,
+            cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 2)
+        XCTAssertEqual(summary.failed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent("alpha_v-1.png").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent("beta_v-2.png").path))
+
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        XCTAssertEqual(manifest["version"] as? Int, 2)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("format=png"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("resize=none"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("stripMetadata=true"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains { $0.hasPrefix("fileNameTemplate={name}{suffix}-{index}") },
+                      "\(exportSummary)")
+        let outputs = (try XCTUnwrap(manifest["entries"] as? [[String: Any]]))
+            .compactMap { $0["output"] as? String }.sorted()
+        XCTAssertEqual(outputs, ["alpha_v-1.png", "beta_v-2.png"])
+    }
+
+    func testTemplateRejectsUnknownTokenAndPathSeparatorBeforeOutputDir() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("one.png"), width: 4, height: 3)
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+        for (index, template) in ["{bogus}", "{name}/{index}", ""].enumerated() {
+            let output = temp.appendingPathComponent("output-\(index)", isDirectory: true)
+            var recipe = Recipe()
+            recipe.version = 10
+            recipe.export.fileNameTemplate = template
+            XCTAssertThrowsError(try BatchProcessor().run(
+                items: items, inputRoot: input, outputRoot: output, recipe: recipe, lut: nil,
+                cancellation: CancellationToken(), onEvent: { _ in })) { error in
+                XCTAssertTrue(error.localizedDescription.contains("文件名模板"), error.localizedDescription)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        }
+    }
+
+    func testBatchResizeProducesExpectedPixelsAndRepeatedRunNeverOverwrites() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("square.png"), width: 64, height: 64)
+
+        var export = ExportSettings()
+        export.format = .png
+        export.resize = ExportResizeSettings(mode: .longEdge, longEdge: 32)
+        var recipe = Recipe()
+        recipe.version = 10
+        recipe.export = export
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+        let first = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                             recipe: recipe, lut: nil,
+                                             cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(first.succeeded, 1)
+        let firstURL = output.appendingPathComponent("square_graded.png")
+        let pixels = try TestFiles.imagePixelSize(firstURL)
+        XCTAssertEqual(pixels.width, 32)
+        XCTAssertEqual(pixels.height, 32)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(first.manifestURL))) as? [String: Any])
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("resize=longEdge:32"), "\(exportSummary)")
+
+        // writeUnique's no-overwrite contract is unchanged: a second run keeps both files.
+        let second = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                              recipe: recipe, lut: nil,
+                                              cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(second.succeeded, 1)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: output.appendingPathComponent("square_graded_2.png").path))
+        XCTAssertEqual(try TestFiles.imagePixelSize(firstURL).width, 32)
+    }
 }

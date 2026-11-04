@@ -366,7 +366,7 @@ private final class SmokeSession {
                 assertions.append("Per-photo analysis evidence and effective automatic settings recorded")
                 assertions.append("Source hashes unchanged")
                 if model.failed > 0 { assertions.append("Broken image isolated without aborting later images") }
-                try snapshot("04-export.png", tab: 4)
+                try snapshot("04-export.png", tab: 5)
                 rawPhotoForPhase4 = rawItems.first
                 // W5: exercise the portrait inspector on the synthetic fixture.
                 // It has no detectable face, so this asserts explicit no-face
@@ -395,6 +395,22 @@ private final class SmokeSession {
                 assertions.append("Portrait panel reports no detectable face and the portrait pipeline degrades explicitly")
                 try snapshot("04-portrait.png", tab: 3)
                 model.adjustments.portrait = nil
+                phase = 26
+            case 26:
+                guard !model.previewBusy, !model.analysisBusy else { return }
+                // W7: the reference-color stage is opt-in and must not change a
+                // single pixel before a reference profile exists. The synthetic
+                // fixture imports no reference, so this asserts the explicit
+                // disabled/no-op state instead of pretending a match happened.
+                guard model.adjustments.referenceColor == nil else {
+                    throw AtelierError.invalidConfiguration("合成夹具不应自带参考图 profile")
+                }
+                guard model.previewReport.referenceColor == nil else {
+                    throw AtelierError.invalidConfiguration(
+                        "无参考图时追色阶段不应写入报告（report=\(String(describing: model.previewReport.referenceColor))）")
+                }
+                assertions.append("Reference-color panel renders the explicit no-reference no-op state")
+                try snapshot("04-reference-color.png", tab: 4)
                 if let raw = rawPhotoForPhase4 {
                     model.selectPhoto(raw)
                     phase = 4

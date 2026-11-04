@@ -43,10 +43,11 @@ public final class BatchProcessor {
         let runID = UUID().uuidString.lowercased()
         let manifestURL = output.appendingPathComponent("batch-\(runID).json", isDirectory: false)
         var manifest = BatchManifest(
-            version: 1,
+            version: 2,
             runID: runID,
             createdAt: ISO8601DateFormatter().string(from: Date()),
             recipe: recipe,
+            exportSummary: describeExportSettings(recipe.export),
             warnings: recipe.lutPath == nil && recipe.lutIdentifier == nil && lut != nil
                 ? ["当前配方未记录 LUT 路径或内置标识符，快照不能独立重放。"] : [],
             cancelled: false,
@@ -106,7 +107,8 @@ public final class BatchProcessor {
                         cancellation: cancellation
                     )
                     try cancellation.check()
-                    let baseURL = try makeOutputBaseURL(for: item.relativePath, under: output, settings: recipe.export)
+                    let baseURL = try makeOutputBaseURL(for: item.relativePath, under: output,
+                                                        settings: recipe.export, index: index)
                     let outputURL = try writeUnique(
                         image: processed.image,
                         baseURL: baseURL,
@@ -200,6 +202,9 @@ private struct BatchManifest: Codable {
     var runID: String
     var createdAt: String
     var recipe: Recipe
+    /// Human-readable record of the actual export parameters used by this run
+    /// (the full settings are also embedded in `recipe`).
+    var exportSummary: [String]
     var warnings: [String]
     var cancelled: Bool
     var entries: [BatchManifestEntry]
@@ -223,6 +228,7 @@ private func validateRecipe(_ recipe: Recipe) throws {
           !recipe.export.suffix.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
         throw AtelierError.invalidConfiguration("导出后缀包含无效字符或过长")
     }
+    try validateExportExtensions(recipe.export)
     if let path = recipe.lutPath {
         guard !path.isEmpty, path.utf8.count <= 4_096 else {
             throw AtelierError.invalidConfiguration("配方 LUT 路径为空或过长")
@@ -233,6 +239,83 @@ private func validateRecipe(_ recipe: Recipe) throws {
             throw AtelierError.invalidConfiguration("配方 LUT 标识符为空或过长")
         }
     }
+}
+
+private func validateExportExtensions(_ settings: ExportSettings) throws {
+    if let resize = settings.resize, !resize.isNeutral {
+        switch resize.mode {
+        case .none:
+            break
+        case .longEdge:
+            guard (16...32_768).contains(resize.longEdge) else {
+                throw AtelierError.invalidConfiguration("导出长边必须是 16 到 32768 像素")
+            }
+        case .percent:
+            guard resize.percent.isFinite, (1...400).contains(resize.percent) else {
+                throw AtelierError.invalidConfiguration("导出尺寸百分比必须在 1 到 400 之间")
+            }
+        }
+    }
+    if let template = settings.fileNameTemplate {
+        try validateFileNameTemplate(template)
+    }
+}
+
+/// Only the three documented tokens are accepted; unknown placeholders would
+/// otherwise leak literal braces into file names.
+private func validateFileNameTemplate(_ template: String) throws {
+    guard !template.isEmpty, template.count <= 120 else {
+        throw AtelierError.invalidConfiguration("文件名模板不能为空，且不能超过 120 个字符")
+    }
+    guard !template.contains("/"), !template.contains("\\") else {
+        throw AtelierError.invalidConfiguration("文件名模板不能包含路径分隔符")
+    }
+    guard !template.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        throw AtelierError.invalidConfiguration("文件名模板包含控制字符")
+    }
+    var remaining = template
+    for token in ["{name}", "{suffix}", "{index}"] {
+        remaining = remaining.replacingOccurrences(of: token, with: "")
+    }
+    guard !remaining.contains("{"), !remaining.contains("}") else {
+        throw AtelierError.invalidConfiguration("文件名模板只支持 {name}、{suffix}、{index} 占位符")
+    }
+}
+
+private func expandFileNameTemplate(_ template: String, name: String, suffix: String,
+                                    index: Int) throws -> String {
+    var expanded = template
+        .replacingOccurrences(of: "{name}", with: name)
+        .replacingOccurrences(of: "{suffix}", with: suffix)
+        .replacingOccurrences(of: "{index}", with: String(index))
+    guard !expanded.isEmpty, expanded != ".", expanded != "..", !expanded.hasPrefix("."),
+          expanded.count <= 200, !expanded.contains("/"), !expanded.contains("\\") else {
+        throw AtelierError.invalidConfiguration("文件名模板展开后无效：\(expanded)")
+    }
+    return expanded
+}
+
+private func describeExportSettings(_ settings: ExportSettings) -> [String] {
+    var summary = ["format=\(settings.format.rawValue)",
+                   "colorSpace=\(settings.colorSpace.rawValue)",
+                   "suffix=\(settings.suffix)"]
+    if let resize = settings.resize, !resize.isNeutral {
+        switch resize.mode {
+        case .none: summary.append("resize=none")
+        case .longEdge: summary.append("resize=longEdge:\(resize.longEdge)")
+        case .percent: summary.append("resize=percent:\(resize.percent)")
+        }
+    } else {
+        summary.append("resize=none")
+    }
+    if let template = settings.fileNameTemplate {
+        summary.append("fileNameTemplate=\(template)")
+    }
+    summary.append("stripMetadata=\(settings.stripMetadata)")
+    if settings.format == .jpeg || settings.format == .heic {
+        summary.append("quality=\(settings.jpegQuality)")
+    }
+    return summary
 }
 
 private func validateRecipeLUT(_ recipe: Recipe, supplied: LUTCube?) throws {
@@ -386,7 +469,8 @@ private func safeRelativeComponents(_ path: String) -> [String]? {
     return components
 }
 
-private func makeOutputBaseURL(for relativePath: String, under root: URL, settings: ExportSettings) throws -> URL {
+private func makeOutputBaseURL(for relativePath: String, under root: URL,
+                               settings: ExportSettings, index: Int) throws -> URL {
     guard let components = safeRelativeComponents(relativePath), let fileName = components.last else {
         throw AtelierError.invalidConfiguration("输出相对路径无效")
     }
@@ -399,7 +483,13 @@ private func makeOutputBaseURL(for relativePath: String, under root: URL, settin
     let original = fileName as NSString
     let extensionPart = original.pathExtension
     let stem = extensionPart.isEmpty ? fileName : original.deletingPathExtension
-    let outputName = stem + settings.suffix + "." + settings.format.fileExtension
+    let baseName: String
+    if let template = settings.fileNameTemplate {
+        baseName = try expandFileNameTemplate(template, name: stem, suffix: settings.suffix, index: index)
+    } else {
+        baseName = stem + settings.suffix
+    }
+    let outputName = baseName + "." + settings.format.fileExtension
     let result = directory.appendingPathComponent(outputName, isDirectory: false).standardizedFileURL
     guard pathContains(root.path, result.path), result.path != root.path else {
         throw AtelierError.invalidConfiguration("生成的输出路径超出目标目录")

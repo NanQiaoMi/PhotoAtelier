@@ -275,7 +275,7 @@ struct ContentView: View {
                 .padding(.horizontal, 20).padding(.top, 5)
             Picker("调整分类", selection: $inspectorTab) {
                 Text("分析").tag(0); Text("基础").tag(1); Text("局部").tag(2)
-                Text("人像").tag(3); Text("导出").tag(4)
+                Text("人像").tag(3); Text("追色").tag(4); Text("导出").tag(5)
             }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 17).padding(.vertical, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -286,6 +286,7 @@ struct ContentView: View {
                     else if inspectorTab == 1 { basicInspector }
                     else if inspectorTab == 2 { MaskInspector(model: model) }
                     else if inspectorTab == 3 { PortraitRetouchPanel(model: model) }
+                    else if inspectorTab == 4 { ReferenceColorPanel(model: model) }
                     else { exportInspector }
                 }.padding(.horizontal, 20).padding(.bottom, 24)
             }.disabled(model.batchRunning)
@@ -412,8 +413,31 @@ struct ContentView: View {
             Picker("输出色彩", selection: $model.exportSettings.colorSpace) {
                 ForEach(OutputColorSpace.allCases, id: \.self) { Text($0.title).tag($0) }
             }.font(.system(size: 11))
-            if model.exportSettings.format == .jpeg {
-                AdjustmentSlider(title: "JPEG 品质", value: $model.exportSettings.jpegQuality, range: 0.5...1, percent: true)
+            if model.exportSettings.format == .jpeg || model.exportSettings.format == .heic {
+                AdjustmentSlider(title: "有损品质", value: $model.exportSettings.jpegQuality, range: 0.5...1, percent: true)
+            }
+            Picker("输出尺寸", selection: Binding(
+                get: { model.exportSettings.resize?.mode ?? .none },
+                set: { mode in
+                    var resize = model.exportSettings.resize ?? ExportResizeSettings()
+                    resize.mode = mode
+                    model.exportSettings.resize = mode == .none ? nil : resize
+                })) {
+                ForEach(ExportResizeMode.allCases, id: \.self) { Text($0.title).tag($0) }
+            }.font(.system(size: 11))
+            if let resize = model.exportSettings.resize, resize.mode == .longEdge {
+                HStack {
+                    Text("长边像素").font(.system(size: 11))
+                    TextField("4096", value: Binding(
+                        get: { resize.longEdge },
+                        set: { model.exportSettings.resize?.longEdge = min(32_768, max(16, $0)) }),
+                        format: .number).textFieldStyle(.roundedBorder).font(.system(size: 11))
+                }
+            } else if let resize = model.exportSettings.resize, resize.mode == .percent {
+                AdjustmentSlider(title: "尺寸百分比", value: Binding(
+                    get: { resize.percent },
+                    set: { model.exportSettings.resize?.percent = min(400, max(1, $0)) }),
+                                  range: 1...400, percent: true)
             }
             }
             Group {
@@ -421,6 +445,15 @@ struct ContentView: View {
                 Text("文件名后缀").font(.system(size: 11))
                 TextField("_graded", text: $model.exportSettings.suffix).textFieldStyle(.roundedBorder).font(.system(size: 11))
             }
+            HStack {
+                Text("文件名模板").font(.system(size: 11))
+                TextField("留空＝原名+后缀", text: Binding(
+                    get: { model.exportSettings.fileNameTemplate ?? "" },
+                    set: { model.exportSettings.fileNameTemplate = $0.isEmpty ? nil : $0 }))
+                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
+            }
+            Text("模板占位符：{name} 原名、{suffix} 后缀、{index} 序号；缩放/模板/HEIC 需要配方 v10。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             Toggle("移除位置与相机隐私信息", isOn: $model.exportSettings.stripMetadata)
                 .toggleStyle(.checkbox).font(.system(size: 10))
             Text("始终写入正确的输出色彩配置和方向。关闭隐私清理后，可保留原片中的部分拍摄参数。")
@@ -460,7 +493,7 @@ struct ContentView: View {
                             .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                     }
                     Spacer(minLength: 4)
-                    Button { inspectorTab = 4; model.startBatch() } label: {
+                    Button { inspectorTab = 5; model.startBatch() } label: {
                         HStack(spacing: 8) {
                             Text("批量导出"); Image(systemName: "arrow.up.right")
                         }.font(.system(size: 12, weight: .semibold)).padding(.horizontal, 19).padding(.vertical, 12)

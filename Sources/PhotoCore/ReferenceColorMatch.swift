@@ -85,6 +85,29 @@ public struct ReferenceColorProfile: Codable, Equatable {
     }
 }
 
+/// Per-photo record of what the reference-color ("AI 追色") stage did.
+///
+/// It is embedded in `ProcessingReport` so a batch manifest can state, per
+/// photo, whether the shared reference profile was applied or explicitly
+/// skipped (for example when `skinOnly` found no usable skin mask).
+public struct ReferenceColorReport: Codable, Equatable {
+    public var applied: Bool
+    public var strength: Double
+    public var skinOnly: Bool
+    /// Profile algorithm version, recorded for manifest traceability.
+    public var algorithmVersion: Int?
+    public var note: String?
+
+    public init(applied: Bool, strength: Double, skinOnly: Bool,
+                algorithmVersion: Int? = nil, note: String? = nil) {
+        self.applied = applied
+        self.strength = strength
+        self.skinOnly = skinOnly
+        self.algorithmVersion = algorithmVersion
+        self.note = note
+    }
+}
+
 /// Reference-driven global color matching ("AI 追色") in OKLab.
 ///
 /// Two pure steps keep the reference analysis cacheable:

@@ -278,6 +278,10 @@ public final class PhotoEngine {
         if let effects = settings.creativeEffects { try CreativeEffectsEngine.validate(effects) }
         if let adaptation = settings.adaptiveLUT { try LUTAdaptationEngine.validate(adaptation) }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
+        if let reference = settings.referenceColor {
+            try reference.profile.validate()
+            try require(reference.strength, within: 0...1, named: "参考图追色强度")
+        }
         try require(settings.rotationDegrees, within: -45...45, named: "旋转")
         try require(settings.verticalPerspective, within: -0.3...0.3, named: "垂直透视")
         try require(settings.horizontalPerspective, within: -0.3...0.3, named: "水平透视")
@@ -408,13 +412,27 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
-        // Pipeline order: global tone/geometry → portrait refinement → local
-        // masks/detail → LUT → output gamut. Portrait masks are measured on the
-        // globally adjusted image and the refined result becomes the reference
-        // for local-mask measurement, so local edits see the same skin the user
-        // sees. A neutral portrait setting skips this whole stage (pre-v10 path).
-        if let portrait = settings.portrait, !portrait.isNeutral {
-            let faces = PortraitSemanticMaskProvider.masks(in: working)
+        // Pipeline order: global tone/geometry → portrait refinement →
+        // reference-color match → local masks/detail → LUT → output gamut.
+        // Portrait masks are measured on the globally adjusted image and the
+        // refined result becomes the reference for local-mask measurement, so
+        // local edits see the same skin the user sees. A neutral portrait
+        // setting skips the portrait stage (pre-v10 path); a neutral or absent
+        // reference-color setting skips the match (pre-v10 path).
+        //
+        // Face masks are shared by the two v10 stages so a photo that uses both
+        // portrait refinement and skin-limited reference color runs Vision once.
+        // They are measured before portrait refinement because the skin geometry
+        // is unchanged by the refinement; the match then sees refined skin.
+        let portraitActive = settings.portrait.map { !$0.isNeutral } ?? false
+        let referenceColor = settings.referenceColor
+        let referenceColorActive = referenceColor.map { !$0.isNeutral } ?? false
+        let needsFaceMasks = portraitActive || (referenceColorActive && referenceColor?.skinOnly == true)
+        let preparedFaceMasks = needsFaceMasks
+            ? PortraitSemanticMaskProvider.masks(in: working)
+            : []
+        if let portrait = settings.portrait, portraitActive {
+            let faces = preparedFaceMasks
             if faces.isEmpty {
                 let note = "未检测到可用人脸或本机 Vision 不可用，人像修复已跳过（原图保持不变）。"
                 report.portrait = PortraitRefinementReport(applied: false, faceCount: 0, note: note)
@@ -429,6 +447,13 @@ public final class PhotoEngine {
                     report.warnings.append(note)
                 }
             }
+        }
+        try cancellation?.check()
+
+        if let reference = referenceColor, referenceColorActive {
+            working = try applyReferenceColor(reference, to: working,
+                                              faceMasks: preparedFaceMasks,
+                                              report: &report, cancellation: cancellation)
         }
         try cancellation?.check()
 
@@ -625,6 +650,155 @@ public final class PhotoEngine {
         guard value.isFinite, range.contains(value) else {
             throw AtelierError.invalidConfiguration("\(name) 超出允许范围 \(range.lowerBound)...\(range.upperBound)。")
         }
+    }
+
+    /// Applies the reference-color match ("AI 追色") to the working image.
+    ///
+    /// The match is the global OKLab quantile transfer from `ReferenceColorMatcher`.
+    /// When `skinOnly` is requested the match is blended through the union of the
+    /// detected facial skin mattes. Without a usable skin matte — missing, or
+    /// present but covering no more than `minimumSkinMaskCoverage` of the image —
+    /// the stage is skipped explicitly (the report and a warning say why) instead
+    /// of silently falling back to a global match the user did not ask for. The
+    /// skin matte is resolved before any matching work so a skipped skin-only
+    /// match never pays for a full-image match it would discard.
+    private func applyReferenceColor(_ reference: ReferenceColorSettings,
+                                     to image: CIImage,
+                                     faceMasks: [FaceSemanticMaskSet],
+                                     report: inout ProcessingReport,
+                                     cancellation: CancellationToken?) throws -> CIImage {
+        let extent = try validExtent(of: image)
+        try cancellation?.check()
+        var skinMask: CIImage?
+        if reference.skinOnly {
+            guard let usable = usableSkinMask(faceMasks, extent: extent) else {
+                let skipNote = "未检测到可用人脸/皮肤蒙版，或皮肤覆盖不足（≤ \(Self.minimumSkinMaskCoverage * 100)%），皮肤限定的参考图追色已跳过（原图保持不变）。"
+                report.referenceColor = ReferenceColorReport(
+                    applied: false, strength: reference.strength, skinOnly: true,
+                    algorithmVersion: reference.profile.algorithmVersion, note: skipNote)
+                report.warnings.append(skipNote)
+                return image
+            }
+            skinMask = usable
+        }
+        let matched = try ReferenceColorMatcher.apply(reference.profile, to: image,
+                                                      strength: reference.strength)
+        var output = matched
+        var note: String?
+        if let skinMask {
+            let filter = try makeFilter("CIBlendWithMask")
+            filter.setValue(matched, forKey: kCIInputImageKey)
+            filter.setValue(image, forKey: "inputBackgroundImage")
+            filter.setValue(skinMask, forKey: "inputMaskImage")
+            guard let blended = filter.outputImage else {
+                throw AtelierError.invalidConfiguration("追色皮肤限定合成无法生成输出。")
+            }
+            output = blended.cropped(to: extent)
+            note = "皮肤限定：参考图追色仅应用于检测到的皮肤区域。"
+        }
+        report.referenceColor = ReferenceColorReport(
+            applied: true, strength: reference.strength, skinOnly: reference.skinOnly,
+            algorithmVersion: reference.profile.algorithmVersion, note: note)
+        if let note { report.warnings.append(note) }
+        return output.cropped(to: extent)
+    }
+
+    /// Canonical skin-matte coverage threshold shared by the portrait inspector
+    /// and the skin-limited reference-color stage. A matte covering no more than
+    /// 0.05% of the frame is treated as unusable (grayscale faces, false
+    /// positives, blank frames); a small but real face still qualifies.
+    public static let minimumSkinMaskCoverage = 0.0005
+
+    /// True when a measured skin-matte coverage is high enough to act on.
+    public static func isUsableSkinCoverage(_ coverage: Double) -> Bool {
+        coverage.isFinite && coverage > minimumSkinMaskCoverage
+    }
+
+    /// Fraction of the frame covered by a soft RGB matte. Samples at most 128 px
+    /// on the longest edge; this is a state decision helper, never pixel output.
+    public static func skinMaskCoverage(of mask: CIImage, context: CIContext) -> Double {
+        let extent = mask.extent
+        guard extent.width.isFinite, extent.height.isFinite,
+              extent.width >= 1, extent.height >= 1,
+              extent.width < 100_000, extent.height < 100_000 else { return 0 }
+        let scale = min(1, 128 / max(extent.width, extent.height))
+        let width = max(1, Int((extent.width * scale).rounded()))
+        let height = max(1, Int((extent.height * scale).rounded()))
+        let bounds = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+        let sample = mask
+            .transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+            .transformed(by: CGAffineTransform(scaleX: bounds.width / extent.width,
+                                               y: bounds.height / extent.height))
+            .cropped(to: bounds)
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let address = buffer.baseAddress else { return }
+            context.render(sample, toBitmap: address,
+                           rowBytes: width * 4 * MemoryLayout<Float>.stride,
+                           bounds: bounds, format: .RGBAf, colorSpace: colorSpace)
+        }
+        var sum = 0.0
+        for index in 0..<(width * height) {
+            let value = pixels[index * 4]
+            if value.isFinite { sum += Double(min(1, max(0, value))) }
+        }
+        return sum / Double(width * height)
+    }
+
+    /// Union of the per-face skin mattes, or `nil` when no face produced a matte
+    /// or the union coverage is not usable (`isUsableSkinCoverage`).
+    ///
+    /// `CIMaximumCompositing` also takes the maximum of the alpha channels, so the
+    /// union is made opaque again before it is used as an RGB coverage matte.
+    /// Internal (not private) so tests can exercise the zero-coverage decision
+    /// without a real face.
+    func usableSkinMask(_ faceMasks: [FaceSemanticMaskSet], extent: CGRect) -> CIImage? {
+        let skins = faceMasks.compactMap(\.skin)
+        guard var union = skins.first?.cropped(to: extent) else { return nil }
+        for mask in skins.dropFirst() {
+            union = mask.applyingFilter("CIMaximumCompositing",
+                                        parameters: [kCIInputBackgroundImageKey: union])
+                .cropped(to: extent)
+        }
+        if skins.count > 1, let filter = CIFilter(name: "CIColorMatrix") {
+            filter.setValue(union, forKey: kCIInputImageKey)
+            filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputAVector")
+            filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputBiasVector")
+            union = (filter.outputImage ?? union).cropped(to: extent)
+        }
+        guard Self.isUsableSkinCoverage(Self.skinMaskCoverage(of: union, context: context)) else {
+            return nil
+        }
+        return union
+    }
+
+    /// Lowest recipe version that can encode `adjustments`/`automatic` without a
+    /// silent downgrade. Version 10 is required when a v10-only field (portrait
+    /// refinement or reference color) can take effect anywhere: the live
+    /// adjustments or the automatic recipe's baseline/reference settings. A
+    /// reference-color profile is stored as v10 data even at zero strength, so a
+    /// present (non-nil) setting also requires v10.
+    public static func requiredRecipeVersion(adjustments: AdjustmentSettings,
+                                             automatic: AutomaticBatchRecipe?) -> Int {
+        let portraits = [adjustments.portrait,
+                         automatic?.baseline.portrait,
+                         automatic?.referenceSettings.portrait]
+        let references = [adjustments.referenceColor,
+                          automatic?.baseline.referenceColor,
+                          automatic?.referenceSettings.referenceColor]
+        let needsVersion10 = portraits.contains { $0.map { !$0.isNeutral } ?? false }
+            || references.contains { $0 != nil }
+        return needsVersion10 ? 10 : 9
+    }
+
+    /// Merges a freshly measured reference profile into the current settings so a
+    /// strength / skin-only edit made while the measurement was running is kept.
+    public static func mergedReferenceColorSettings(measured profile: ReferenceColorProfile,
+                                                    current: ReferenceColorSettings?) -> ReferenceColorSettings {
+        ReferenceColorSettings(profile: profile,
+                               strength: current?.strength ?? 0.65,
+                               skinOnly: current?.skinOnly ?? false)
     }
 
     private static func validatePoint(_ point: MaskPoint, named name: String) throws {

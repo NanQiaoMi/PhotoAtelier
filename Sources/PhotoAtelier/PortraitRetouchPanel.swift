@@ -25,7 +25,7 @@ struct PortraitRetouchPanel: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.9))
                 .padding(.bottom, 10)
-            Text("基于本机 Vision 人脸地标与颜色规则的启发式处理：不是完整人脸分割，不保证真实照片效果。合成测试只验证区域约束与有界变化，未做真实照片审美验收。")
+            Text("基于本机 Vision 人脸地标与颜色规则的启发式处理：不是完整人脸分割，不保证真实照片效果。本机最多处理前 \(AppModel.portraitMaximumFaces) 张人脸；若检测到人脸但皮肤蒙版覆盖不足，人像整段跳过且不改像素。合成测试只验证区域约束与有界变化，未做真实照片审美验收。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 13)
@@ -79,7 +79,7 @@ struct PortraitRetouchPanel: View {
             .opacity(canEdit ? 1 : 0.45)
 
             separator
-            Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸时整段跳过且不改像素。效果不保证，请逐张预览。")
+            Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸、或皮肤蒙版覆盖不足（低于 \(String(format: "%.2f", AppModel.portraitMinimumSkinCoverage * 100))%% 画面）时整段跳过且不改像素，控件保持禁用。效果不保证，请逐张预览。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
         }

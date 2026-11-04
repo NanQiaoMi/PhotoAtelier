@@ -334,6 +334,201 @@ final class IOTests: XCTestCase {
             XCTAssertTrue(message.contains("只处理单页静态照片"), message)
         }
     }
+
+    func testExportResizeLongEdgeAndPercentProduceExpectedPixels() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 1000, height: 800)))
+        let context = PhotoEngine().context
+
+        var settings = ExportSettings()
+        settings.format = .png
+        settings.resize = ExportResizeSettings(mode: .longEdge, longEdge: 500)
+        let longEdgeURL = temp.appendingPathComponent("long-edge.png")
+        try PhotoExporter.write(image: image, to: longEdgeURL, settings: settings,
+                                sourceProperties: [:], context: context)
+        let longEdgeSize = try TestFiles.imagePixelSize(longEdgeURL)
+        XCTAssertEqual(longEdgeSize.width, 500)
+        XCTAssertEqual(longEdgeSize.height, 400)
+
+        settings.resize = ExportResizeSettings(mode: .percent, percent: 25)
+        let percentURL = temp.appendingPathComponent("percent.png")
+        try PhotoExporter.write(image: image, to: percentURL, settings: settings,
+                                sourceProperties: [:], context: context)
+        let percentSize = try TestFiles.imagePixelSize(percentURL)
+        XCTAssertEqual(percentSize.width, 250)
+        XCTAssertEqual(percentSize.height, 200)
+
+        // Non-integer scales still produce an exact integer target size (no
+        // ceil drift from the integral bounds used during encoding).
+        settings.resize = ExportResizeSettings(mode: .longEdge, longEdge: 333)
+        let oddURL = temp.appendingPathComponent("odd.png")
+        try PhotoExporter.write(image: image, to: oddURL, settings: settings,
+                                sourceProperties: [:], context: context)
+        let oddSize = try TestFiles.imagePixelSize(oddURL)
+        XCTAssertEqual(oddSize.width, 333)
+        XCTAssertEqual(oddSize.height, 266)
+
+        // Full-size export stays the default for recipes that never opt in.
+        var plain = ExportSettings()
+        plain.format = .png
+        let plainURL = temp.appendingPathComponent("plain.png")
+        try PhotoExporter.write(image: image, to: plainURL, settings: plain,
+                                sourceProperties: [:], context: context)
+        let plainSize = try TestFiles.imagePixelSize(plainURL)
+        XCTAssertEqual(plainSize.width, 1000)
+        XCTAssertEqual(plainSize.height, 800)
+    }
+
+    func testInvalidExportResizeIsRejectedBeforeWriting() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 16, height: 12)))
+        let context = PhotoEngine().context
+        var settings = ExportSettings()
+        settings.format = .png
+        settings.resize = ExportResizeSettings(mode: .longEdge, longEdge: 8)
+        let url = temp.appendingPathComponent("invalid.png")
+        XCTAssertThrowsError(try PhotoExporter.write(image: image, to: url, settings: settings,
+                                                     sourceProperties: [:], context: context))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+
+        settings.resize = ExportResizeSettings(mode: .percent, percent: 0)
+        XCTAssertThrowsError(try PhotoExporter.write(image: image, to: url, settings: settings,
+                                                     sourceProperties: [:], context: context))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testHeicExportWritesReadableFile() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 64, height: 48)))
+        var settings = ExportSettings()
+        settings.format = .heic
+        settings.jpegQuality = 0.9
+        let url = temp.appendingPathComponent("export.heic")
+        try PhotoExporter.write(image: image, to: url, settings: settings,
+                                sourceProperties: [:], context: PhotoEngine().context)
+        let bytes = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int)
+        XCTAssertGreaterThan(bytes, 0)
+        let pixels = try TestFiles.imagePixelSize(url)
+        XCTAssertEqual(pixels.width, 64)
+        XCTAssertEqual(pixels.height, 48)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return XCTFail("HEIC 导出无法被 ImageIO 打开")
+        }
+        XCTAssertEqual(CGImageSourceGetCount(source), 1)
+        let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+        XCTAssertEqual(Int(loaded.image.extent.width.rounded()), 64)
+        XCTAssertEqual(Int(loaded.image.extent.height.rounded()), 48)
+    }
+
+    func testExportSettingsCodableBackwardCompatibility() throws {
+        // Recipes written before v10 have neither resize nor fileNameTemplate.
+        let legacyJSON = """
+        {"format":"jpeg","colorSpace":"sRGB","jpegQuality":0.94,"recursive":false,
+         "suffix":"_graded","stripMetadata":true}
+        """
+        let legacy = try JSONDecoder().decode(ExportSettings.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.resize)
+        XCTAssertNil(legacy.fileNameTemplate)
+
+        var extended = legacy
+        extended.format = .heic
+        extended.resize = ExportResizeSettings(mode: .longEdge, longEdge: 2048)
+        extended.fileNameTemplate = "{name}{suffix}-{index}"
+        let decoded = try JSONDecoder().decode(ExportSettings.self,
+                                              from: JSONEncoder().encode(extended))
+        XCTAssertEqual(decoded, extended)
+        XCTAssertEqual(decoded.resize?.longEdge, 2048)
+        XCTAssertEqual(decoded.fileNameTemplate, "{name}{suffix}-{index}")
+    }
+
+    func testRecipeVersion10GateForExportExtensions() throws {
+        func recipe(_ configure: (inout ExportSettings) -> Void) -> Recipe {
+            var value = Recipe()
+            value.version = 9
+            configure(&value.export)
+            return value
+        }
+        let resize = recipe { $0.resize = ExportResizeSettings(mode: .longEdge, longEdge: 2048) }
+        XCTAssertThrowsError(try resize.validateVersion()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("版本 10"), error.localizedDescription)
+        }
+        let heic = recipe { $0.format = .heic }
+        XCTAssertThrowsError(try heic.validateVersion())
+        let template = recipe { $0.fileNameTemplate = "{name}{suffix}" }
+        XCTAssertThrowsError(try template.validateVersion())
+
+        var upgraded = resize
+        upgraded.version = 10
+        XCTAssertNoThrow(try upgraded.validateVersion())
+        // Neutral extension fields stay v9-compatible: old pixels and paths unchanged.
+        XCTAssertNoThrow(try Recipe().validateVersion())
+        var legacyRecipe = Recipe()
+        legacyRecipe.version = 9
+        legacyRecipe.export.resize = ExportResizeSettings(mode: .none)
+        XCTAssertNoThrow(try legacyRecipe.validateVersion())
+        // The app saves through the same predicate, so an export extension can
+        // never be persisted as a v9 recipe that its own loader rejects.
+        XCTAssertFalse(legacyRecipe.export.requiresVersion10Recipe)
+        var extendedExport = legacyRecipe.export
+        extendedExport.format = .heic
+        XCTAssertTrue(extendedExport.requiresVersion10Recipe)
+        extendedExport.format = .jpeg
+        extendedExport.resize = ExportResizeSettings(mode: .percent, percent: 50)
+        XCTAssertTrue(extendedExport.requiresVersion10Recipe)
+        extendedExport.resize = nil
+        extendedExport.fileNameTemplate = "{name}{suffix}"
+        XCTAssertTrue(extendedExport.requiresVersion10Recipe)
+    }
+
+    func testResizedExportKeepsEdgePixelsAndAlpha() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 96, height: 64)))
+        let context = PhotoEngine().context
+
+        // PNG/TIFF path (RGBA16): every edge pixel must keep full alpha and the
+        // same colour as the interior. Without clampedToExtent the Lanczos filter
+        // darkens the outer ring and drops its alpha.
+        var png = ExportSettings()
+        png.format = .png
+        png.resize = ExportResizeSettings(mode: .longEdge, longEdge: 48)
+        let pngURL = temp.appendingPathComponent("edge.png")
+        try PhotoExporter.write(image: image, to: pngURL, settings: png,
+                                sourceProperties: [:], context: context)
+        let pngPixels = try TestFiles.rgba8Pixels(pngURL)
+        XCTAssertEqual(pngPixels.width, 48)
+        XCTAssertEqual(pngPixels.height, 32)
+        let pngCenter = pngPixels.pixel(x: 24, y: 16)
+        for (x, y) in [(0, 0), (47, 0), (0, 31), (47, 31), (0, 16), (47, 16), (24, 0), (24, 31)] {
+            let edge = pngPixels.pixel(x: x, y: y)
+            XCTAssertEqual(Int(edge.alpha), 255, "PNG alpha at \(x),\(y) was \(edge.alpha)")
+            XCTAssertLessThanOrEqual(abs(Int(edge.red) - Int(pngCenter.red)), 2,
+                                     "PNG edge (\(x),\(y)) red \(edge.red) vs centre \(pngCenter.red)")
+        }
+
+        // JPEG path (opaque white composite): a clamped uniform image must stay
+        // uniform after lossy encoding, not brighten along the outer ring.
+        var jpeg = ExportSettings()
+        jpeg.format = .jpeg
+        jpeg.jpegQuality = 0.95
+        jpeg.resize = ExportResizeSettings(mode: .percent, percent: 50)
+        let jpegURL = temp.appendingPathComponent("edge.jpg")
+        try PhotoExporter.write(image: image, to: jpegURL, settings: jpeg,
+                                sourceProperties: [:], context: context)
+        let jpegPixels = try TestFiles.rgba8Pixels(jpegURL)
+        XCTAssertEqual(jpegPixels.width, 48)
+        XCTAssertEqual(jpegPixels.height, 32)
+        let jpegCenter = jpegPixels.pixel(x: 24, y: 16)
+        for (x, y) in [(0, 0), (47, 0), (0, 31), (47, 31)] {
+            let edge = jpegPixels.pixel(x: x, y: y)
+            XCTAssertLessThanOrEqual(abs(Int(edge.red) - Int(jpegCenter.red)), 6,
+                                     "JPEG edge (\(x),\(y)) red \(edge.red) vs centre \(jpegCenter.red)")
+        }
+    }
+
 }
 
 enum TestFiles {
@@ -415,6 +610,44 @@ enum TestFiles {
         bitmap.setFillColor(CGColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1))
         bitmap.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return bitmap.makeImage()
+    }
+
+    struct RGBA8Pixels {
+        let width: Int
+        let height: Int
+        let data: [UInt8]
+        func pixel(x: Int, y: Int) -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {
+            let offset = (y * width + x) * 4
+            return (data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+        }
+    }
+
+    /// Decodes an exported file into 8-bit RGBA for pixel-content assertions.
+    static func rgba8Pixels(_ url: URL) throws -> RGBA8Pixels {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw AtelierError.imageRead("测试无法解码导出文件：\(url.lastPathComponent)")
+        }
+        let width = cgImage.width, height = cgImage.height
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: &data, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw AtelierError.imageRead("测试无法创建像素缓冲")
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return RGBA8Pixels(width: width, height: height, data: data)
+    }
+
+    static func imagePixelSize(_ url: URL) throws -> (width: Int, height: Int) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight as String] as? Int else {
+            throw AtelierError.imageRead("测试无法读取导出像素尺寸：\(url.lastPathComponent)")
+        }
+        return (width, height)
     }
 
     static func renderedPixels(_ image: CIImage, context: CIContext) throws -> Data {

@@ -140,12 +140,24 @@ final class AppModel: ObservableObject {
     @Published private(set) var sceneIntent: PhotoSceneIntent = .automatic
     /// Background face-detection state for the portrait inspector tab.
     @Published private(set) var portraitFaceStatus = PortraitFaceStatus()
+    /// Reference-color ("AI 追色") UI state. The profile itself lives in
+    /// `adjustments.referenceColor`; these are display-only and never persisted.
+    /// The thumbnail is only shown while `referenceColorThumbnailProfile` still
+    /// equals the active profile, so undo/recipe-load can never pair a stale
+    /// thumbnail with a different profile.
+    @Published private(set) var referenceColorThumbnail: NSImage?
+    @Published private(set) var referenceColorThumbnailProfile: ReferenceColorProfile?
+    @Published private(set) var referenceColorSourceName: String?
+    @Published private(set) var referenceColorBusy = false
     // Full-source decode/inspection/export share one serial resource queue.
     // A cancelled synchronous RAW stage must finish before the next decode.
     private let previewQueue = DispatchQueue(label: "atelier.photo-processing", qos: .userInitiated)
     private let scanQueue = DispatchQueue(label: "atelier.scan", qos: .utility)
     private let analysisQueue = DispatchQueue(label: "atelier.analysis", qos: .userInitiated)
     private let lutQueue = DispatchQueue(label: "atelier.lut-library", qos: .userInitiated)
+    /// Measures reference-color profiles off the main thread; kept separate from
+    /// the preview/scan queues so importing a reference never blocks the editor.
+    private let referenceQueue = DispatchQueue(label: "atelier.reference-color", qos: .userInitiated)
     private var lutImportToken: CancellationToken?
     private var analysisSourceKey: String?
     private var analysisGeneration = UUID()
@@ -168,6 +180,7 @@ final class AppModel: ObservableObject {
     private var previewGeneration = UUID()
     private var scanGeneration = UUID()
     private var portraitDetectionGeneration = UUID()
+    private var referenceColorGeneration = UUID()
     private var thumbnailPending = Set<String>()
     private let engine = PhotoEngine()
     /// Accessed only on previewQueue; retains one bounded preview, never the full RAW graph.
@@ -220,9 +233,16 @@ final class AppModel: ObservableObject {
                             lutPath: selectedOption?.path,
                             lutIdentifier: selectedLUT == "none" || selectedOption?.path != nil ? nil : selectedLUT,
                             automatic: automaticRecipe)
-        // Non-neutral portrait refinement is a version-10 feature; saving it as
-        // v9 would be rejected by validateVersion() on load (silent downgrade ban).
-        if !(adjustments.portrait?.isNeutral ?? true) { recipe.version = 10 }
+        // v10 features: non-neutral portrait refinement, any reference-color
+        // setting, and any export extension (HEIC/resize/template). Saving them
+        // as v9 would be rejected by validateVersion() on load (silent downgrade
+        // ban). The shared rule also covers the automatic recipe's
+        // baseline/reference settings, so a hand-edited recipe cannot be saved as
+        // v9 and then rejected by our own v10 gate.
+        var requiredVersion = PhotoEngine.requiredRecipeVersion(adjustments: adjustments,
+                                                                automatic: automaticRecipe)
+        if exportSettings.requiresVersion10Recipe { requiredVersion = 10 }
+        if requiredVersion > recipe.version { recipe.version = requiredVersion }
         return recipe
     }
     var progress: Double { photos.isEmpty ? 0 : Double(processed) / Double(photos.count) }
@@ -263,6 +283,19 @@ final class AppModel: ObservableObject {
                 if failures > 0 { self.lutLibraryMessages = ["资料库中有 \(failures) 个 LUT 无法读取，已隔离；其余风格可继续使用。"] }
             }
         }
+        #if DEBUG
+        // Executed by every debug launch, including `--self-test`: the direct
+        // assertion for the portrait limits/coverage/v10-upgrade contract.
+        let portraitContractFailure = Self.portraitContractSelfCheckFailure()
+        assert(portraitContractFailure == nil, portraitContractFailure ?? "")
+        if ProcessInfo.processInfo.arguments.contains("--self-test") {
+            print("PORTRAIT_CONTRACT_SELF_CHECK \(portraitContractFailure == nil ? "PASS" : "FAIL")"
+                + " · maxFaces=\(Self.portraitMaximumFaces)"
+                + " · minSkinCoverage=\(Self.portraitMinimumSkinCoverage)"
+                + " · neutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings()))"
+                + " · nonNeutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)))")
+        }
+        #endif
     }
 
     func chooseInput() {
@@ -1092,6 +1125,8 @@ final class AppModel: ObservableObject {
         if automaticRecipe != snapshot.automaticRecipe { automaticRecipe = snapshot.automaticRecipe }
         if sceneIntent != snapshot.sceneIntent { sceneIntent = snapshot.sceneIntent }
         undoSuppressed = false
+        reconcileReferenceColorSource(restoredProfile: snapshot.adjustments.referenceColor?.profile,
+                                      label: "profile（历史恢复）")
         if let selected = selectedMask, !adjustments.masks.contains(where: { $0.id == selected }) {
             selectedMask = adjustments.masks.last?.id
         }
@@ -1122,6 +1157,9 @@ final class AppModel: ObservableObject {
             automaticRecipe = nil; invalidateAnalysis()
             cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
             adjustments = .init(); selectedLUT = "none"; selectedMask = nil; drawingMask = false
+            referenceColorThumbnail = nil
+            referenceColorThumbnailProfile = nil
+            referenceColorSourceName = nil
         }
         requestPreview(immediate: true)
     }
@@ -1370,6 +1408,76 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Portrait contract (limits, coverage, recipe version)
+
+    /// The portrait pipeline (`PortraitSemanticMaskProvider`) evaluates at most
+    /// four faces. The UI detection must use the same cap so the panel never
+    /// reports a face count the retouch cannot actually process.
+    static let portraitMaximumFaces = 4
+    /// A skin matte covering no more than this fraction of the frame is treated
+    /// as unusable (gray/blank frames, false positives). The rule lives in
+    /// PhotoCore so the portrait inspector and the skin-limited reference-color
+    /// stage share one threshold.
+    static let portraitMinimumSkinCoverage = PhotoEngine.minimumSkinMaskCoverage
+
+    static func isUsableSkinCoverage(_ coverage: Double) -> Bool {
+        PhotoEngine.isUsableSkinCoverage(coverage)
+    }
+
+    /// Fraction of the frame covered by a soft matte, sampled by PhotoCore at most
+    /// 128px on the longest edge; used only for UI state decisions, never output.
+    static func portraitSkinCoverage(of mask: CIImage, context: CIContext) -> Double {
+        PhotoEngine.skinMaskCoverage(of: mask, context: context)
+    }
+
+    /// True when the adjustment payload requires recipe version 10 because of the
+    /// portrait field. The save path uses this so non-neutral portrait settings
+    /// cannot silently be written as v9 (which `validateVersion` rejects).
+    static func portraitRecipeNeedsVersion10(_ adjustments: AdjustmentSettings) -> Bool {
+        !(adjustments.portrait?.isNeutral ?? true)
+    }
+
+    /// Version written for a portrait-only payload: neutral stays v9, any
+    /// non-neutral control upgrades to v10.
+    static func portraitRecipeVersion(_ settings: PortraitRefinementSettings) -> Int {
+        settings.isNeutral ? 9 : 10
+    }
+
+    /// Direct debug assertion of the portrait contract. Runs on every debug app
+    /// launch (including `--self-test`) and prints its result when smoke-testing,
+    /// so the v10-upgrade rule and the face/coverage limits are exercised by the
+    /// app itself instead of only by review.
+    static func portraitContractSelfCheckFailure() -> String? {
+        if portraitMaximumFaces != 4 {
+            return "portraitMaximumFaces must stay 4 to match PortraitSemanticMaskProvider"
+        }
+        guard portraitMinimumSkinCoverage > 0 else {
+            return "portraitMinimumSkinCoverage must be positive"
+        }
+        if isUsableSkinCoverage(0) || isUsableSkinCoverage(portraitMinimumSkinCoverage)
+            || !isUsableSkinCoverage(portraitMinimumSkinCoverage * 2)
+            || isUsableSkinCoverage(Double.nan) || isUsableSkinCoverage(Double.infinity) {
+            return "isUsableSkinCoverage threshold behaviour is wrong"
+        }
+        if portraitRecipeVersion(PortraitRefinementSettings()) != 9 {
+            return "neutral portrait settings must stay on recipe v9"
+        }
+        if portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)) != 10 {
+            return "non-neutral portrait settings must save as recipe v10"
+        }
+        var neutral = AdjustmentSettings()
+        neutral.portrait = PortraitRefinementSettings()
+        if portraitRecipeNeedsVersion10(neutral) {
+            return "explicitly neutral portrait settings must not require v10"
+        }
+        var active = AdjustmentSettings()
+        active.portrait = PortraitRefinementSettings(teethWhiten: 0.3)
+        if !portraitRecipeNeedsVersion10(active) {
+            return "non-neutral portrait settings must require v10"
+        }
+        return nil
+    }
+
     // MARK: Portrait refinement
 
     /// Requests face detection on a background queue. The panel stays disabled
@@ -1385,39 +1493,44 @@ final class AppModel: ObservableObject {
         }
         let generation = UUID(); portraitDetectionGeneration = generation
         portraitFaceStatus = PortraitFaceStatus(isDetecting: true, photoID: photo.id,
-            summary: "正在检测人脸与皮肤蒙版…")
+            summary: "正在检测人脸与皮肤蒙版（最多处理前 \(Self.portraitMaximumFaces) 张）…")
+        let engine = self.engine
         analysisQueue.async { [weak self] in
-            let result = Result { () throws -> (faces: [FaceLandmarkSet], usableSkin: Bool) in
+            let result = Result { () throws ->
+                (faces: [FaceLandmarkSet], usableSkin: Bool, maximumCoverage: Double) in
                 let loaded = try PhotoLoader.load(url: photo.url, lensCorrection: false)
-                let faces = FaceSemanticAnalyzer.detect(in: loaded.image, maxFaces: 8)
-                var usableSkin = false
-                for landmarks in faces.prefix(4) {
-                    let masks = FaceSemanticAnalyzer.masks(image: loaded.image,
-                                                           faceBounds: landmarks.boundingBox,
-                                                           landmarks: landmarks)
-                    if masks.skin != nil { usableSkin = true; break }
+                let faces = FaceSemanticAnalyzer.detect(in: loaded.image, maxFaces: Self.portraitMaximumFaces)
+                var maximumCoverage = 0.0
+                for landmarks in faces {
+                    guard let skin = FaceSemanticAnalyzer.masks(image: loaded.image,
+                                                                faceBounds: landmarks.boundingBox,
+                                                                landmarks: landmarks).skin else { continue }
+                    let coverage = Self.portraitSkinCoverage(of: skin, context: engine.context)
+                    maximumCoverage = max(maximumCoverage, coverage)
+                    if Self.isUsableSkinCoverage(maximumCoverage) { break }
                 }
-                return (faces, usableSkin)
+                return (faces, Self.isUsableSkinCoverage(maximumCoverage), maximumCoverage)
             }
             DispatchQueue.main.async {
                 guard let self = self, self.portraitDetectionGeneration == generation else { return }
                 switch result {
                 case .success(let detection):
                     let confidence = detection.faces.map(\.confidence).max() ?? 0
+                    let coveragePercent = String(format: "%.3f%%", detection.maximumCoverage * 100)
                     if detection.faces.isEmpty {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, summary:
-                            "未检测到可用人脸：人像修复依赖本机 Vision 的人脸地标；侧脸、遮挡、小脸可能漏检。未检测到人脸时不应用人像调整。")
+                            "未检测到可用人脸：人像修复依赖本机 Vision 的人脸地标；侧脸、遮挡、小脸可能漏检。本机人像最多处理前 \(Self.portraitMaximumFaces) 张人脸，未检测到人脸时不应用人像调整。")
                     } else if !detection.usableSkin {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
                             maximumConfidence: confidence,
-                            summary: "检测到 \(detection.faces.count) 张人脸，但未能生成可用的皮肤蒙版；人像修正在本图不可用。")
+                            summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张），但皮肤蒙版覆盖不足（最高约 \(coveragePercent)，低于阈值 \(Self.portraitMinimumSkinCoverage * 100)%%）；人像整段跳过、不改像素，控件保持禁用。")
                     } else {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
                             maximumConfidence: confidence, hasUsableSkinMask: true,
-                            summary: "检测到 \(detection.faces.count) 张人脸 · 最高置信度 \(Int((confidence * 100).rounded()))%；人像调整只在这张照片的预览中应用。")
+                            summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张）· 最高置信度 \(Int((confidence * 100).rounded()))% · 皮肤覆盖约 \(coveragePercent)；人像调整只在这张照片的预览中应用。")
                     }
                 case .failure(let error):
                     self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true, photoID: photo.id,
@@ -1464,6 +1577,118 @@ final class AppModel: ObservableObject {
         status = "已归零人像调整。"
     }
 
+    // MARK: Reference color ("AI 追色")
+
+    /// Opens an image panel and measures the chosen photo into a reference profile.
+    ///
+    /// The reference photo is read locally only; the recipe stores the measured
+    /// OKLab profile, never the image. This is a global colour-distribution match,
+    /// not a face/object transfer and not a guarantee of a commercial-grade look.
+    func chooseReferenceColorImage() {
+        guard !batchRunning, !referenceColorBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择参考图（仅在本机测量色彩分布，不上传）"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadReferenceColor(from: url)
+    }
+
+    /// Measures `url` off the main thread and applies the resulting profile to the
+    /// current edit. Failure is explicit: the previous profile (if any) stays and
+    /// the error is surfaced instead of silently disabling the stage.
+    func loadReferenceColor(from url: URL) {
+        guard !batchRunning else { return }
+        let generation = UUID(); referenceColorGeneration = generation
+        let previous = adjustments.referenceColor
+        referenceColorBusy = true
+        referenceQueue.async { [weak self] in
+            let result = Result { () throws -> (profile: ReferenceColorProfile, thumbnail: NSImage?) in
+                let loaded = try PhotoLoader.load(url: url, lensCorrection: false)
+                let profile = try ReferenceColorMatcher.profile(reference: loaded.image)
+                let cg = try? PhotoLoader.thumbnail(url: url, maxDimension: 160)
+                return (profile, cg.map { NSImage(cgImage: $0, size: .zero) })
+            }
+            DispatchQueue.main.async {
+                guard let self = self, self.referenceColorGeneration == generation else { return }
+                self.referenceColorBusy = false
+                switch result {
+                case .success(let loaded):
+                    // Merge against the settings that are current *now*: an
+                    // earlier `previous` capture would overwrite a strength /
+                    // skin-only edit made while the measurement was running.
+                    let current = self.adjustments.referenceColor ?? previous
+                    self.adjustments.referenceColor = PhotoEngine.mergedReferenceColorSettings(
+                        measured: loaded.profile, current: current)
+                    self.referenceColorThumbnail = loaded.thumbnail
+                    self.referenceColorThumbnailProfile = loaded.profile
+                    self.referenceColorSourceName = url.lastPathComponent
+                    self.status = "已建立参考图色彩 profile；追色只做全局 OKLab 分布匹配，不保证审美效果。"
+                    self.requestPreview(immediate: true)
+                case .failure(let error):
+                    if self.adjustments.referenceColor == nil {
+                        self.referenceColorThumbnail = nil
+                        self.referenceColorThumbnailProfile = nil
+                        self.referenceColorSourceName = nil
+                    }
+                    self.present(error)
+                }
+            }
+        }
+    }
+
+    func clearReferenceColor() {
+        referenceColorGeneration = UUID()
+        referenceColorBusy = false
+        adjustments.referenceColor = nil
+        referenceColorThumbnail = nil
+        referenceColorThumbnailProfile = nil
+        referenceColorSourceName = nil
+        status = "已清除参考图追色。"
+        requestPreview(immediate: true)
+    }
+
+    /// Applies one reference-color edit. The profile is kept when only strength or
+    /// the skin-only flag changes; a zero strength stays neutral in the engine.
+    func updateReferenceColorSettings(_ mutate: (inout ReferenceColorSettings) -> Void) {
+        guard var settings = adjustments.referenceColor else { return }
+        mutate(&settings)
+        settings.strength = min(max(settings.strength, 0), 1)
+        adjustments.referenceColor = settings
+    }
+
+    func setReferenceColorStrength(_ value: Double) {
+        updateReferenceColorSettings { $0.strength = value }
+    }
+
+    func setReferenceColorSkinOnly(_ enabled: Bool) {
+        updateReferenceColorSettings { $0.skinOnly = enabled }
+    }
+
+    /// The thumbnail is display-only sugar; it is only shown while it still
+    /// describes the active profile (undo/recipe-load can replace the profile).
+    var referenceColorThumbnailMatchesProfile: Bool {
+        guard let active = adjustments.referenceColor?.profile else { return false }
+        return referenceColorThumbnail != nil && referenceColorThumbnailProfile == active
+    }
+
+    /// Keeps the display-only source label consistent with the active profile
+    /// after a history restore or recipe load. When the restored profile no longer
+    /// matches the retained thumbnail both are cleared and the label says where
+    /// the profile came from, so the panel can never show a stale file name next
+    /// to a placeholder thumbnail.
+    private func reconcileReferenceColorSource(restoredProfile: ReferenceColorProfile?,
+                                               label: String) {
+        if let restoredProfile, restoredProfile == referenceColorThumbnailProfile,
+           referenceColorThumbnail != nil {
+            return
+        }
+        referenceColorThumbnail = nil
+        referenceColorThumbnailProfile = nil
+        referenceColorSourceName = restoredProfile == nil ? nil : label
+    }
+
     func saveRecipe() {
         guard lutContractReady else { status = "先确认自定义 LUT 空间，再保存逐图适配配方。"; return }
         let panel = NSSavePanel(); panel.title = "保存调色配方"
@@ -1505,6 +1730,13 @@ final class AppModel: ObservableObject {
                 automaticRecipe = saved.automatic; invalidateAnalysis()
                 sceneIntent = saved.automatic?.sceneIntent ?? .automatic
                 selectedMask = nil; cancelMaskInteraction(); maskOverlayImage = nil; maskInspection = nil
+                // A recipe carries the measured profile, not the reference image:
+                // drop any stale thumbnail so the panel never pairs them.
+                referenceColorGeneration = UUID()
+                referenceColorBusy = false
+                referenceColorThumbnail = nil
+                referenceColorThumbnailProfile = nil
+                referenceColorSourceName = saved.adjustments.referenceColor == nil ? nil : "配方内 profile"
                 status = "配方已载入。"
             }
             reloadFolder(); requestPreview(immediate: true)
