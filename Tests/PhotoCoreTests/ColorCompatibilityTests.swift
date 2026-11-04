@@ -1252,4 +1252,73 @@ final class ColorCompatibilityTests: XCTestCase {
         settings.liquify = FaceReshapeSettings(strength: 1.5)
         XCTAssertThrowsError(try PhotoEngine.validate(settings))
     }
+
+    // MARK: - P1-7 watermark export recipe gate
+
+    func testWatermarkExportRequiresV11AndRoundTrips() throws {
+        var watermark = WatermarkSettings(text: "光屿 WATERMARK", anchor: .bottomRight,
+                                          opacity: 0.85, scale: 1.5, rotationDegrees: 12)
+        watermark.shadow = WatermarkShadow()
+        watermark.stroke = WatermarkStroke()
+        var export = ExportSettings()
+        export.format = .png
+        export.watermark = watermark
+        export.watermarkDualVersion = true
+
+        // v10 recipes must reject a non-neutral watermark instead of silently
+        // dropping it; v11 accepts and round-trips the full settings.
+        var v10 = Recipe(export: export)
+        v10.version = 10
+        XCTAssertThrowsError(try v10.validateVersion(), "v10 配方不得接受非中性水印") { error in
+            XCTAssertTrue(error.localizedDescription.contains("水印"), error.localizedDescription)
+        }
+        var v11 = v10
+        v11.version = 11
+        XCTAssertNoThrow(try v11.validateVersion())
+        let decoded = try JSONDecoder().decode(Recipe.self, from: JSONEncoder().encode(v11))
+        XCTAssertEqual(decoded, v11)
+        XCTAssertEqual(try XCTUnwrap(decoded.export.watermark), watermark)
+        XCTAssertEqual(decoded.export.watermarkDualVersion, true)
+        XCTAssertEqual(decoded.version, 11)
+
+        // A neutral watermark is the documented no-op, so v10 stays loadable.
+        var neutralExport = export
+        neutralExport.watermark?.opacity = 0
+        var neutralRecipe = Recipe(export: neutralExport)
+        neutralRecipe.version = 10
+        XCTAssertNoThrow(try neutralRecipe.validateVersion())
+
+        // Save-side predicate: any stored payload upgrades to v11 (data only
+        // exists there); the gate only rejects an active watermark.
+        XCTAssertFalse(ExportSettings().storesWatermarkData)
+        XCTAssertFalse(ExportSettings().requiresVersion11Recipe)
+        XCTAssertTrue(neutralExport.storesWatermarkData)
+        XCTAssertFalse(neutralExport.requiresVersion11Recipe)
+        XCTAssertTrue(export.storesWatermarkData)
+        XCTAssertTrue(export.requiresVersion11Recipe)
+        XCTAssertTrue(export.exportsDualWatermarkVersion)
+        XCTAssertFalse(ExportSettings().exportsDualWatermarkVersion)
+        var staleDual = export
+        staleDual.watermark = nil
+        staleDual.watermarkDualVersion = true
+        XCTAssertFalse(staleDual.exportsDualWatermarkVersion, "无水印时双版本开关应被忽略")
+        XCTAssertFalse(staleDual.requiresVersion11Recipe)
+
+        // v1–v10 recipes without the new keys decode as nil and keep the old path.
+        let legacyJSON = """
+        {"format":"jpeg","colorSpace":"sRGB","jpegQuality":0.94,"recursive":false,
+         "suffix":"_graded","stripMetadata":true}
+        """
+        let legacy = try JSONDecoder().decode(ExportSettings.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.watermark)
+        XCTAssertNil(legacy.watermarkDualVersion)
+        XCTAssertFalse(legacy.requiresVersion11Recipe)
+        XCTAssertFalse(legacy.storesWatermarkData)
+        var legacyRecipe = Recipe(export: legacy)
+        legacyRecipe.version = 10
+        XCTAssertNoThrow(try legacyRecipe.validateVersion(), "旧配方导出设置缺新字段时必须保持可加载")
+        XCTAssertEqual(legacy.format, .jpeg)
+        XCTAssertEqual(legacy.suffix, "_graded")
+        XCTAssertTrue(legacy.stripMetadata)
+    }
 }

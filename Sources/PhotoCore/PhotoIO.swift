@@ -413,16 +413,28 @@ public enum PhotoExporter {
               bounds.width * bounds.height <= 120_000_000 else {
             throw AtelierError.imageWrite("处理后的图像超过安全尺寸上限（单边 32768 像素或 120 MP）")
         }
+        // The watermark is applied after the Lanczos resize (its size is relative
+        // to the final export canvas) and before flattening/encoding, so metadata,
+        // colour conversion and atomic install below see the watermarked pixels.
+        // Missing/undecodable watermark image files throw here and leave no file.
+        let exportImage: CIImage
+        if let watermark = settings.watermark, !watermark.isNeutral {
+            exportImage = try WatermarkRenderer.render(on: source,
+                                                       canvasExtent: source.extent,
+                                                       settings: watermark)
+        } else {
+            exportImage = source
+        }
         let outputImage: CIImage
         let outputFormat: CIFormat
         switch settings.format {
         case .jpeg, .heic:
             // Both lossy formats are encoded opaque: flatten alpha on white.
             let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: bounds)
-            outputImage = source.composited(over: white).cropped(to: bounds)
+            outputImage = exportImage.composited(over: white).cropped(to: bounds)
             outputFormat = .RGBA8
         case .tiff, .png:
-            outputImage = source.cropped(to: bounds)
+            outputImage = exportImage.cropped(to: bounds)
             outputFormat = .RGBA16
         }
 
@@ -504,6 +516,13 @@ public enum PhotoExporter {
                     throw AtelierError.invalidConfiguration("导出尺寸百分比必须在 1 到 400 之间")
                 }
             }
+        }
+        // Structural watermark validation (text non-empty / image path present,
+        // numeric ranges). Missing or undecodable watermark image files are
+        // reported by the renderer with the actual path instead of silently
+        // dropping the watermark.
+        if let watermark = settings.watermark {
+            try watermark.validate()
         }
     }
 

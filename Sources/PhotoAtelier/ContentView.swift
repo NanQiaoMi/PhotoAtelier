@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import PhotoCore
 import UniformTypeIdentifiers
@@ -464,8 +465,9 @@ struct ContentView: View {
                     set: { model.exportSettings.fileNameTemplate = $0.isEmpty ? nil : $0 }))
                     .textFieldStyle(.roundedBorder).font(.system(size: 11))
             }
-            Text("模板占位符：{name} 原名、{suffix} 后缀、{index} 序号；缩放/模板/HEIC 需要配方 v10。")
+            Text("模板占位符：{name} 原名、{suffix} 后缀、{index} 序号；缩放/模板/HEIC 需要配方 v10；水印需要配方 v11。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+            watermarkSection
             Toggle("移除位置与相机隐私信息", isOn: $model.exportSettings.stripMetadata)
                 .toggleStyle(.checkbox).font(.system(size: 10))
             Text("始终写入正确的输出色彩配置和方向。关闭隐私清理后，可保留原片中的部分拍摄参数。")
@@ -482,6 +484,100 @@ struct ContentView: View {
                     .font(.system(size: 11)).padding(.top, 8)
             }
             }
+        }
+    }
+
+    /// Exit-panel watermark editor. The renderer is export-only, so edits do not
+    /// touch the preview: they are applied by `PhotoExporter` after resize and
+    /// before encoding (and by the batch dual-version switch).
+    private var watermarkSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Toggle("添加水印", isOn: Binding(
+                get: { model.exportSettings.watermark != nil },
+                set: { enabled in
+                    model.exportSettings.watermark = enabled ? WatermarkSettings(text: "光屿 PHOTO") : nil
+                    if !enabled { model.exportSettings.watermarkDualVersion = nil }
+                }))
+                .toggleStyle(.checkbox).font(.system(size: 11))
+            if let watermark = model.exportSettings.watermark {
+                Picker("水印类型", selection: Binding(
+                    get: { watermark.kind },
+                    set: { model.exportSettings.watermark?.kind = $0 })) {
+                    Text("文字").tag(WatermarkSettings.Kind.text)
+                    Text("图片").tag(WatermarkSettings.Kind.image)
+                }.font(.system(size: 11))
+                if watermark.kind == .text {
+                    HStack {
+                        Text("水印文字").font(.system(size: 11))
+                        TextField("光屿 PHOTO", text: Binding(
+                            get: { watermark.text },
+                            set: { model.exportSettings.watermark?.text = $0 }))
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Text("水印图片").font(.system(size: 11))
+                        Button(watermark.imagePath.map { ($0 as NSString).lastPathComponent } ?? "选择本地图片…") {
+                            chooseWatermarkImage()
+                        }.buttonStyle(.bordered).font(.system(size: 10))
+                        if watermark.imagePath != nil {
+                            Button("清除") { model.exportSettings.watermark?.imagePath = nil }
+                                .buttonStyle(.plain).font(.system(size: 10))
+                                .foregroundColor(AtelierPalette.accent)
+                        }
+                    }
+                }
+                Picker("水印位置", selection: Binding(
+                    get: { watermark.anchor },
+                    set: { model.exportSettings.watermark?.anchor = $0 })) {
+                    ForEach(WatermarkAnchor.allCases, id: \.self) { anchor in
+                        Text(watermarkAnchorTitle(anchor)).tag(anchor)
+                    }
+                }.font(.system(size: 11))
+                AdjustmentSlider(title: "水印透明度",
+                                 value: Binding(get: { watermark.opacity },
+                                                set: { model.exportSettings.watermark?.opacity = min(1, max(0, $0)) }),
+                                 range: 0...1, percent: true)
+                AdjustmentSlider(title: "水印缩放",
+                                 value: Binding(get: { watermark.scale },
+                                                set: { model.exportSettings.watermark?.scale = min(20, max(0.02, $0)) }),
+                                 range: 0.2...4, percent: true)
+                AdjustmentSlider(title: "水印旋转",
+                                 value: Binding(get: { watermark.rotationDegrees },
+                                                set: { model.exportSettings.watermark?.rotationDegrees = min(180, max(-180, $0)) }),
+                                 range: -45...45, suffix: "°")
+                Toggle("同时导出无水印版本", isOn: Binding(
+                    get: { model.exportSettings.watermarkDualVersion == true },
+                    set: { model.exportSettings.watermarkDualVersion = $0 ? true : nil }))
+                    .toggleStyle(.checkbox).font(.system(size: 10))
+                Text("水印只写入导出文件，不改变原图；旋转或超大字号时水印会自适应缩小以免被裁切。图片水印引用本地文件，缺失时导出会逐项明确报错。双版本会给每张照片额外输出一份 _nowatermark 副本。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+            }
+        }
+    }
+
+    private func chooseWatermarkImage() {
+        let panel = NSOpenPanel()
+        panel.title = "选择水印图片（仅本地文件）"
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.prompt = "使用图片"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.exportSettings.watermark?.imagePath = url.path
+    }
+
+    private func watermarkAnchorTitle(_ anchor: WatermarkAnchor) -> String {
+        switch anchor {
+        case .topLeft: return "左上"
+        case .topCenter: return "上中"
+        case .topRight: return "右上"
+        case .centerLeft: return "左中"
+        case .center: return "居中"
+        case .centerRight: return "右中"
+        case .bottomLeft: return "左下"
+        case .bottomCenter: return "下中"
+        case .bottomRight: return "右下"
         }
     }
 

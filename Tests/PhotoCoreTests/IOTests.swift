@@ -529,6 +529,124 @@ final class IOTests: XCTestCase {
         }
     }
 
+    // MARK: - P1-7 watermark export integration
+
+    func testExporterAppliesWatermarkAfterResizeWithPositionAndOpacity() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let context = PhotoEngine().context
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 200, height: 150)))
+
+        var plain = ExportSettings()
+        plain.format = .png
+        plain.resize = ExportResizeSettings(mode: .longEdge, longEdge: 100)
+        let plainURL = temp.appendingPathComponent("plain.png")
+        try PhotoExporter.write(image: image, to: plainURL, settings: plain,
+                                sourceProperties: [:], context: context)
+        let plainPixels = try TestFiles.rgba8Pixels(plainURL)
+        XCTAssertEqual(plainPixels.width, 100, "水印必须在 resize 之后叠加，导出尺寸按 resize 结果")
+        XCTAssertEqual(plainPixels.height, 75)
+        let reference = plainPixels.pixel(x: 10, y: 10)
+        XCTAssertEqual(reference.alpha, 255)
+        var plainIsUniform = true
+        for y in 0..<plainPixels.height {
+            for x in 0..<plainPixels.width {
+                let pixel = plainPixels.pixel(x: x, y: y)
+                if pixel.red != reference.red || pixel.green != reference.green
+                    || pixel.blue != reference.blue || pixel.alpha != 255 {
+                    plainIsUniform = false
+                }
+            }
+        }
+        XCTAssertTrue(plainIsUniform, "无水印导出应保持均匀面")
+        XCTAssertEqual(try TestFiles.rgba8Pixels(plainURL).data, plainPixels.data,
+                       "旧导出路径（无 watermark）应逐像素稳定")
+
+        func writeWatermark(opacity: Double, name: String) throws -> URL {
+            var settings = plain
+            settings.watermark = WatermarkSettings(text: "WM", anchor: .bottomRight,
+                                                   opacity: opacity, scale: 4, color: .white)
+            let url = temp.appendingPathComponent(name)
+            try PhotoExporter.write(image: image, to: url, settings: settings,
+                                    sourceProperties: [:], context: context)
+            return url
+        }
+
+        let fullPixels = try TestFiles.rgba8Pixels(try writeWatermark(opacity: 1, name: "full.png"))
+        XCTAssertEqual(fullPixels.width, 100)
+        XCTAssertEqual(fullPixels.height, 75)
+        let fullBright = try XCTUnwrap(brightRegion(fullPixels, threshold: 220),
+                                       "白色水印必须被渲染到导出文件")
+        XCTAssertGreaterThan(fullBright.count, 20)
+        XCTAssertGreaterThan(fullBright.minX, 45, "水印应位于画布右侧")
+        XCTAssertGreaterThan(fullBright.minY, 30, "水印应位于画布下侧")
+        XCTAssertLessThanOrEqual(fullBright.maxX, 99)
+        XCTAssertLessThanOrEqual(fullBright.maxY, 74)
+        let fullPeak = try XCTUnwrap(peakLuminance(fullPixels))
+        XCTAssertGreaterThanOrEqual(fullPeak, 240, "不透明白色水印峰值应接近白")
+
+        let halfPixels = try TestFiles.rgba8Pixels(try writeWatermark(opacity: 0.5, name: "half.png"))
+        let halfPeak = try XCTUnwrap(peakLuminance(halfPixels))
+        XCTAssertTrue((160...235).contains(halfPeak),
+                      "50% 透明水印应落在半透明混合区间，实际峰值 \(halfPeak)")
+
+        // Neutral opacity is the documented no-op: pixel-identical to the legacy path.
+        let neutralPixels = try TestFiles.rgba8Pixels(try writeWatermark(opacity: 0, name: "neutral.png"))
+        XCTAssertEqual(neutralPixels.data, plainPixels.data, "透明度 0 的水印必须逐像素等于旧导出路径")
+    }
+
+    func testExporterMissingWatermarkImageFailsExplicitlyWithoutOutput() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let image = CIImage(cgImage: try XCTUnwrap(TestFiles.solidImage(width: 40, height: 30)))
+        var settings = ExportSettings()
+        settings.format = .png
+        settings.watermark = WatermarkSettings(kind: .image,
+                                               imagePath: temp.appendingPathComponent("missing.png").path,
+                                               opacity: 1)
+        let url = temp.appendingPathComponent("out.png")
+        XCTAssertThrowsError(try PhotoExporter.write(image: image, to: url, settings: settings,
+                                                     sourceProperties: [:],
+                                                     context: PhotoEngine().context)) { error in
+            guard let atelierError = error as? AtelierError,
+                  case .imageRead = atelierError else {
+                XCTFail("缺失水印图片应报 imageRead，实际：\(error)")
+                return
+            }
+            XCTAssertTrue(error.localizedDescription.contains("水印图片"), error.localizedDescription)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                       "水印图片缺失时不得留下半成品输出")
+    }
+
+    private func brightRegion(_ pixels: TestFiles.RGBA8Pixels, threshold: Int)
+        -> (count: Int, minX: Int, maxX: Int, minY: Int, maxY: Int)? {
+        var minX = Int.max, maxX = Int.min, minY = Int.max, maxY = Int.min
+        var count = 0
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width {
+                let pixel = pixels.pixel(x: x, y: y)
+                let luminance = (Int(pixel.red) + Int(pixel.green) + Int(pixel.blue)) / 3
+                guard luminance >= threshold else { continue }
+                count += 1
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        return count == 0 ? nil : (count, minX, maxX, minY, maxY)
+    }
+
+    private func peakLuminance(_ pixels: TestFiles.RGBA8Pixels) -> Int? {
+        var peak = 0
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width {
+                let pixel = pixels.pixel(x: x, y: y)
+                peak = max(peak, (Int(pixel.red) + Int(pixel.green) + Int(pixel.blue)) / 3)
+            }
+        }
+        return peak
+    }
+
 }
 
 enum TestFiles {

@@ -43,7 +43,7 @@ public final class BatchProcessor {
         let runID = UUID().uuidString.lowercased()
         let manifestURL = output.appendingPathComponent("batch-\(runID).json", isDirectory: false)
         var manifest = BatchManifest(
-            version: 2,
+            version: 3,
             runID: runID,
             createdAt: ISO8601DateFormatter().string(from: Date()),
             recipe: recipe,
@@ -63,6 +63,14 @@ public final class BatchProcessor {
         var summary = BatchSummary(manifestURL: manifestURL)
         onEvent(BatchEvent(kind: .started, index: 0, total: items.count, message: "开始批量处理"))
         let engine = PhotoEngine()
+        // Watermark is an export-level stage: PhotoExporter applies it from
+        // `recipe.export.watermark`. "Dual version" additionally writes a clean
+        // copy of every photo, so a delivery can ship both variants in one run.
+        let watermarkActive = WatermarkRenderer.shouldApply(recipe.export.watermark)
+        let dualWatermark = recipe.export.exportsDualWatermarkVersion
+        var cleanExportSettings = recipe.export
+        cleanExportSettings.watermark = nil
+        cleanExportSettings.watermarkDualVersion = nil
 
         for (offset, item) in items.enumerated() {
             let index = offset + 1
@@ -117,7 +125,29 @@ public final class BatchProcessor {
                         context: engine.context,
                         cancellation: cancellation
                     )
-                    return .success(output: outputURL, report: processed.report)
+                    var watermarkFreeURL: URL?
+                    if dualWatermark {
+                        do {
+                            try cancellation.check()
+                            let cleanBaseURL = noWatermarkBaseURL(from: baseURL)
+                            watermarkFreeURL = try writeUnique(
+                                image: processed.image,
+                                baseURL: cleanBaseURL,
+                                settings: cleanExportSettings,
+                                sourceProperties: loaded.properties,
+                                context: engine.context,
+                                cancellation: cancellation
+                            )
+                        } catch {
+                            // Both versions are one deliverable: never leave a
+                            // half-written pair. Remove the primary file before
+                            // reporting the item as failed/cancelled.
+                            _ = Darwin.unlink(outputURL.path)
+                            throw error
+                        }
+                    }
+                    return .success(output: outputURL, report: processed.report,
+                                    watermarkFreeOutput: watermarkFreeURL)
                 } catch {
                     return .failure(error)
                 }
@@ -125,19 +155,22 @@ public final class BatchProcessor {
             engine.context.clearCaches()
 
             switch outcome {
-            case .success(let outputURL, let report):
+            case .success(let outputURL, let report, let watermarkFreeOutput):
                 let entry = BatchManifestEntry(
                     input: item.relativePath,
                     output: relativePath(of: outputURL, under: output),
                     status: "completed",
                     message: "",
-                    report: report
+                    report: report,
+                    watermarkApplied: watermarkActive ? true : nil,
+                    watermarkFreeOutput: watermarkFreeOutput.flatMap { relativePath(of: $0, under: output) }
                 )
                 manifest.entries.append(entry)
                 do {
                     try updateManifest(manifest, at: manifestURL)
                 } catch {
                     let cleanupResult = Darwin.unlink(outputURL.path)
+                    if let watermarkFreeOutput { _ = Darwin.unlink(watermarkFreeOutput.path) }
                     if cleanupResult == 0 || errno == ENOENT {
                         throw AtelierError.imageWrite("输出已撤销；无法原子更新批次清单：\(error.localizedDescription)")
                     }
@@ -193,7 +226,7 @@ public final class BatchProcessor {
 }
 
 private enum ItemOutcome {
-    case success(output: URL, report: ProcessingReport)
+    case success(output: URL, report: ProcessingReport, watermarkFreeOutput: URL?)
     case failure(Error)
 }
 
@@ -216,6 +249,12 @@ private struct BatchManifestEntry: Codable {
     var status: String
     var message: String
     var report: ProcessingReport?
+    /// True when the primary output has the watermark composited in; nil when no
+    /// watermark was active for this run.
+    var watermarkApplied: Bool? = nil
+    /// Relative path of the watermark-free copy produced by the dual-version
+    /// switch (nil when the switch is off or no watermark is active).
+    var watermarkFreeOutput: String? = nil
 }
 
 private func validateRecipe(_ recipe: Recipe) throws {
@@ -258,6 +297,13 @@ private func validateExportExtensions(_ settings: ExportSettings) throws {
     }
     if let template = settings.fileNameTemplate {
         try validateFileNameTemplate(template)
+    }
+    // Structural watermark validation here (text non-empty / image path present,
+    // numeric ranges) runs before the output directory is created. Missing or
+    // undecodable watermark image files still surface per photo from the renderer
+    // so one bad path does not abort the whole batch.
+    if let watermark = settings.watermark {
+        try watermark.validate()
     }
 }
 
@@ -315,7 +361,36 @@ private func describeExportSettings(_ settings: ExportSettings) -> [String] {
     if settings.format == .jpeg || settings.format == .heic {
         summary.append("quality=\(settings.jpegQuality)")
     }
+    // Actual watermark parameters of this run, so a manifest can be audited
+    // without decoding the embedded recipe.
+    if let watermark = settings.watermark {
+        summary.append("watermark=\(watermark.kind.rawValue)")
+        summary.append("watermarkAnchor=\(watermark.anchor.rawValue)")
+        summary.append("watermarkOpacity=\(watermark.opacity)")
+        summary.append("watermarkScale=\(watermark.scale)")
+        summary.append("watermarkRotation=\(watermark.rotationDegrees)")
+        switch watermark.kind {
+        case .text:
+            summary.append("watermarkText=\(watermark.text)")
+        case .image:
+            summary.append("watermarkImage=\(watermark.imagePath ?? "")")
+        }
+    } else {
+        summary.append("watermark=none")
+    }
+    summary.append("watermarkDualVersion=\(settings.exportsDualWatermarkVersion)")
     return summary
+}
+
+/// Base URL for the watermark-free copy of the dual-version batch switch.
+/// `_nowatermark` is appended to the stem so the existing unique-name loop and
+/// no-overwrite semantics apply to the extra file as well.
+private func noWatermarkBaseURL(from url: URL) -> URL {
+    let fileName = url.lastPathComponent as NSString
+    let extensionPart = fileName.pathExtension
+    let stem = extensionPart.isEmpty ? url.lastPathComponent : fileName.deletingPathExtension
+    let name = extensionPart.isEmpty ? "\(stem)_nowatermark" : "\(stem)_nowatermark.\(extensionPart)"
+    return url.deletingLastPathComponent().appendingPathComponent(name, isDirectory: false)
 }
 
 private func validateRecipeLUT(_ recipe: Recipe, supplied: LUTCube?) throws {

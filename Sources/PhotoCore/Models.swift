@@ -373,6 +373,14 @@ public struct ExportSettings: Codable, Equatable {
     /// Optional template with {name}, {suffix} and {index}; nil keeps the legacy
     /// "<name><suffix>.<ext>" naming.
     public var fileNameTemplate: String? = nil
+    /// Optional watermark composited by the exporter after resizing and before
+    /// encoding. Nil keeps legacy exports pixel-identical. A non-neutral
+    /// watermark requires recipe version 11 (`Recipe.validateVersion`).
+    public var watermark: WatermarkSettings? = nil
+    /// Batch-only flag: when true and a non-neutral watermark is configured, a
+    /// batch run writes both a watermarked and an unwatermarked copy per photo.
+    /// Optional so recipes written before v11 keep decoding unchanged.
+    public var watermarkDualVersion: Bool? = nil
     public init() {}
 }
 
@@ -385,6 +393,28 @@ public extension ExportSettings {
         format == .heic
             || (resize.map { !$0.isNeutral } ?? false)
             || (fileNameTemplate?.isEmpty == false)
+    }
+
+    /// True when the watermark changes pixels and therefore needs a v11 recipe.
+    /// A neutral watermark (opacity <= 0) is a documented no-op, so v10 recipes
+    /// carrying one stay loadable.
+    var requiresVersion11Recipe: Bool {
+        guard let watermark else { return false }
+        return !watermark.isNeutral
+    }
+
+    /// True when any watermark payload is stored, even a neutral one. The save
+    /// path uses this so watermark data round-trips in v11 instead of being
+    /// written into a recipe whose v11 gate still permits it (neutral) but whose
+    /// intent is a P1 export.
+    var storesWatermarkData: Bool {
+        watermark != nil
+    }
+
+    /// True when a batch run should write both watermark versions. Requires an
+    /// active (non-neutral) watermark; a stale dual flag alone is ignored.
+    var exportsDualWatermarkVersion: Bool {
+        watermarkDualVersion == true && requiresVersion11Recipe
     }
 }
 
@@ -444,6 +474,9 @@ public struct Recipe: Codable, Equatable {
         let usesExtendedExport = exportSettings.requiresVersion10Recipe
         guard version >= 10 || !usesExtendedExport else {
             throw AtelierError.invalidConfiguration("HEIC 输出、导出缩放与文件名模板需要配方版本 10，不能静默降级。")
+        }
+        guard version >= 11 || !exportSettings.requiresVersion11Recipe else {
+            throw AtelierError.invalidConfiguration("水印导出需要配方版本 11，不能静默降级。")
         }
         guard version >= 4 || automatic?.sceneIntent == nil else {
             throw AtelierError.invalidConfiguration("显式场景意图需要配方版本 4，不能静默降级。")

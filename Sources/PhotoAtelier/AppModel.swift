@@ -251,6 +251,10 @@ final class AppModel: ObservableObject {
         var requiredVersion = PhotoEngine.requiredRecipeVersion(adjustments: adjustments,
                                                                 automatic: automaticRecipe)
         if exportSettings.requiresVersion10Recipe { requiredVersion = max(requiredVersion, 10) }
+        // Any stored watermark payload needs v11 (its data only exists there), so
+        // a saved recipe can be loaded back instead of failing our own v11 gate.
+        // Approved P1-7 scope extension: this is the only AppModel change.
+        if exportSettings.storesWatermarkData { requiredVersion = max(requiredVersion, 11) }
         if requiredVersion > recipe.version { recipe.version = requiredVersion }
         return recipe
     }

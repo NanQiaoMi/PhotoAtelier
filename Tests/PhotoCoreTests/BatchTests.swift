@@ -304,7 +304,7 @@ final class BatchTests: XCTestCase {
 
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
-        XCTAssertEqual(manifest["version"] as? Int, 2)
+        XCTAssertEqual(manifest["version"] as? Int, 3)
         let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
         XCTAssertTrue(exportSummary.contains("format=png"), "\(exportSummary)")
         XCTAssertTrue(exportSummary.contains("resize=none"), "\(exportSummary)")
@@ -373,5 +373,149 @@ final class BatchTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: output.appendingPathComponent("square_graded_2.png").path))
         XCTAssertEqual(try TestFiles.imagePixelSize(firstURL).width, 32)
+    }
+
+    // MARK: - P1-7 watermark batch dual version
+
+    func testWatermarkV11BatchDualVersionWritesBothFilesAndRecordsManifest() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        for name in ["one.png", "two.png"] {
+            try TestFiles.writeFixture(to: input.appendingPathComponent(name), width: 64, height: 48)
+        }
+        var export = ExportSettings()
+        export.format = .png
+        export.watermark = WatermarkSettings(text: "WM", anchor: .bottomRight,
+                                             opacity: 1, scale: 8, color: .white)
+        export.watermarkDualVersion = true
+        var recipe = Recipe(export: export)
+        recipe.version = 11
+        let items = try PhotoLoader.scan(folder: input, recursive: false)
+        let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 2)
+        XCTAssertEqual(summary.failed, 0)
+
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        XCTAssertEqual(manifest["version"] as? Int, 3, "水印双版本清单需记录到当前 schema 版本")
+        let manifestRecipe = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(manifestRecipe["version"] as? Int, 11)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("watermark=text"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("watermarkAnchor=bottomRight"), "\(exportSummary)")
+        XCTAssertTrue(exportSummary.contains("watermarkDualVersion=true"), "\(exportSummary)")
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 2)
+        for entry in entries {
+            XCTAssertEqual(entry["watermarkApplied"] as? Bool, true)
+            let watermarkedRelative = try XCTUnwrap(entry["output"] as? String)
+            let cleanRelative = try XCTUnwrap(entry["watermarkFreeOutput"] as? String)
+            XCTAssertTrue(cleanRelative.hasSuffix("_nowatermark.png"), cleanRelative)
+            let watermarkedPixels = try TestFiles.rgba8Pixels(output.appendingPathComponent(watermarkedRelative))
+            let cleanPixels = try TestFiles.rgba8Pixels(output.appendingPathComponent(cleanRelative))
+            let watermarkedBright = brightPixelCount(watermarkedPixels, threshold: 240)
+            let cleanBright = brightPixelCount(cleanPixels, threshold: 240)
+            XCTAssertGreaterThan(watermarkedBright, cleanBright + 50,
+                                 "带水印版本必须有可见白色水印像素")
+            XCTAssertEqual(cleanBright, 0, "无水印版本不应出现水印像素")
+        }
+        let firstRunFiles = try pngFiles(in: output)
+        XCTAssertEqual(firstRunFiles.count, 4, "2 张 × 带/无水印 = 4 个文件")
+        var firstContents: [String: Data] = [:]
+        for url in firstRunFiles { firstContents[url.lastPathComponent] = try Data(contentsOf: url) }
+
+        // Second run into the same directory: both versions stay non-overwriting.
+        let second = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                              recipe: recipe, lut: nil,
+                                              cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(second.succeeded, 2)
+        let allFiles = try pngFiles(in: output)
+        XCTAssertEqual(allFiles.count, 8, "第二次运行不得覆盖第一次输出")
+        for (name, content) in firstContents {
+            let url = output.appendingPathComponent(name)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "第一次输出 \(name) 被覆盖删除")
+            XCTAssertEqual(try Data(contentsOf: url), content, "第一次输出 \(name) 被覆盖")
+        }
+    }
+
+    func testWatermarkBatchSingleVersionRecordsAppliedAndNoCleanCopy() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("single.png"), width: 48, height: 32)
+        var export = ExportSettings()
+        export.format = .png
+        export.watermark = WatermarkSettings(text: "WM", anchor: .bottomRight, opacity: 1, scale: 2)
+        var recipe = Recipe(export: export)
+        recipe.version = 11
+        let summary = try BatchProcessor().run(
+            items: PhotoLoader.scan(folder: input, recursive: false),
+            inputRoot: input, outputRoot: output, recipe: recipe, lut: nil,
+            cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        XCTAssertEqual(try pngFiles(in: output).count, 1, "单版本只输出一个文件")
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entry["watermarkApplied"] as? Bool, true)
+        XCTAssertNil(entry["watermarkFreeOutput"] as? String)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("watermarkDualVersion=false"), "\(exportSummary)")
+    }
+
+    func testWatermarkBatchMissingImageFailsPerPhotoWithoutStrayOutputs() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try TestFiles.writeFixture(to: input.appendingPathComponent("photo.png"), width: 32, height: 24)
+        var export = ExportSettings()
+        export.format = .png
+        export.watermark = WatermarkSettings(kind: .image,
+                                             imagePath: temp.appendingPathComponent("missing.png").path,
+                                             opacity: 1)
+        var recipe = Recipe(export: export)
+        recipe.version = 11
+        let summary = try BatchProcessor().run(
+            items: PhotoLoader.scan(folder: input, recursive: false),
+            inputRoot: input, outputRoot: output, recipe: recipe, lut: nil,
+            cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 0, "水印图片缺失时该照片必须失败而不是静默导出无水印版")
+        XCTAssertEqual(summary.failed, 1)
+        XCTAssertTrue(try pngFiles(in: output).isEmpty, "失败项不得留下半成品输出")
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entry["status"] as? String, "failed")
+        let message = try XCTUnwrap(entry["message"] as? String)
+        XCTAssertTrue(message.contains("水印图片"), message)
+    }
+
+    private func pngFiles(in directory: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension.lowercased() == "png" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    private func brightPixelCount(_ pixels: TestFiles.RGBA8Pixels, threshold: Int) -> Int {
+        var count = 0
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width {
+                let pixel = pixels.pixel(x: x, y: y)
+                let luminance = (Int(pixel.red) + Int(pixel.green) + Int(pixel.blue)) / 3
+                if luminance >= threshold { count += 1 }
+            }
+        }
+        return count
     }
 }
