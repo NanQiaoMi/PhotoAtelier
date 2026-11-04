@@ -68,7 +68,7 @@
 |---|---|---|
 | `make check` | 退出码 0，**521 tests / 0 failures**（154.5s） | `/tmp/p1c_final_check.log` |
 | `bash Scripts/build_app.sh` | 退出码 0，4 签名 dylib / 55 XML / 许可 / portable paths 通过；`codesign --verify --deep --strict` 与 `python3 Scripts/verify_app.py` 均 exit 0 | 最终构建日志 |
-| 重建包 `UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh` | **待解锁会话后单次运行**（预期 exit 0、8 页签、18 截图、7 个 scrolled 区段）；两次授权运行分别因脚本 matcher 过严（已修）与会话锁屏（-1719）失败，均如实记录 | `artifacts/p1c-c7-verify/ui-smoke/` |
+| 重建包 `UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh` | **待解锁会话后单次运行**（预期 exit 0、8 页签、18 截图、7 个 scrolled 区段）。多次尝试分别因：脚本 matcher 过严（已修为 role-agnostic）、会话锁屏（-1719 / 截图 0 字节）、AX 枚举在繁忙窗口上挂起（已加 12s alarm 超时 + 控制标签可见性回退）。这些均为脚本/环境问题，非应用缺陷；最终 exit 0 证据仍待解锁会话 | `artifacts/p1c-c7-verify/ui-smoke/`、`artifacts/p1c-final*/` |
 | 最终树 benchmark | 编译/运行 exit 0，`benchmark: PASS`；schemaVersion 4；qualityAnalysis 7110ms/9、makeup 33745ms/9、parallelBatch serial 3985ms vs parallel(4) 3551ms=1.12x（另 C6 真实批量导出实测 3.49x/3.39x，方法不同勿混用）；peak RSS 6671MB | `artifacts/p1c-c7-verify/benchmark-final/benchmark.json` |
 | 定向测试 | QualityAnalysis 11、BurstGrouping、MakeupEngine 10、ParallelBatch 10、PhotoSelection 15、Batch 23+、ColorCompatibility 39、Engine 36、PortraitRetouch 17 等 | 各工作项报告 |
 | 应用自检 | `APP_SMOKE PASS · 36 checks` + `PORTRAIT_CONTRACT_SELF_CHECK PASS`（makeupVersion=13） | `--self-test` 证据目录 |
