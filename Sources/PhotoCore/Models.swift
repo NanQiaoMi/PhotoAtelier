@@ -288,6 +288,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v12.
     /// Absent or empty manual repair/clone strokes keep the pre-v12 render path.
     public var repairBrush: RepairBrushSettings? = nil
+    /// Optional for exact compatibility with recipes written before v13.
+    /// Absent or fully neutral (all strengths zero) make-up keeps the pre-v13 path.
+    public var makeup: MakeupSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -632,12 +635,42 @@ public extension ExportSettings {
     }
 }
 
+/// Per-photo record of the P1-C make-up stage. `nil` means no active make-up
+/// (pre-v13 path); `applied == false` documents an explicit no-face skip so batch
+/// manifests can state why instead of silently omitting the stage. `applied == true`
+/// means the stage executed with usable face landmarks; because the masks are
+/// heuristic, an individual face can still be a geometric no-op, so manifests must
+/// not read `applied` as a guarantee of changed pixels.
+public struct MakeupReport: Codable, Equatable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var note: String?
+
+    public init(applied: Bool, faceCount: Int = 0, note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.note = note
+    }
+}
+
+public extension MakeupSettings {
+    /// UI persistence rule used by `AppModel`: only an all-default setting collapses
+    /// to nil. A neutral setting whose colours or cheek radius were edited is kept
+    /// so the ColorPicker selection survives until an intensity is raised. Such a
+    /// setting is still `isNeutral` (no pixels change, old recipe versions stay
+    /// legal), only its payload is retained.
+    static func collapsed(_ settings: MakeupSettings) -> MakeupSettings? {
+        settings == MakeupSettings() ? nil : settings
+    }
+}
+
 public struct Recipe: Codable, Equatable {
     /// Version 9 adds opt-in per-photo LUT candidate evaluation.
     /// Version 10 adds portrait refinement, reference color and export extensions.
     /// Version 11 adds the P1 color tools, liquify and watermark fields.
     /// Version 12 adds certificate photo / background replacement, manual repair
     /// brush strokes and the customer delivery page export.
+    /// Version 13 adds the heuristic make-up fields (lips/brows/blush/eyeshadow).
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -653,7 +686,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...12).contains(version) else {
+        guard (1...13).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         let portraitSettings = [adjustments.portrait,
@@ -697,6 +730,12 @@ public struct Recipe: Codable, Equatable {
                             automatic?.referenceSettings.repairBrush]
         guard version >= 12 || repairGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("手动修复/仿制笔迹需要配方版本 12，不能静默降级。")
+        }
+        let makeupGroups = [adjustments.makeup,
+                            automatic?.baseline.makeup,
+                            automatic?.referenceSettings.makeup]
+        guard version >= 13 || makeupGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的妆容需要配方版本 13，不能静默降级。")
         }
         let exportSettings = self.export
         let usesExtendedExport = exportSettings.requiresVersion10Recipe
@@ -745,8 +784,59 @@ public struct Recipe: Codable, Equatable {
 public struct PhotoItem: Identifiable, Equatable {
     public let url: URL
     public let relativePath: String
+
+    /// Session-only star rating (`0...5`) from the culling UI. Never written to
+    /// recipes, manifests or disk: a new library scan starts with no ratings.
+    public var rating: Int = 0
+    /// Session-only "waste / reject" mark; the batch export can skip these.
+    public var isRejected: Bool = false
+    /// Session-only heuristic quality report from `QualityAnalyzer`; nil until the
+    /// user runs auto-culling (or a caller injects one).
+    public var qualityReport: QualityReport?
+
     public var id: String { url.path }
-    public init(url: URL, relativePath: String) { self.url = url; self.relativePath = relativePath }
+
+    public init(url: URL, relativePath: String, rating: Int = 0, isRejected: Bool = false,
+                qualityReport: QualityReport? = nil) {
+        self.url = url
+        self.relativePath = relativePath
+        self.rating = min(5, max(0, rating))
+        self.isRejected = isRejected
+        self.qualityReport = qualityReport
+    }
+
+    /// Heuristic recommendation when the photo was analyzed, nil otherwise.
+    public var qualityRecommendation: QualityRecommendation? { qualityReport?.recommendation }
+}
+
+/// Session-only batch export selection options from the culling UI.
+///
+/// Deliberately **not** part of `ExportSettings`/`Recipe`: ratings and rejection
+/// marks are per-library session state (never persisted, never version-gated), so
+/// a saved recipe cannot silently skip different files on another machine. Callers
+/// pass these options to `BatchProcessor.run(..., selection: ...)` for one run.
+public struct ExportSelectionOptions: Codable, Equatable {
+    /// Skip photos marked as rejected (waste) in the culling UI.
+    public var skipRejectedPhotos: Bool = false
+    /// Skip photos that have not been rated yet (`rating == 0`) and are not
+    /// rejected; rated photos (even 1 star) are still exported.
+    public var skipUnselectedPhotos: Bool = false
+
+    public init(skipRejectedPhotos: Bool = false, skipUnselectedPhotos: Bool = false) {
+        self.skipRejectedPhotos = skipRejectedPhotos
+        self.skipUnselectedPhotos = skipUnselectedPhotos
+    }
+
+    /// True when the options cannot change which files are exported.
+    public var isNeutral: Bool { !skipRejectedPhotos && !skipUnselectedPhotos }
+
+    /// Compact manifest/status summary, e.g. `skipRejected+skipUnselected`.
+    public var summary: String {
+        var parts: [String] = []
+        if skipRejectedPhotos { parts.append("skipRejected") }
+        if skipUnselectedPhotos { parts.append("skipUnselected") }
+        return parts.isEmpty ? "none" : parts.joined(separator: "+")
+    }
 }
 
 /// Per-photo record of the liquify/face-reshape stage. `nil` means no active
@@ -838,6 +928,9 @@ public struct ProcessingReport: Codable, Equatable {
     /// Per-photo P1-B manual repair/clone status. `nil` when the recipe has no
     /// strokes; otherwise records the applied stroke counts for batch manifests.
     public var repairBrush: RepairBrushReport?
+    /// Per-photo P1-C make-up status. `nil` when the recipe has no active make-up;
+    /// `applied == false` records an explicit no-face skip for batch manifests.
+    public var makeup: MakeupReport?
     public init() {}
 }
 
@@ -863,15 +956,34 @@ public struct ProcessedPhoto {
 public struct BatchSummary: Codable {
     public var succeeded: Int
     public var failed: Int
+    /// Photos deliberately skipped by the session export selection options
+    /// (rejected / unrated); never counted as failures.
+    public var skipped: Int
     public var cancelled: Bool
     public var manifestURL: URL?
-    public init(succeeded: Int = 0, failed: Int = 0, cancelled: Bool = false, manifestURL: URL? = nil) {
-        self.succeeded = succeeded; self.failed = failed; self.cancelled = cancelled; self.manifestURL = manifestURL
+    public init(succeeded: Int = 0, failed: Int = 0, cancelled: Bool = false,
+                manifestURL: URL? = nil, skipped: Int = 0) {
+        self.succeeded = succeeded; self.failed = failed; self.cancelled = cancelled
+        self.manifestURL = manifestURL; self.skipped = skipped
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case succeeded, failed, skipped, cancelled, manifestURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        succeeded = try container.decode(Int.self, forKey: .succeeded)
+        failed = try container.decode(Int.self, forKey: .failed)
+        cancelled = try container.decode(Bool.self, forKey: .cancelled)
+        manifestURL = try container.decodeIfPresent(URL.self, forKey: .manifestURL)
+        // Older summaries did not have skip counts; decode them as zero.
+        skipped = try container.decodeIfPresent(Int.self, forKey: .skipped) ?? 0
     }
 }
 
 public struct BatchEvent {
-    public enum Kind { case started, processing, completed, failed, cancelled, finished }
+    public enum Kind { case started, processing, completed, failed, cancelled, skipped, finished }
     public let kind: Kind
     public let index: Int
     public let total: Int

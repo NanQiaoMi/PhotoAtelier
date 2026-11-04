@@ -145,6 +145,7 @@ struct ContentView: View {
                 Text(String(format: "%02d", model.photos.count)).font(.system(size: 11, design: .monospaced))
                     .foregroundColor(AtelierPalette.muted)
             }.padding(.horizontal, 18).padding(.top, 23)
+            cullingControls
             if let root = model.inputRoot {
                 Label(root.lastPathComponent, systemImage: "folder.fill")
                     .font(.system(size: 12)).lineLimit(1).help(root.path)
@@ -174,32 +175,18 @@ struct ContentView: View {
                     Text("JPEG · PNG · TIFF · HEIC · WebP\nAVIF · RAW · 也可拖入照片或文件夹")
                         .font(.system(size: 10)).multilineTextAlignment(.center).lineSpacing(5)
                 }.foregroundColor(AtelierPalette.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.visiblePhotos.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "line.3.horizontal.decrease.circle").font(.system(size: 24, weight: .ultraLight))
+                    Text("当前筛选「\(model.cullFilter.title)」下没有照片").font(.system(size: 11))
+                    Button("显示全部照片") { model.setCullFilter(.all) }
+                        .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(AtelierPalette.accent)
+                }.foregroundColor(AtelierPalette.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 5) {
-                        ForEach(Array(model.photos.enumerated()), id: \.element.id) { index, item in
-                            Button { model.selectPhoto(item) } label: {
-                                HStack(spacing: 10) {
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.3))
-                                        if let image = model.thumbnails[item.id] {
-                                            Image(nsImage: image).resizable().scaledToFill().frame(width: 47, height: 47).clipped()
-                                        } else { Image(systemName: "photo").foregroundColor(AtelierPalette.muted) }
-                                    }.frame(width: 47, height: 47).clipShape(RoundedRectangle(cornerRadius: 4))
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text(item.url.deletingPathExtension().lastPathComponent)
-                                            .font(.system(size: 11, weight: .medium)).lineLimit(1)
-                                        Text("\(String(format: "%02d", index + 1))  ·  \(item.url.pathExtension.uppercased())")
-                                            .font(.system(size: 9, design: .monospaced)).foregroundColor(AtelierPalette.muted)
-                                    }
-                                    Spacer(minLength: 0)
-                                    if model.selectedID == item.id {
-                                        Circle().fill(AtelierPalette.accent).frame(width: 5, height: 5)
-                                    }
-                                }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(model.selectedID == item.id ? AtelierPalette.raised : .clear)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }.buttonStyle(.plain).onAppear { model.loadThumbnail(item) }
+                        ForEach(Array(model.visiblePhotos.enumerated()), id: \.element.id) { index, item in
+                            photoRow(item, index: index)
                         }
                     }.padding(9)
                 }
@@ -211,6 +198,132 @@ struct ContentView: View {
                     .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(5)
             }.padding(17).frame(maxWidth: .infinity, alignment: .leading).background(Color.black.opacity(0.1))
         }.background(AtelierPalette.panel.opacity(0.5))
+    }
+
+    /// Sidebar culling filter + heuristic auto-cull trigger. Ratings/rejections
+    /// are session-only state and never recipe data.
+    private var cullingControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("筛选", selection: Binding(get: { model.cullFilter },
+                                             set: { model.setCullFilter($0) })) {
+                ForEach(PhotoCullFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
+            }.pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                .help("按会话内的评级/废片/自动挑图建议筛选列表（不写配方、不持久化）")
+            HStack(spacing: 8) {
+                if model.autoCullBusy {
+                    Button("取消自动挑图") { model.cancelAutoCull() }
+                        .font(.system(size: 10)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                    ProgressView(value: model.autoCullProgress)
+                        .progressViewStyle(.linear).frame(maxWidth: 84)
+                } else {
+                    Button("自动挑图") { model.runAutoCull() }
+                        .font(.system(size: 10)).buttonStyle(.bordered)
+                        .disabled(model.photos.isEmpty || model.scanning || model.batchRunning)
+                        .help("启发式分析清晰度/曝光/闭眼并填入星级与废片建议；结果仅本会话，不写配方。")
+                }
+                Spacer(minLength: 0)
+            }
+        }.padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 2)
+    }
+
+    /// Preview-toolbar rating controls (keyboard shortcuts 1–5 / X). They edit
+    /// session culling state only.
+    private var ratingControls: some View {
+        HStack(spacing: 4) {
+            Rectangle().fill(AtelierPalette.line).frame(width: 1, height: 12)
+            ForEach(1...5, id: \.self) { star in
+                Button {
+                    model.rateSelectedPhoto(star)
+                } label: {
+                    Image(systemName: (model.selectedPhoto?.rating ?? 0) >= star ? "star.fill" : "star")
+                        .font(.system(size: 9))
+                        .foregroundColor((model.selectedPhoto?.rating ?? 0) >= star
+                                         ? .yellow.opacity(0.9) : AtelierPalette.muted)
+                }.buttonStyle(.plain)
+                    .keyboardShortcut(KeyEquivalent(Character("\(star)")), modifiers: [])
+                    .disabled(model.selectedPhoto == nil)
+                    .help("\(star) 星（快捷键 \(star)；会话状态，不写配方）")
+            }
+            Button {
+                model.toggleSelectedRejection()
+            } label: {
+                Image(systemName: model.selectedPhoto?.isRejected == true
+                      ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                    .font(.system(size: 9))
+                    .foregroundColor(model.selectedPhoto?.isRejected == true
+                                     ? .red.opacity(0.9) : AtelierPalette.muted)
+            }.buttonStyle(.plain)
+                .keyboardShortcut("x", modifiers: [])
+                .disabled(model.selectedPhoto == nil)
+                .help("切换废片标记（快捷键 X；导出可跳过废片）")
+        }
+    }
+
+    /// Sidebar row with culling badges: star rating, waste mark and the heuristic
+    /// quality recommendation. Purely session state.
+    private func photoRow(_ item: PhotoItem, index: Int) -> some View {
+        Button { model.selectPhoto(item) } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.3))
+                    if let image = model.thumbnails[item.id] {
+                        Image(nsImage: image).resizable().scaledToFill()
+                            .frame(width: 47, height: 47).clipped()
+                    } else {
+                        Image(systemName: "photo").foregroundColor(AtelierPalette.muted)
+                    }
+                }.frame(width: 47, height: 47).clipShape(RoundedRectangle(cornerRadius: 4))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        Text(item.url.deletingPathExtension().lastPathComponent)
+                            .font(.system(size: 11, weight: .medium)).lineLimit(1)
+                        if item.isRejected {
+                            Text("废片")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.red.opacity(0.95))
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Color.red.opacity(0.16))
+                                .clipShape(Capsule())
+                        }
+                    }
+                    HStack(spacing: 5) {
+                        Text(starsText(item.rating))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(item.rating > 0 ? .yellow.opacity(0.9)
+                                             : AtelierPalette.muted.opacity(0.45))
+                        if let recommendation = item.qualityRecommendation {
+                            Text(recommendation.title)
+                                .font(.system(size: 8))
+                                .foregroundColor(Self.qualityBadgeColor(recommendation))
+                        }
+                        Text("\(String(format: "%02d", index + 1)) · \(item.url.pathExtension.uppercased())")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(AtelierPalette.muted)
+                    }
+                }
+                Spacer(minLength: 0)
+                if model.selectedID == item.id {
+                    Circle().fill(AtelierPalette.accent).frame(width: 5, height: 5)
+                }
+            }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                .background(model.selectedID == item.id ? AtelierPalette.raised : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }.buttonStyle(.plain).onAppear { model.loadThumbnail(item) }
+    }
+
+    private func starsText(_ rating: Int) -> String {
+        String(repeating: "★", count: rating) + String(repeating: "☆", count: max(0, 5 - rating))
+    }
+
+    private static func qualityBadgeColor(_ recommendation: QualityRecommendation) -> Color {
+        switch recommendation {
+        case .keep: return AtelierPalette.accent
+        case .review: return .orange.opacity(0.9)
+        case .reject: return .red.opacity(0.9)
+        }
     }
 
     private var previewToolbar: some View {
@@ -239,6 +352,7 @@ struct ContentView: View {
                 Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
                     .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
             }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
+            ratingControls
             Text("适合窗口").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
         }.padding(.horizontal, 22).frame(height: 47)
     }
@@ -462,6 +576,15 @@ struct ContentView: View {
                                   range: 1...400, percent: true)
             }
             }
+            HStack {
+                Text("批量并发").font(.system(size: 11))
+                Spacer()
+                Stepper(value: $model.batchConcurrency, in: 1...8) {
+                    Text("\(model.batchConcurrency) 张并行").font(.system(size: 11))
+                }.controlSize(.mini).disabled(model.batchRunning)
+            }
+            Text("1 = 串行（最省内存），4 = 默认，8 = 最快但更占内存；取消在每张照片完成后生效，已完成的照片保留。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             Group {
             HStack {
                 Text("文件名后缀").font(.system(size: 11))
@@ -479,6 +602,7 @@ struct ContentView: View {
             Group {
                 watermarkSection
                 deliveryPageSection
+                selectionOptionsSection
             }
             Toggle("移除位置与相机隐私信息", isOn: $model.exportSettings.stripMetadata)
                 .toggleStyle(.checkbox).font(.system(size: 10))
@@ -556,6 +680,26 @@ struct ContentView: View {
                 Text("生成独立文件夹（不覆盖既有交付页）：index.html 内嵌样式、只用相对路径缩略图/预览图，无外链/无网络请求；图片重新编码并剥离 GPS/相机序列号等元数据；接触表 PDF 为 A4 网格。GUI 点选未自动化，实际按钮交互需人工验证。")
                     .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
             }
+        }
+    }
+
+    /// Session culling selection for the next batch run. These options are NOT
+    /// part of `ExportSettings`/`Recipe`: ratings and rejection marks never leave
+    /// the in-memory session, and the manifest records skipped photos per entry.
+    private var selectionOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("挑图筛选（仅本次会话，不写入配方）")
+                .font(.system(size: 10)).foregroundColor(AtelierPalette.muted)
+            Toggle("跳过废片", isOn: Binding(
+                get: { model.exportSelectionOptions.skipRejectedPhotos },
+                set: { model.exportSelectionOptions.skipRejectedPhotos = $0 }))
+                .toggleStyle(.checkbox).font(.system(size: 10))
+            Toggle("跳过未评级照片", isOn: Binding(
+                get: { model.exportSelectionOptions.skipUnselectedPhotos },
+                set: { model.exportSelectionOptions.skipUnselectedPhotos = $0 }))
+                .toggleStyle(.checkbox).font(.system(size: 10))
+            Text("评级/废片是会话状态：不写配方、不持久化；跳过的照片在批次清单里记为 skipped 且不计失败。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
         }
     }
 
@@ -671,6 +815,10 @@ struct ContentView: View {
                             .font(.system(size: 11, weight: .medium))
                         Text("\(model.exportSettings.format.title)  ·  \(model.exportSettings.colorSpace.title)  ·  独立目录导出")
                             .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                        if model.skipped > 0 {
+                            Text("上次跳过 \(model.skipped) 张（废片/未评级，见批次清单）")
+                                .font(.system(size: 9)).foregroundColor(.orange.opacity(0.85))
+                        }
                     }
                     Spacer(minLength: 4)
                     Button { inspectorTab = 5; model.startBatch() } label: {

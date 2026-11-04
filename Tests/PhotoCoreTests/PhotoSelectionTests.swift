@@ -217,4 +217,110 @@ final class PhotoSelectionTests: XCTestCase {
         XCTAssertEqual(repeated.count, 2)
         XCTAssertEqual(repeated.map(\.relativePath), ["a.png", "day/b.png"])
     }
+
+    // MARK: - P1-C culling session state (C4)
+
+    private func photo(_ name: String, rating: Int = 0, rejected: Bool = false,
+                       quality: QualityReport? = nil) -> PhotoItem {
+        PhotoItem(url: URL(fileURLWithPath: "/lib/\(name)"), relativePath: name,
+                  rating: rating, isRejected: rejected, qualityReport: quality)
+    }
+
+    private func quality(_ recommendation: QualityRecommendation) -> QualityReport {
+        QualityReport(overallScore: recommendation == .keep ? 0.85 : 0.5,
+                      recommendation: recommendation)
+    }
+
+    func testRatingClampAndSteppedRating() {
+        XCTAssertEqual(PhotoSelection.clampedRating(-3), 0)
+        XCTAssertEqual(PhotoSelection.clampedRating(7), 5)
+        XCTAssertEqual(PhotoSelection.clampedRating(3), 3)
+        XCTAssertEqual(PhotoSelection.steppedRating(5, delta: 1), 5)
+        XCTAssertEqual(PhotoSelection.steppedRating(0, delta: -1), 0)
+        XCTAssertEqual(PhotoSelection.steppedRating(2, delta: 1), 3)
+        XCTAssertEqual(PhotoItem(url: URL(fileURLWithPath: "/x"), relativePath: "x",
+                                 rating: 99).rating, 5,
+                       "PhotoItem init 必须把评级夹取到 0...5")
+    }
+
+    func testCullFiltersCoverAllRecommendedKeptAndRejected() {
+        let keep = photo("keep.png", quality: quality(.keep))
+        let review = photo("review.png", quality: quality(.review))
+        let aiReject = photo("ai-reject.png", quality: quality(.reject))
+        let manualWaste = photo("waste.png", rating: 1, rejected: true)
+        let starred = photo("star.png", rating: 5)
+        let unrated = photo("unrated.png")
+        let all = [keep, review, aiReject, manualWaste, starred, unrated]
+
+        XCTAssertEqual(PhotoSelection.filtered(all, filter: .all).count, 6)
+        XCTAssertEqual(PhotoSelection.filtered(all, filter: .recommended).map(\.relativePath),
+                       ["keep.png", "star.png"],
+                       "推荐=启发式 keep 或手动 4-5 星")
+        XCTAssertEqual(PhotoSelection.filtered(all, filter: .kept).count, 5)
+        XCTAssertEqual(PhotoSelection.filtered(all, filter: .rejected).map(\.relativePath),
+                       ["waste.png"])
+    }
+
+    func testExportSelectionOptionsSkipLogic() {
+        let clean = photo("clean.png", rating: 2)
+        let unrated = photo("unrated.png")
+        let waste = photo("waste.png", rating: 4, rejected: true)
+
+        let neutral = ExportSelectionOptions()
+        XCTAssertTrue(neutral.isNeutral)
+        XCTAssertTrue(PhotoSelection.shouldExport(waste, options: neutral))
+        XCTAssertTrue(PhotoSelection.shouldExport(unrated, options: neutral))
+
+        let skipWaste = ExportSelectionOptions(skipRejectedPhotos: true)
+        XCTAssertFalse(skipWaste.isNeutral)
+        XCTAssertFalse(PhotoSelection.shouldExport(waste, options: skipWaste))
+        XCTAssertTrue(PhotoSelection.shouldExport(unrated, options: skipWaste))
+        XCTAssertTrue(try! XCTUnwrap(PhotoSelection.skipReason(for: waste, options: skipWaste))
+            .contains("废片"))
+
+        let skipUnrated = ExportSelectionOptions(skipUnselectedPhotos: true)
+        XCTAssertFalse(PhotoSelection.shouldExport(unrated, options: skipUnrated))
+        XCTAssertTrue(PhotoSelection.shouldExport(clean, options: skipUnrated))
+        XCTAssertTrue(try! XCTUnwrap(PhotoSelection.skipReason(for: unrated, options: skipUnrated))
+            .contains("未评级"))
+
+        let both = ExportSelectionOptions(skipRejectedPhotos: true, skipUnselectedPhotos: true)
+        XCTAssertFalse(PhotoSelection.shouldExport(waste, options: both))
+        XCTAssertFalse(PhotoSelection.shouldExport(unrated, options: both))
+        XCTAssertTrue(PhotoSelection.shouldExport(clean, options: both))
+        XCTAssertEqual(both.summary, "skipRejected+skipUnselected")
+        XCTAssertTrue(PhotoSelection.shouldExport(photo("zero-rated.png", rating: 0, rejected: true),
+                                                  options: skipUnrated),
+                      "只开 skipUnselected 时，0 星废片仍按评级规则导出；废片由 skipRejected 单独控制")
+    }
+
+    func testAutoCullAssignmentMappingAndManualPreservation() {
+        XCTAssertEqual(PhotoSelection.autoCullAssignment(for: quality(.keep)),
+                       PhotoSelection.AutoCullAssignment(rating: 5, isRejected: false))
+        XCTAssertEqual(PhotoSelection.autoCullAssignment(for: quality(.review)).rating, 3)
+        let rejected = PhotoSelection.autoCullAssignment(for: quality(.reject))
+        XCTAssertEqual(rejected.rating, 1)
+        XCTAssertTrue(rejected.isRejected)
+
+        var items = [photo("fresh.png"), photo("manual.png", rating: 4),
+                     photo("waste.png", rejected: true)]
+        let applied = PhotoSelection.applyingAutoCull(
+            reports: [items[0].id: quality(.keep),
+                      items[1].id: quality(.reject),
+                      items[2].id: quality(.keep)],
+            to: &items)
+        XCTAssertEqual(applied, 3)
+        XCTAssertEqual(items[0].rating, 5, "未手动标记的照片应填入自动建议星级")
+        XCTAssertEqual(items[0].qualityReport?.recommendation, .keep)
+        XCTAssertEqual(items[1].rating, 4, "手动评级不得被自动挑图覆盖")
+        XCTAssertEqual(items[1].qualityReport?.recommendation, .reject,
+                       "报告仍应记录，便于 UI 显示建议")
+        XCTAssertTrue(items[2].isRejected, "手动废片标记不得被自动挑图覆盖")
+        XCTAssertEqual(items[2].rating, 0, "手动废片的星级保持不变")
+
+        // Reports for unknown ids are ignored.
+        var missing = [photo("solo.png")]
+        XCTAssertEqual(PhotoSelection.applyingAutoCull(reports: ["unknown": quality(.keep)],
+                                                       to: &missing), 0)
+    }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import PhotoCore
 import SwiftUI
 
@@ -78,11 +79,17 @@ struct PortraitRetouchPanel: View {
             .disabled(!canEdit)
             .opacity(canEdit ? 1 : 0.45)
 
-            separator
-            liquifySection
+            Group {
+                separator
+                makeupSection
+            }
 
-            separator
-            repairSection
+            Group {
+                separator
+                liquifySection
+                separator
+                repairSection
+            }
 
             Group {
                 separator
@@ -141,6 +148,91 @@ struct PortraitRetouchPanel: View {
                                             model.updatePortraitSettings { $0[keyPath: keyPath] = newValue }
                                         }),
                          range: 0...1, percent: true)
+    }
+
+    // MARK: Make-up (P1-C)
+
+    private var makeupSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Label("妆容 v1（启发式）", systemImage: "paintpalette")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer(minLength: 0)
+                if model.adjustments.makeup != nil {
+                    Button("归零") { model.resetMakeup() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                        .disabled(model.batchRunning)
+                }
+            }
+            Text("唇/眉/腮红/眼影是颜色规则 + 地标蒙版的启发式着色（非专业妆容），真实照片审美未验收；无脸时整段禁用。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 5).padding(.bottom, 8)
+            Text(model.makeupStatusNote)
+                .font(.system(size: 9))
+                .foregroundColor(model.canEditMakeup ? AtelierPalette.accent : AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
+
+            VStack(alignment: .leading, spacing: 0) {
+                makeupColorRow(title: "唇色", color: makeupColorBinding(\.lipColor))
+                AdjustmentSlider(title: "唇色强度", value: makeupSliderBinding(\.lipIntensity),
+                                 range: 0...1, percent: true)
+                Group {
+                    makeupColorRow(title: "眉色", color: makeupColorBinding(\.browColor))
+                    AdjustmentSlider(title: "眉色密度", value: makeupSliderBinding(\.browDensity),
+                                     range: 0...1, percent: true)
+                    makeupColorRow(title: "腮红色", color: makeupColorBinding(\.cheekColor))
+                    AdjustmentSlider(title: "腮红强度", value: makeupSliderBinding(\.cheekIntensity),
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "腮红半径", value: makeupSliderBinding(\.cheekRadius),
+                                     range: 0.2...1.0, percent: true)
+                    makeupColorRow(title: "眼影色", color: makeupColorBinding(\.eyeshadowColor))
+                    AdjustmentSlider(title: "眼影强度", value: makeupSliderBinding(\.eyeshadowIntensity),
+                                     range: 0...1, percent: true)
+                }
+            }
+            .disabled(!model.canEditMakeup)
+            .opacity(model.canEditMakeup ? 1 : 0.45)
+        }
+    }
+
+    private func makeupColorRow(title: String, color: Binding<Color>) -> some View {
+        HStack {
+            Text(title).font(.system(size: 10)).foregroundColor(.white.opacity(0.7))
+            Spacer(minLength: 0)
+            ColorPicker("", selection: color).labelsHidden().controlSize(.mini)
+        }.padding(.bottom, 8)
+    }
+
+    private func makeupColorBinding(
+        _ keyPath: WritableKeyPath<MakeupSettings, SRGBColor>
+    ) -> Binding<Color> {
+        Binding(
+            get: {
+                let value = model.makeupSettings[keyPath: keyPath]
+                return Color(red: value.red, green: value.green, blue: value.blue)
+            },
+            set: { color in
+                guard let converted = NSColor(color).usingColorSpace(.sRGB) else { return }
+                model.updateMakeup {
+                    $0[keyPath: keyPath] = SRGBColor(red: Double(converted.redComponent),
+                                                     green: Double(converted.greenComponent),
+                                                     blue: Double(converted.blueComponent))
+                }
+            })
+    }
+
+    private func makeupSliderBinding(
+        _ keyPath: WritableKeyPath<MakeupSettings, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: { model.makeupSettings[keyPath: keyPath] },
+            set: { value in
+                model.updateMakeup { $0[keyPath: keyPath] = value }
+            })
     }
 
     // MARK: Liquify / face reshaping (P1)

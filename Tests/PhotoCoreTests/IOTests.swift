@@ -647,6 +647,73 @@ final class IOTests: XCTestCase {
         return peak
     }
 
+    // MARK: - P1-C C6 preview cancellation / analysis sampling
+
+    func testPreviewRequestGateOnlyAdmitsNewestGeneration() {
+        var gate = PreviewRequestGate()
+        let first = gate.begin()
+        XCTAssertTrue(gate.admits(first))
+        let second = gate.begin()
+        XCTAssertFalse(gate.admits(first), "a slow stale preview must not publish results")
+        XCTAssertTrue(gate.admits(second))
+        gate.invalidate()
+        XCTAssertFalse(gate.admits(second))
+        XCTAssertEqual(gate.currentGeneration, gate.currentGeneration)
+    }
+
+    func testEngineProcessHonoursCancellationToken() throws {
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let image = CIImage(color: CIColor(red: 0.3, green: 0.4, blue: 0.5, alpha: 1, colorSpace: space)!)
+            .cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
+        let cancelled = CancellationToken()
+        cancelled.cancel()
+        XCTAssertThrowsError(try PhotoEngine().process(image, settings: AdjustmentSettings(),
+                                                       lut: nil, cancellation: cancelled)) { error in
+            guard case AtelierError.cancelled = error else {
+                return XCTFail("expected AtelierError.cancelled, got \(error)")
+            }
+        }
+    }
+
+    func testAnalysisDownsamplingKeepsSceneAndProposalSemantics() throws {
+        let full = try makeHorizontalGradientImage(width: 1200, height: 800)
+        let sampled = PhotoEngine().analysisSample(full, maxDimension: 1200)
+        XCTAssertEqual(sampled.extent.width, 1200, accuracy: 2,
+                       "small images must not be upscaled or altered")
+        let downsampled = PhotoEngine().analysisSample(full, maxDimension: 384)
+        XCTAssertLessThanOrEqual(max(downsampled.extent.width, downsampled.extent.height), 384.5)
+
+        let analyzer = PhotoAnalyzer()
+        let fullAnalysis = try analyzer.analyze(image: full, properties: [:])
+        let sampledAnalysis = try analyzer.analyze(image: downsampled, properties: [:])
+        XCTAssertEqual(fullAnalysis.proposals.map(\.id), sampledAnalysis.proposals.map(\.id),
+                       "analysis proposals must keep the same semantic styles")
+        XCTAssertEqual(fullAnalysis.sceneAssessment?.category, sampledAnalysis.sceneAssessment?.category)
+        XCTAssertEqual(fullAnalysis.metrics.medianLuminance,
+                       sampledAnalysis.metrics.medianLuminance, accuracy: 0.02)
+        XCTAssertEqual(fullAnalysis.metrics.sampleWidth, sampledAnalysis.metrics.sampleWidth)
+    }
+
+    private func makeHorizontalGradientImage(width: Int, height: Int) throws -> CIImage {
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw AtelierError.imageRead("无法创建测试位图上下文")
+        }
+        context.interpolationQuality = .none
+        for x in 0..<width {
+            let value = CGFloat(x) / CGFloat(max(1, width - 1))
+            let color = CGColor(colorSpace: colorSpace,
+                                components: [value, min(1, 0.15 + value * 0.8), 1 - value, 1])!
+            context.setFillColor(color)
+            context.fill(CGRect(x: x, y: 0, width: 1, height: height))
+        }
+        guard let cgImage = context.makeImage() else {
+            throw AtelierError.imageRead("无法生成测试渐变图")
+        }
+        return CIImage(cgImage: cgImage)
+    }
 }
 
 enum TestFiles {
@@ -776,4 +843,6 @@ enum TestFiles {
         }
         return data as Data
     }
+
+
 }

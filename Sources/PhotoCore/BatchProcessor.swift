@@ -12,6 +12,12 @@ public final class BatchProcessor {
         outputRoot: URL,
         recipe: Recipe,
         lut: LUTCube?,
+        /// Session-only culling selection options (skipped photos are recorded in
+        /// the manifest as `skipped`, never counted as failures).
+        selection: ExportSelectionOptions = ExportSelectionOptions(),
+        /// Maximum number of photos rendered/exported at the same time. Clamped
+        /// to 1...8 by `ParallelBatch`; 1 reproduces the previous serial export.
+        maxConcurrency: Int = ParallelBatch.defaultConcurrency,
         cancellation: CancellationToken,
         onEvent: @escaping (BatchEvent) -> Void
     ) throws -> BatchSummary {
@@ -64,8 +70,12 @@ public final class BatchProcessor {
             warnings: recipe.lutPath == nil && recipe.lutIdentifier == nil && lut != nil
                 ? ["当前配方未记录 LUT 路径或内置标识符，快照不能独立重放。"] : [],
             cancelled: false,
-            entries: []
+            entries: [],
+            selection: selection.isNeutral ? nil : selection
         )
+        if !selection.isNeutral {
+            manifest.exportSummary.append("exportSelection=\(selection.summary)")
+        }
 
         do {
             try createManifest(manifest, at: manifestURL)
@@ -73,170 +83,228 @@ public final class BatchProcessor {
             throw AtelierError.imageWrite("无法保存批次配方快照：\(error.localizedDescription)")
         }
 
-        var summary = BatchSummary(manifestURL: manifestURL)
-        onEvent(BatchEvent(kind: .started, index: 0, total: items.count, message: "开始批量处理"))
-        let engine = PhotoEngine()
         // Watermark is an export-level stage: PhotoExporter applies it from
         // `recipe.export.watermark`. "Dual version" additionally writes a clean
         // copy of every photo, so a delivery can ship both variants in one run.
-        let dualWatermark = recipe.export.exportsDualWatermarkVersion
         var cleanExportSettings = recipe.export
         cleanExportSettings.watermark = nil
         cleanExportSettings.watermarkDualVersion = nil
+        // Immutable copies for the detached task; mutating captured vars in a
+        // concurrently-executing closure is rejected by the compiler.
+        let cleanSettingsForWorkers = cleanExportSettings
+        let deliverySettingsForWorkers = effectiveDeliverySettings
+        let manifestForWorkers = manifest
+
+        // `run` stays synchronous for its existing callers (tests, app model) and
+        // blocks the calling background queue while the bounded-concurrency
+        // executor finishes. It never runs on the main thread: the app calls it
+        // from its export queue, and the bridge below only waits on that worker.
+        let box = AsyncResultBox<BatchSummary>()
+        let semaphore = DispatchSemaphore(value: 0)
+        let parallelLimit = ParallelBatch.effectiveConcurrency(maxConcurrency)
+        Task.detached(priority: .userInitiated) {
+            let result: Result<BatchSummary, Error>
+            do {
+                result = .success(try await self.performBatch(
+                    items: items,
+                    input: input,
+                    output: output,
+                    recipe: recipe,
+                    lut: lut,
+                    selection: selection,
+                    manifest: manifestForWorkers,
+                    manifestURL: manifestURL,
+                    watermarkActive: watermarkActive,
+                    dualWatermark: recipe.export.exportsDualWatermarkVersion,
+                    cleanExportSettings: cleanSettingsForWorkers,
+                    effectiveDeliverySettings: deliverySettingsForWorkers,
+                    maxConcurrency: parallelLimit,
+                    cancellation: cancellation,
+                    onEvent: onEvent))
+            } catch {
+                result = .failure(error)
+            }
+            box.store(result)
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try box.take()
+    }
+
+    // MARK: - Bounded-concurrency batch body
+
+    private func performBatch(
+        items: [PhotoItem],
+        input: URL,
+        output: URL,
+        recipe: Recipe,
+        lut: LUTCube?,
+        selection: ExportSelectionOptions,
+        manifest: BatchManifest,
+        manifestURL: URL,
+        watermarkActive: Bool,
+        dualWatermark: Bool,
+        cleanExportSettings: ExportSettings,
+        effectiveDeliverySettings: DeliverySettings?,
+        maxConcurrency: Int,
+        cancellation: CancellationToken,
+        onEvent: @escaping (BatchEvent) -> Void
+    ) async throws -> BatchSummary {
+        var summary = BatchSummary(manifestURL: manifestURL)
+        onEvent(BatchEvent(kind: .started, index: 0, total: items.count, message: "开始批量处理"))
+        let engine = PhotoEngine()
+        let store = BatchManifestStore(total: items.count, manifestURL: manifestURL, initial: manifest)
+        var entries: [BatchManifestEntry?] = Array(repeating: nil, count: items.count)
+        var processable: [(offset: Int, item: PhotoItem)] = []
+        // Session culling selection: rejected/unrated photos are skipped before any
+        // decode/render, recorded in the manifest and never counted as failures.
+        // Skips are decided up front (pure, cheap) so the parallel phase only sees
+        // photos that actually need rendering.
+        for (offset, item) in items.enumerated() {
+            if let reason = PhotoSelection.skipReason(for: item, options: selection) {
+                let entry = BatchManifestEntry(input: item.relativePath, output: nil,
+                                               status: "skipped", message: reason, report: nil)
+                entries[offset] = entry
+                summary.skipped += 1
+                try store.record(entry, at: offset)
+                onEvent(BatchEvent(kind: .skipped, index: offset + 1, total: items.count,
+                                   input: item.url, message: reason))
+            } else {
+                processable.append((offset, item))
+            }
+        }
+
+        var deliveredFileURLs: [URL] = []
+        if !processable.isEmpty {
+            let outcome = await ParallelBatch.run(
+                items: processable,
+                maxConcurrency: maxConcurrency,
+                cancellation: cancellation
+            ) { entry -> ItemResult in
+                let index = entry.offset + 1
+                onEvent(BatchEvent(kind: .processing, index: index, total: items.count,
+                                   input: entry.item.url, message: "正在处理 \(entry.item.relativePath)"))
+                do {
+                    let record = try self.renderItem(
+                        item: entry.item,
+                        index: index,
+                        input: input,
+                        output: output,
+                        recipe: recipe,
+                        lut: lut,
+                        cleanExportSettings: cleanExportSettings,
+                        dualWatermark: dualWatermark,
+                        watermarkActive: watermarkActive,
+                        engine: engine,
+                        cancellation: cancellation)
+                    do {
+                        try store.record(record.entry, at: entry.offset)
+                    } catch {
+                        Self.removeOutputs(of: record)
+                        throw AtelierError.imageWrite("输出已撤销；无法原子更新批次清单：\(error.localizedDescription)")
+                    }
+                    // Emit the per-photo event from the worker so the UI progress
+                    // moves while the batch is running (not only at the end).
+                    onEvent(BatchEvent(kind: .completed, index: index, total: items.count,
+                                       input: entry.item.url, output: record.outputURL,
+                                       report: record.report))
+                    return .exported(record)
+                } catch {
+                    if let atelier = error as? AtelierError, isCancellation(atelier) {
+                        onEvent(BatchEvent(kind: .cancelled, index: index, total: items.count,
+                                           input: entry.item.url, message: error.localizedDescription))
+                        return .cancelled(error.localizedDescription)
+                    }
+                    onEvent(BatchEvent(kind: .failed, index: index, total: items.count,
+                                       input: entry.item.url, message: error.localizedDescription))
+                    return .failed(error.localizedDescription)
+                }
+            }
+
+            // Ordered reporting: manifest entries keep the input order even though
+            // work completed out of order.
+            for (position, result) in outcome.results.enumerated() {
+                let entry = processable[position]
+                let index = entry.offset + 1
+                switch result {
+                case .success(.exported(let record)):
+                    entries[entry.offset] = record.entry
+                    summary.succeeded += 1
+                    deliveredFileURLs.append(record.outputURL)
+                case .success(.cancelled(let message)):
+                    summary.cancelled = true
+                    let cancelledEntry = BatchManifestEntry(input: entry.item.relativePath, output: nil,
+                                                            status: "cancelled", message: message, report: nil)
+                    entries[entry.offset] = cancelledEntry
+                    try store.record(cancelledEntry, at: entry.offset)
+                case .success(.failed(let message)):
+                    summary.failed += 1
+                    let failedEntry = BatchManifestEntry(input: entry.item.relativePath, output: nil,
+                                                         status: "failed", message: message, report: nil)
+                    entries[entry.offset] = failedEntry
+                    try store.record(failedEntry, at: entry.offset)
+                case .failure(let error):
+                    // Cancelled batches fill unscheduled slots with
+                    // ParallelBatchError.cancelled; those are skipped work, not
+                    // photo failures. Real operation errors never reach here (the
+                    // operation classifies them into ItemResult).
+                    if let batchError = error as? ParallelBatchError, batchError == .cancelled {
+                        summary.cancelled = true
+                        let cancelledEntry = BatchManifestEntry(input: entry.item.relativePath, output: nil,
+                                                                status: "cancelled",
+                                                                message: "批次已取消，未开始处理", report: nil)
+                        entries[entry.offset] = cancelledEntry
+                        try store.record(cancelledEntry, at: entry.offset)
+                        onEvent(BatchEvent(kind: .cancelled, index: index, total: items.count,
+                                           input: entry.item.url, message: "批次已取消，未开始处理"))
+                    } else {
+                        summary.failed += 1
+                        let failedEntry = BatchManifestEntry(input: entry.item.relativePath, output: nil,
+                                                             status: "failed",
+                                                             message: error.localizedDescription,
+                                                             report: nil)
+                        entries[entry.offset] = failedEntry
+                        try store.record(failedEntry, at: entry.offset)
+                    }
+                }
+            }
+
+            // Items that never started because the batch was cancelled: recorded as
+            // cancelled (not failed) and never counted as failures.
+            for position in outcome.skippedByCancellation {
+                let entry = processable[position]
+                let cancelledEntry = BatchManifestEntry(input: entry.item.relativePath, output: nil,
+                                                        status: "cancelled",
+                                                        message: "批次已取消，未开始处理", report: nil)
+                entries[entry.offset] = cancelledEntry
+                summary.cancelled = true
+                try store.record(cancelledEntry, at: entry.offset)
+                onEvent(BatchEvent(kind: .cancelled, index: entry.offset + 1, total: items.count,
+                                   input: entry.item.url, message: "批次已取消，未开始处理"))
+            }
+            if outcome.cancelled { summary.cancelled = true }
+        }
+        if cancellation.isCancelled { summary.cancelled = true }
+        engine.context.clearCaches()
+
+        var finalManifest = store.manifestSnapshot
+        finalManifest.cancelled = summary.cancelled
+        // Every input must be accounted for exactly once, in input order.
+        finalManifest.entries = entries.enumerated().map { offset, entry in
+            entry ?? BatchManifestEntry(input: items[offset].relativePath, output: nil,
+                                        status: "cancelled", message: "批次已取消，未开始处理",
+                                        report: nil)
+        }
+
         // Customer delivery page: generated after the loop from the primary
         // exported files (already colour-managed and metadata-stripped), so an
         // album never holds full-resolution CI graphs in memory. The delivery
         // settings themselves are validated before the output directory exists.
-        var deliveredFileURLs: [URL] = []
-
-        for (offset, item) in items.enumerated() {
-            let index = offset + 1
-            if cancellation.isCancelled {
-                summary.cancelled = true
-                manifest.cancelled = true
-                onEvent(BatchEvent(kind: .cancelled, index: offset, total: items.count, message: "任务已取消"))
-                break
-            }
-
-            onEvent(BatchEvent(kind: .processing, index: index, total: items.count, input: item.url,
-                               message: "正在处理 \(item.relativePath)"))
-            let outcome: ItemOutcome = autoreleasepool {
-                do {
-                    try cancellation.check()
-                    let sourceURL = try validateInput(item, under: input)
-                    let loaded = try PhotoLoader.load(url: sourceURL, lensCorrection: recipe.adjustments.lensCorrection,
-                                                      lensProfileID: recipe.adjustments.lensProfileID,
-                                                      lensCropFactor: recipe.adjustments.lensCropFactor,
-                                                      lensFocalLength: recipe.adjustments.lensFocalLength)
-                    try cancellation.check()
-                    var settings = recipe.adjustments
-                    var report = loaded.report
-                    if let automatic = recipe.automatic {
-                        let analysis = try PhotoAnalyzer().analyze(image: loaded.image,
-                                                                  properties: loaded.properties,
-                                                                  sourceURL: sourceURL,
-                                                                  baseline: automatic.baseline,
-                                                                  intent: automatic.sceneIntent ?? .automatic)
-                        try cancellation.check()
-                        settings = try automatic.resolve(analysis: analysis, current: settings)
-                        report.analysis = AutomaticAnalysisRecord(analysis: analysis,
-                                                                  selectedProposal: automatic.styleID,
-                                                                  applied: settings)
-                    }
-                    let processed = try engine.process(
-                        loaded.image,
-                        settings: settings,
-                        lut: lut,
-                        initialReport: report,
-                        outputColorSpace: recipe.export.colorSpace,
-                        cancellation: cancellation
-                    )
-                    try cancellation.check()
-                    let baseURL = try makeOutputBaseURL(for: item.relativePath, under: output,
-                                                        settings: recipe.export, index: index)
-                    let outputURL = try writeUnique(
-                        image: processed.image,
-                        baseURL: baseURL,
-                        settings: recipe.export,
-                        sourceProperties: loaded.properties,
-                        context: engine.context,
-                        cancellation: cancellation
-                    )
-                    var watermarkFreeURL: URL?
-                    if dualWatermark {
-                        do {
-                            try cancellation.check()
-                            let cleanBaseURL = noWatermarkBaseURL(from: baseURL)
-                            watermarkFreeURL = try writeUnique(
-                                image: processed.image,
-                                baseURL: cleanBaseURL,
-                                settings: cleanExportSettings,
-                                sourceProperties: loaded.properties,
-                                context: engine.context,
-                                cancellation: cancellation
-                            )
-                        } catch {
-                            // Both versions are one deliverable: never leave a
-                            // half-written pair. Remove the primary file before
-                            // reporting the item as failed/cancelled.
-                            _ = Darwin.unlink(outputURL.path)
-                            throw error
-                        }
-                    }
-                    return .success(output: outputURL, report: processed.report,
-                                    watermarkFreeOutput: watermarkFreeURL)
-                } catch {
-                    return .failure(error)
-                }
-            }
-            engine.context.clearCaches()
-
-            switch outcome {
-            case .success(let outputURL, let report, let watermarkFreeOutput):
-                let entry = BatchManifestEntry(
-                    input: item.relativePath,
-                    output: relativePath(of: outputURL, under: output),
-                    status: "completed",
-                    message: "",
-                    report: report,
-                    watermarkApplied: watermarkActive ? true : nil,
-                    watermarkFreeOutput: watermarkFreeOutput.flatMap { relativePath(of: $0, under: output) }
-                )
-                manifest.entries.append(entry)
-                do {
-                    try updateManifest(manifest, at: manifestURL)
-                } catch {
-                    let cleanupResult = Darwin.unlink(outputURL.path)
-                    if let watermarkFreeOutput { _ = Darwin.unlink(watermarkFreeOutput.path) }
-                    if cleanupResult == 0 || errno == ENOENT {
-                        throw AtelierError.imageWrite("输出已撤销；无法原子更新批次清单：\(error.localizedDescription)")
-                    }
-                    let cleanupError = NSError(domain: NSPOSIXErrorDomain, code: Int(errno)).localizedDescription
-                    throw AtelierError.imageWrite("批次清单更新失败：\(error.localizedDescription)；撤销本项输出也失败：\(cleanupError)")
-                }
-                deliveredFileURLs.append(outputURL)
-                summary.succeeded += 1
-                onEvent(BatchEvent(kind: .completed, index: index, total: items.count, input: item.url,
-                                   output: outputURL, report: report))
-                if cancellation.isCancelled {
-                    // Export is an atomic per-photo boundary: persist the completed
-                    // file first, then stop before starting another item.
-                    summary.cancelled = true
-                    manifest.cancelled = true
-                    try updateManifestOrThrow(manifest, at: manifestURL)
-                    onEvent(BatchEvent(kind: .cancelled, index: index, total: items.count, input: item.url,
-                                       output: outputURL, message: "当前照片已完整保存并记录；后续项目已取消"))
-                }
-
-            case .failure(let error as AtelierError) where isCancellation(error):
-                summary.cancelled = true
-                manifest.cancelled = true
-                manifest.entries.append(BatchManifestEntry(input: item.relativePath, output: nil,
-                                                            status: "cancelled", message: error.localizedDescription,
-                                                            report: nil))
-                try updateManifestOrThrow(manifest, at: manifestURL)
-                onEvent(BatchEvent(kind: .cancelled, index: offset, total: items.count, input: item.url,
-                                   message: error.localizedDescription))
-                break
-
-            case .failure(let error):
-                summary.failed += 1
-                let message = error.localizedDescription
-                manifest.entries.append(BatchManifestEntry(input: item.relativePath, output: nil,
-                                                            status: "failed", message: message, report: nil))
-                try updateManifestOrThrow(manifest, at: manifestURL)
-                onEvent(BatchEvent(kind: .failed, index: index, total: items.count, input: item.url,
-                                   message: message))
-            }
-
-            if summary.cancelled { break }
-        }
-
         if let deliverySettings = effectiveDeliverySettings {
             if summary.cancelled {
-                manifest.warnings.append("客户交付页未生成：批次已取消（已导出的照片仍保留）。")
+                finalManifest.warnings.append("客户交付页未生成：批次已取消（已导出的照片仍保留）。")
             } else if deliveredFileURLs.isEmpty {
-                manifest.warnings.append("客户交付页未生成：本次没有成功导出的照片。")
+                finalManifest.warnings.append("客户交付页未生成：本次没有成功导出的照片。")
             } else {
                 do {
                     // Generate inside a hidden temporary directory and only install
@@ -258,7 +326,7 @@ public final class BatchProcessor {
                     let htmlURL = directory.appendingPathComponent(result.indexHTMLURL.lastPathComponent)
                     let contactSheetURL = result.contactSheetURL
                         .map { directory.appendingPathComponent($0.lastPathComponent) }
-                    manifest.deliveryPage = BatchDeliveryPageRecord(
+                    finalManifest.deliveryPage = BatchDeliveryPageRecord(
                         directory: relativePath(of: directory, under: output) ?? directory.lastPathComponent,
                         html: relativePath(of: htmlURL, under: output) ?? htmlURL.lastPathComponent,
                         contactSheet: contactSheetURL.flatMap { relativePath(of: $0, under: output) },
@@ -268,25 +336,186 @@ public final class BatchProcessor {
                 } catch {
                     // The exported photos and the manifest are still valid; record
                     // the failure instead of discarding successful per-photo work.
-                    manifest.warnings.append("客户交付页生成失败：\(error.localizedDescription)")
+                    finalManifest.warnings.append("客户交付页生成失败：\(error.localizedDescription)")
                 }
             }
         }
 
         do {
-            try updateManifest(manifest, at: manifestURL)
+            try updateManifest(finalManifest, at: manifestURL)
         } catch {
             throw AtelierError.imageWrite("无法保存批次最终状态：\(error.localizedDescription)")
         }
-        onEvent(BatchEvent(kind: .finished, index: summary.succeeded + summary.failed, total: items.count,
+        onEvent(BatchEvent(kind: .finished,
+                           index: summary.succeeded + summary.failed + summary.skipped,
+                           total: items.count,
                            message: summary.cancelled ? "批次已取消" : "批次完成"))
         return summary
     }
+
+    /// Renders and writes one photo. Runs on a `ParallelBatch` worker; it only
+    /// touches per-photo state and is safe to call concurrently (the shared
+    /// `PhotoEngine` uses a thread-safe `CIContext` and per-call graph state).
+    private func renderItem(
+        item: PhotoItem,
+        index: Int,
+        input: URL,
+        output: URL,
+        recipe: Recipe,
+        lut: LUTCube?,
+        cleanExportSettings: ExportSettings,
+        dualWatermark: Bool,
+        watermarkActive: Bool,
+        engine: PhotoEngine,
+        cancellation: CancellationToken
+    ) throws -> ExportedRecord {
+        try autoreleasepool {
+            try cancellation.check()
+            let sourceURL = try validateInput(item, under: input)
+            let loaded = try PhotoLoader.load(url: sourceURL, lensCorrection: recipe.adjustments.lensCorrection,
+                                              lensProfileID: recipe.adjustments.lensProfileID,
+                                              lensCropFactor: recipe.adjustments.lensCropFactor,
+                                              lensFocalLength: recipe.adjustments.lensFocalLength)
+            try cancellation.check()
+            var settings = recipe.adjustments
+            var report = loaded.report
+            if let automatic = recipe.automatic {
+                let analysis = try PhotoAnalyzer().analyze(image: loaded.image,
+                                                          properties: loaded.properties,
+                                                          sourceURL: sourceURL,
+                                                          baseline: automatic.baseline,
+                                                          intent: automatic.sceneIntent ?? .automatic)
+                try cancellation.check()
+                settings = try automatic.resolve(analysis: analysis, current: settings)
+                report.analysis = AutomaticAnalysisRecord(analysis: analysis,
+                                                          selectedProposal: automatic.styleID,
+                                                          applied: settings)
+            }
+            let processed = try engine.process(
+                loaded.image,
+                settings: settings,
+                lut: lut,
+                initialReport: report,
+                outputColorSpace: recipe.export.colorSpace,
+                cancellation: cancellation
+            )
+            try cancellation.check()
+            let baseURL = try makeOutputBaseURL(for: item.relativePath, under: output,
+                                                settings: recipe.export, index: index)
+            let outputURL = try writeUnique(
+                image: processed.image,
+                baseURL: baseURL,
+                settings: recipe.export,
+                sourceProperties: loaded.properties,
+                context: engine.context,
+                cancellation: cancellation
+            )
+            var watermarkFreeURL: URL?
+            if dualWatermark {
+                do {
+                    try cancellation.check()
+                    let cleanBaseURL = noWatermarkBaseURL(from: baseURL)
+                    watermarkFreeURL = try writeUnique(
+                        image: processed.image,
+                        baseURL: cleanBaseURL,
+                        settings: cleanExportSettings,
+                        sourceProperties: loaded.properties,
+                        context: engine.context,
+                        cancellation: cancellation
+                    )
+                } catch {
+                    // Both versions are one deliverable: never leave a
+                    // half-written pair. Remove the primary file before
+                    // reporting the item as failed/cancelled.
+                    _ = Darwin.unlink(outputURL.path)
+                    throw error
+                }
+            }
+            let entry = BatchManifestEntry(
+                input: item.relativePath,
+                output: relativePath(of: outputURL, under: output),
+                status: "completed",
+                message: "",
+                report: processed.report,
+                watermarkApplied: watermarkActive ? true : nil,
+                watermarkFreeOutput: watermarkFreeURL.flatMap { relativePath(of: $0, under: output) }
+            )
+            return ExportedRecord(entry: entry, outputURL: outputURL,
+                                  report: processed.report, watermarkFreeURL: watermarkFreeURL)
+        }
+    }
+
+    private static func removeOutputs(of record: ExportedRecord) {
+        _ = Darwin.unlink(record.outputURL.path)
+        if let clean = record.watermarkFreeURL { _ = Darwin.unlink(clean.path) }
+    }
 }
 
-private enum ItemOutcome {
-    case success(output: URL, report: ProcessingReport, watermarkFreeOutput: URL?)
-    case failure(Error)
+/// Bridges the synchronous `BatchProcessor.run` API to the async executor.
+private final class AsyncResultBox<Value> {
+    private let lock = NSLock()
+    private var result: Result<Value, Error>?
+
+    func store(_ result: Result<Value, Error>) {
+        lock.lock(); self.result = result; lock.unlock()
+    }
+
+    func take() throws -> Value {
+        lock.lock(); defer { lock.unlock() }
+        guard let result else { throw AtelierError.imageWrite("并行批次未返回结果") }
+        return try result.get()
+    }
+}
+
+/// Serializes manifest updates from parallel workers so that the on-disk record
+/// always lists known entries in input order (a prefix of the run).
+private final class BatchManifestStore {
+    private let lock = NSLock()
+    private var known: [Int: BatchManifestEntry] = [:]
+    private let total: Int
+    private let manifestURL: URL
+    private let initial: BatchManifest
+
+    init(total: Int, manifestURL: URL, initial: BatchManifest) {
+        self.total = total
+        self.manifestURL = manifestURL
+        self.initial = initial
+    }
+
+    func record(_ entry: BatchManifestEntry, at index: Int) throws {
+        lock.lock(); defer { lock.unlock() }
+        known[index] = entry
+        var snapshot = initial
+        snapshot.entries = orderedPrefix()
+        try updateManifest(snapshot, at: manifestURL)
+    }
+
+    var manifestSnapshot: BatchManifest {
+        lock.lock(); defer { lock.unlock() }
+        return initial
+    }
+
+    private func orderedPrefix() -> [BatchManifestEntry] {
+        var entries: [BatchManifestEntry] = []
+        for index in 0..<total {
+            guard let entry = known[index] else { break }
+            entries.append(entry)
+        }
+        return entries
+    }
+}
+
+private struct ExportedRecord {
+    let entry: BatchManifestEntry
+    let outputURL: URL
+    let report: ProcessingReport
+    let watermarkFreeURL: URL?
+}
+
+private enum ItemResult {
+    case exported(ExportedRecord)
+    case cancelled(String)
+    case failed(String)
 }
 
 private struct BatchManifest: Codable {
@@ -303,6 +532,9 @@ private struct BatchManifest: Codable {
     /// Customer delivery page generated for this run (v4). Nil when the recipe
     /// did not request one or when a cancelled/failed run produced no page.
     var deliveryPage: BatchDeliveryPageRecord? = nil
+    /// Session culling selection options used by this run (nil = export every
+    /// input). Recorded so skipped entries are explainable from the manifest.
+    var selection: ExportSelectionOptions? = nil
 }
 
 /// Manifest record of the generated offline customer delivery page. Paths are

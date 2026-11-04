@@ -285,14 +285,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughTwelveAndRejectsThirteen() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughThirteenAndRejectsFourteen() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...12 {
+        for version in 1...13 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -305,8 +305,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 13
-        let rejectedOutput = root.appendingPathComponent("output-13", isDirectory: true)
+        futureRecipe.version = 14
+        let rejectedOutput = root.appendingPathComponent("output-14", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -1382,7 +1382,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed settings fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 13
+        future.version = 14
         XCTAssertThrowsError(try future.validateVersion())
         var invalid = CertificatePhotoSettings(enabled: true)
         invalid.shadow.shadowOpacity = 2
@@ -1525,5 +1525,117 @@ final class ColorCompatibilityTests: XCTestCase {
         legacyRecipe.version = 11
         XCTAssertNoThrow(try legacyRecipe.validateVersion(), "缺 deliveryPage 的旧导出设置必须保持 v11 可加载")
         XCTAssertEqual(legacy.suffix, "_graded")
+    }
+
+    // MARK: - P1-C make-up (v13)
+
+    func testMakeupRequiresV13RoundTripsAndNeutralStaysLegacy() throws {
+        let makeup = MakeupSettings(lipColor: SRGBColor(red: 0.5, green: 0.25, blue: 0.75),
+                                    lipIntensity: 0.5,
+                                    browColor: SRGBColor(red: 0.25, green: 0.5, blue: 0.25),
+                                    browDensity: 0.5,
+                                    cheekColor: SRGBColor(red: 0.75, green: 0.5, blue: 0.5),
+                                    cheekIntensity: 0.5,
+                                    cheekRadius: 0.5,
+                                    eyeshadowColor: SRGBColor(red: 0.5, green: 0.75, blue: 0.5),
+                                    eyeshadowIntensity: 0.5)
+        var settings = AdjustmentSettings()
+        settings.makeup = makeup
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 12
+        XCTAssertThrowsError(try recipe.validateVersion()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("妆容"),
+                          "a v12 recipe with active make-up must be rejected")
+        }
+        recipe.version = 13
+        XCTAssertNoThrow(try recipe.validateVersion())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings, automatic: nil), 13)
+        let decoded = try JSONDecoder().decode(Recipe.self, from: try JSONEncoder().encode(recipe))
+        XCTAssertEqual(decoded, recipe)
+        XCTAssertEqual(decoded.adjustments.makeup?.lipIntensity, 0.5)
+        XCTAssertEqual(decoded.adjustments.makeup?.lipColor,
+                       SRGBColor(red: 0.5, green: 0.25, blue: 0.75))
+
+        // Explicitly neutral (all strengths zero) make-up keeps the legacy path.
+        var neutral = AdjustmentSettings()
+        neutral.makeup = MakeupSettings()
+        XCTAssertTrue(neutral.makeup?.isNeutral == true)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: neutral, automatic: nil), 9)
+        var neutralV12 = Recipe(adjustments: neutral)
+        neutralV12.version = 12
+        XCTAssertNoThrow(try neutralV12.validateVersion())
+        XCTAssertNil(try JSONDecoder().decode(Recipe.self,
+            from: JSONEncoder().encode(Recipe(adjustments: AdjustmentSettings())))
+            .adjustments.makeup)
+
+        // Automatic recipe baseline/reference branches are gated too.
+        let automatic = AutomaticBatchRecipe(styleID: "balanced",
+                                             baseline: settings,
+                                             referenceSettings: AdjustmentSettings())
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: AdjustmentSettings(),
+                                                         automatic: automatic), 13)
+        var automaticRecipe = Recipe(adjustments: AdjustmentSettings(), automatic: automatic)
+        automaticRecipe.version = 12
+        XCTAssertThrowsError(try automaticRecipe.validateVersion())
+        automaticRecipe.version = 13
+        XCTAssertNoThrow(try automaticRecipe.validateVersion())
+
+        // Version range and malformed make-up fail loudly.
+        var future = Recipe(adjustments: AdjustmentSettings())
+        future.version = 14
+        XCTAssertThrowsError(try future.validateVersion())
+        XCTAssertThrowsError(try PhotoEngine.validate({
+            var value = AdjustmentSettings()
+            value.makeup = MakeupSettings(lipIntensity: 2)
+            return value
+        }()))
+        XCTAssertThrowsError(try PhotoEngine.validate({
+            var value = AdjustmentSettings()
+            value.makeup = MakeupSettings(lipIntensity: 0.2, cheekRadius: 0.1)
+            return value
+        }()))
+        // A neutral field with malformed nested values must not be rejected at the
+        // pipeline entry (the v13 gate treats it as inert, same rule as S3).
+        var neutralInvalid = AdjustmentSettings()
+        var neutralMakeup = MakeupSettings()
+        neutralMakeup.lipIntensity = 0
+        neutralMakeup.cheekRadius = 0.1
+        neutralInvalid.makeup = neutralMakeup
+        XCTAssertNoThrow(try PhotoEngine.validate(neutralInvalid))
+    }
+
+    func testMakeupCollapseKeepsColourOnlyEditsWhileNeutral() throws {
+        // F1 (C5 round 2): only an all-default setting collapses to nil; a neutral
+        // setting with user-chosen colour/radius survives so the ColorPicker does
+        // not snap back before an intensity is raised.
+        XCTAssertNil(MakeupSettings.collapsed(MakeupSettings()))
+        var colourOnly = MakeupSettings()
+        colourOnly.lipColor = SRGBColor(red: 0.9, green: 0.1, blue: 0.2)
+        let keptColour = try XCTUnwrap(MakeupSettings.collapsed(colourOnly))
+        XCTAssertTrue(keptColour.isNeutral)
+        XCTAssertEqual(keptColour.lipColor, SRGBColor(red: 0.9, green: 0.1, blue: 0.2))
+        var radiusOnly = MakeupSettings()
+        radiusOnly.cheekRadius = 0.8
+        let keptRadius = try XCTUnwrap(MakeupSettings.collapsed(radiusOnly))
+        XCTAssertEqual(keptRadius.cheekRadius, 0.8)
+        XCTAssertTrue(keptRadius.isNeutral)
+
+        var settings = AdjustmentSettings()
+        settings.makeup = keptColour
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: settings,
+                                                         automatic: nil), 9)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 12
+        XCTAssertNoThrow(try recipe.validateVersion())
+        XCTAssertNoThrow(try PhotoEngine.validate(settings))
+
+        var active = keptColour
+        active.lipIntensity = 0.5
+        let keptActive = try XCTUnwrap(MakeupSettings.collapsed(active))
+        XCTAssertFalse(keptActive.isNeutral)
+        var activeSettings = AdjustmentSettings()
+        activeSettings.makeup = keptActive
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: activeSettings,
+                                                         automatic: nil), 13)
     }
 }

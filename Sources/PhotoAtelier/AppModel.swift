@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreImage
+import ImageIO
 import PhotoCore
 import UniformTypeIdentifiers
 
@@ -67,6 +68,15 @@ final class AppModel: ObservableObject {
     @Published var outputRoot: URL?
     @Published var photos: [PhotoItem] = []
     @Published var selectedID: String?
+
+    // P1-C culling session state: ratings/rejections/quality reports live on
+    // `PhotoItem` and are deliberately never written to recipes or disk.
+    @Published var cullFilter: PhotoCullFilter = .all
+    @Published var exportSelectionOptions = ExportSelectionOptions()
+    @Published var autoCullBusy = false
+    @Published var autoCullProgress: Double = 0
+    private var autoCullToken: CancellationToken?
+    private let autoCullQueue = DispatchQueue(label: "PhotoAtelier.culling", qos: .userInitiated)
     @Published var adjustments = AdjustmentSettings() {
         didSet {
             refreshNativeInspection()
@@ -76,6 +86,18 @@ final class AppModel: ObservableObject {
     @Published var exportSettings = ExportSettings() {
         didSet { if oldValue.colorSpace != exportSettings.colorSpace { refreshNativeInspection() } }
     }
+    /// Bounded-concurrency batch export width (1...8; 1 = serial). Session setting,
+    /// deliberately not part of the recipe or the export settings: it only changes
+    /// how fast the same pixels are produced, never the bytes.
+    @Published var batchConcurrency: Int = ParallelBatch.defaultConcurrency {
+        didSet {
+            let clamped = ParallelBatch.effectiveConcurrency(batchConcurrency)
+            if clamped != batchConcurrency { batchConcurrency = clamped }
+        }
+    }
+    /// Latest-wins guard for async preview work; a slow render can never publish
+    /// pixels over a newer request.
+    private var previewGate = PreviewRequestGate()
     @Published var lutOptions: [LUTOption] = []
     @Published private(set) var lutLibraryBusy = false
     @Published private(set) var lutImportCompleted = 0
@@ -109,6 +131,7 @@ final class AppModel: ObservableObject {
     @Published var processed = 0
     @Published var succeeded = 0
     @Published var failed = 0
+    @Published var skipped = 0
     @Published var currentFile = ""
     @Published var status = "选择一个照片文件夹，开始你的调色工作。"
     @Published var errorMessage: String?
@@ -202,7 +225,6 @@ final class AppModel: ObservableObject {
     private var pendingPreview: DispatchWorkItem?
     private var previewToken: CancellationToken?
     private var batchToken: CancellationToken?
-    private var previewGeneration = UUID()
     private var scanGeneration = UUID()
     private var portraitDetectionGeneration = UUID()
     private var referenceColorGeneration = UUID()
@@ -230,6 +252,9 @@ final class AppModel: ObservableObject {
     private var lutContractReady: Bool { lutSpaceConfirmed }
 
     var selectedPhoto: PhotoItem? { photos.first { $0.id == selectedID } }
+
+    /// Photos visible in the sidebar under the current session culling filter.
+    var visiblePhotos: [PhotoItem] { PhotoSelection.filtered(photos, filter: cullFilter) }
     var selectedOption: LUTOption? { lutOptions.first { $0.id == selectedLUT } }
     var activeMaskIndex: Int? { adjustments.masks.firstIndex { $0.id == selectedMask } }
     var maskInteractionActive: Bool { drawingMask || maskEditMode || pickingMaskColor }
@@ -329,13 +354,18 @@ final class AppModel: ObservableObject {
             certificateProbe.certificatePhoto = CertificatePhotoSettings(enabled: true, size: .oneInch)
             let certificateVersion = PhotoEngine.requiredRecipeVersion(adjustments: certificateProbe,
                                                                        automatic: nil)
+            var makeupProbe = AdjustmentSettings()
+            makeupProbe.makeup = MakeupSettings(lipIntensity: 0.5)
+            let makeupVersion = PhotoEngine.requiredRecipeVersion(adjustments: makeupProbe,
+                                                                  automatic: nil)
             print("PORTRAIT_CONTRACT_SELF_CHECK \(portraitContractFailure == nil ? "PASS" : "FAIL")"
                 + " · maxFaces=\(Self.portraitMaximumFaces)"
                 + " · minSkinCoverage=\(Self.portraitMinimumSkinCoverage)"
                 + " · neutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings()))"
                 + " · nonNeutralVersion=\(Self.portraitRecipeVersion(PortraitRefinementSettings(blemishStrength: 0.2)))"
                 + " · liquifyVersion=\(liquifyVersion)"
-                + " · certificateVersion=\(certificateVersion)")
+                + " · certificateVersion=\(certificateVersion)"
+                + " · makeupVersion=\(makeupVersion)")
         }
         #endif
     }
@@ -383,9 +413,17 @@ final class AppModel: ObservableObject {
         styleReference = nil; stylePreviews.cancel()
         regionalSuggestions = []
         invalidatePortraitDetection()
-        pendingPreview?.cancel(); previewToken?.cancel(); previewGeneration = UUID()
+        pendingPreview?.cancel(); previewToken?.cancel(); previewGate.invalidate()
         previewBusy = false; previewReport = .init(); histogram = Array(repeating: 0, count: 64)
         invalidateAnalysis()
+        // Culling session state belongs to the previous library: cancel any
+        // in-flight auto-cull and return the filter to "all" (ratings live on the
+        // replaced PhotoItem values, so they disappear with the library).
+        autoCullToken?.cancel()
+        autoCullToken = nil
+        autoCullBusy = false
+        autoCullProgress = 0
+        cullFilter = .all
     }
 
     /// Imports explicitly opened or dropped files and folders off the main thread.
@@ -663,7 +701,7 @@ final class AppModel: ObservableObject {
     func requestPreview(immediate: Bool = false) {
         refreshNativeInspection()
         pendingPreview?.cancel(); previewToken?.cancel()
-        let generation = UUID(); previewGeneration = generation
+        let generation = previewGate.begin()
         maskOverlayImage = nil; maskInspection = nil
         previewReport.contentSelection = nil
         previewReport.localDetails = nil
@@ -805,7 +843,7 @@ final class AppModel: ObservableObject {
                 }
                 try token.check()
                 DispatchQueue.main.async {
-                    guard self.previewGeneration == generation else { return }
+                    guard self.previewGate.admits(generation) else { return }
                     self.beforeImage = NSImage(cgImage: before, size: .zero)
                     self.afterImage = NSImage(cgImage: after, size: .zero)
                     self.previewReport = output.report; self.histogram = histogram
@@ -820,7 +858,7 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    guard self.previewGeneration == generation else { return }
+                    guard self.previewGate.admits(generation) else { return }
                     self.previewBusy = false
                     if !token.isCancelled { self.afterImage = nil; self.present(error) }
                 }
@@ -876,12 +914,15 @@ final class AppModel: ObservableObject {
         analysis = nil; proposalToken?.cancel(); proposalSettings = nil; proposalLUTID = nil
         analysisBaseline = baseline
         analysisIntent = intent
-        analysisImage = loaded.image
+        // Analysis only needs a capped sample; the export path still uses the
+        // full-resolution image, so downsampling here cannot change exported pixels.
+        let analysisInput = engine.analysisSample(loaded.image)
+        analysisImage = analysisInput
         analysisBusy = true; analysisError = nil; proposalPreviews = [:]
         analysisQueue.async { [weak self] in
             let result = Result { () throws -> PhotoAnalysis in
                 try autoreleasepool {
-                    try PhotoAnalyzer().analyze(image: loaded.image, properties: loaded.properties,
+                    try PhotoAnalyzer().analyze(image: analysisInput, properties: loaded.properties,
                                                sourceURL: photo.url, baseline: baseline, intent: intent)
                 }
             }
@@ -1030,22 +1071,29 @@ final class AppModel: ObservableObject {
         closeNativeInspection()
         showStyleBrowser = false; stylePreviews.cancel()
         cancelMaskInteraction()
-        // Freeze the recipe and selection before moving work off the UI thread.
+        // Freeze the recipe and the session culling selection before moving work
+        // off the UI thread; neither ratings nor skip options are recipe data.
         let snapshot = recipe; let items = photos; let cube = selectedOption?.cube
+        let selection = exportSelectionOptions
+        let concurrency = ParallelBatch.effectiveConcurrency(batchConcurrency)
         let token = CancellationToken(); batchToken = token
-        batchRunning = true; processed = 0; succeeded = 0; failed = 0; lastManifest = nil
+        batchRunning = true; processed = 0; succeeded = 0; failed = 0; skipped = 0; lastManifest = nil
         batchMessages = []; currentFile = "准备导出…"; status = "批量处理中 · 使用当前统一配方"
         previewQueue.async { [weak self] in
             do {
                 let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
-                                                      recipe: snapshot, lut: cube, cancellation: token) { event in
+                                                      recipe: snapshot, lut: cube,
+                                                      selection: selection,
+                                                      maxConcurrency: concurrency,
+                                                      cancellation: token) { event in
                     DispatchQueue.main.async { self?.consume(event) }
                 }
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.batchRunning = false; self.lastManifest = summary.manifestURL
                     self.succeeded = summary.succeeded; self.failed = summary.failed
-                    self.status = "\(summary.cancelled ? "已取消" : "导出完成") · 成功 \(summary.succeeded) 张，失败 \(summary.failed) 张"
+                    self.skipped = summary.skipped
+                    self.status = "\(summary.cancelled ? "已取消" : "导出完成") · 成功 \(summary.succeeded) 张，跳过 \(summary.skipped) 张，失败 \(summary.failed) 张"
                     self.currentFile = ""
                 }
             } catch {
@@ -1059,6 +1107,7 @@ final class AppModel: ObservableObject {
         case .processing: currentFile = event.input?.lastPathComponent ?? ""
         case .completed: processed += 1; succeeded += 1
         case .failed: processed += 1; failed += 1
+        case .skipped: processed += 1
         default: break
         }
         if !event.message.isEmpty {
@@ -1068,6 +1117,107 @@ final class AppModel: ObservableObject {
     }
 
     func cancelBatch() { batchToken?.cancel(); status = "正在安全停止；已完成的照片保留。" }
+
+    // MARK: - Culling / selection (P1-C C4)
+
+    func setCullFilter(_ filter: PhotoCullFilter) {
+        cullFilter = filter
+        status = filter == .all
+            ? "显示全部 \(photos.count) 张照片。"
+            : "当前筛选：\(filter.title)；评级/废片为会话状态，不写配方。"
+    }
+
+    func setRating(_ rating: Int, for photoID: String) {
+        guard let index = photos.firstIndex(where: { $0.id == photoID }) else { return }
+        photos[index].rating = PhotoSelection.clampedRating(rating)
+    }
+
+    func rateSelectedPhoto(_ rating: Int) {
+        guard let id = selectedID else { return }
+        setRating(rating, for: id)
+        status = rating == 0 ? "已清除当前照片的星级。" : "已为当前照片评 \(PhotoSelection.clampedRating(rating)) 星（会话状态）。"
+    }
+
+    func stepSelectedRating(by delta: Int) {
+        guard let photo = selectedPhoto else { return }
+        rateSelectedPhoto(PhotoSelection.steppedRating(photo.rating, delta: delta))
+    }
+
+    func toggleSelectedRejection() {
+        guard let id = selectedID, let index = photos.firstIndex(where: { $0.id == id }) else { return }
+        photos[index].isRejected.toggle()
+        status = photos[index].isRejected
+            ? "已标记为废片；导出时可勾选「跳过废片」。"
+            : "已取消废片标记。"
+    }
+
+    /// Runs the heuristic culling analysis in the background. Results are applied
+    /// on the main thread; manual ratings/rejections are never overwritten.
+    func runAutoCull() {
+        guard !batchRunning, !autoCullBusy, !photos.isEmpty else { return }
+        let token = CancellationToken()
+        autoCullToken = token
+        autoCullBusy = true
+        autoCullProgress = 0
+        status = "自动挑图：正在分析 \(photos.count) 张照片（启发式 v1）…"
+        let items = photos
+        autoCullQueue.async { [weak self] in
+            var reports: [String: QualityReport] = [:]
+            var unreadable = 0
+            for (offset, item) in items.enumerated() {
+                if token.isCancelled { break }
+                if let image = Self.cullingAnalysisImage(url: item.url) {
+                    let faces = FaceSemanticAnalyzer.detect(in: image, maxFaces: 4)
+                    if let report = try? QualityAnalyzer.report(for: image, faces: faces) {
+                        reports[item.id] = report
+                    } else {
+                        unreadable += 1
+                    }
+                } else {
+                    unreadable += 1
+                }
+                let progress = Double(offset + 1) / Double(items.count)
+                DispatchQueue.main.async { self?.autoCullProgress = progress }
+            }
+            DispatchQueue.main.async {
+                // A library transition nils the token: never apply stale results
+                // to a different library (a user cancel keeps the token).
+                guard let self = self, self.autoCullToken === token else { return }
+                self.autoCullToken = nil
+                self.autoCullBusy = false
+                self.autoCullProgress = 1
+                var updated = self.photos
+                let applied = PhotoSelection.applyingAutoCull(reports: reports, to: &updated)
+                self.photos = updated
+                let cancelled = token.isCancelled
+                self.status = cancelled
+                    ? "自动挑图已取消：已分析 \(applied) / \(items.count) 张，结果保留。"
+                    : "自动挑图完成：分析 \(applied) 张" + (unreadable > 0 ? "，\(unreadable) 张读取失败" : "") + "；星级/废片建议已填入，未覆盖手动标记。"
+            }
+        }
+    }
+
+    func cancelAutoCull() {
+        guard autoCullBusy else { return }
+        autoCullToken?.cancel()
+        status = "正在取消自动挑图；已分析结果会保留。"
+    }
+
+    /// Builds a ≤1024px analysis image from the file thumbnail so auto-culling
+    /// does not decode full-resolution originals.
+    private static func cullingAnalysisImage(url: URL) -> CIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1024
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0,
+                                                               options as CFDictionary) else {
+            return nil
+        }
+        return CIImage(cgImage: cgImage)
+    }
 
     // MARK: - Customer delivery page
 
@@ -1535,7 +1685,7 @@ final class AppModel: ObservableObject {
     func pickMaskColor(at point: MaskPoint) {
         guard !batchRunning, !previewBusy, let id = selectedMask, let photoID = selectedID else { return }
         pickingMaskColor = false
-        let generation = previewGeneration
+        let generation = previewGate.currentGeneration
         previewQueue.async { [weak self] in
             guard let self = self else { return }
             let result = Result { () throws -> MaskColor in
@@ -1546,7 +1696,7 @@ final class AppModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 guard self.selectedID == photoID, self.selectedMask == id,
-                      self.previewGeneration == generation, !self.batchRunning,
+                      self.previewGate.admits(generation), !self.batchRunning,
                       let index = self.adjustments.masks.firstIndex(where: { $0.id == id }) else { return }
                 switch result {
                 case .success(let color):
@@ -2181,6 +2331,47 @@ final class AppModel: ObservableObject {
             refreshUndoAvailability()
         }
         status = "已清除全部修复笔迹（配方回到 v1–v11 兼容路径）。"
+    }
+
+    // MARK: Make-up (P1-C)
+
+    var makeupSettings: MakeupSettings {
+        adjustments.makeup ?? MakeupSettings()
+    }
+
+    var makeupIsActive: Bool {
+        adjustments.makeup.map { !$0.isNeutral } ?? false
+    }
+
+    /// Make-up needs usable face landmarks; controls stay disabled until the
+    /// background portrait detection found at least one face.
+    var canEditMakeup: Bool {
+        !batchRunning && afterImage != nil && portraitFaceStatus.detectedFaceCount > 0
+    }
+
+    var makeupStatusNote: String {
+        if batchRunning { return "批处理进行中，妆容编辑暂不可用。" }
+        if afterImage == nil { return "打开照片后可编辑妆容。" }
+        if portraitFaceStatus.isDetecting { return "正在检测人脸；妆容需要人脸地标。" }
+        if portraitFaceStatus.detectedFaceCount == 0 {
+            return "未检测到可用人脸：妆容已禁用（不会静默改图）。"
+        }
+        return "检测到 \(portraitFaceStatus.detectedFaceCount) 张人脸；妆容只作用于检测到的人脸区域，建议逐张预览。"
+    }
+
+    /// Applies one make-up edit. Only an all-default setting collapses back to
+    /// `nil`: a neutral setting whose colour/radius was edited stays stored so the
+    /// ColorPicker selection is not lost before an intensity is raised (the field is
+    /// still neutral: no pixels change and old recipe versions stay legal).
+    func updateMakeup(_ mutate: (inout MakeupSettings) -> Void) {
+        var settings = adjustments.makeup ?? MakeupSettings()
+        mutate(&settings)
+        adjustments.makeup = MakeupSettings.collapsed(settings)
+    }
+
+    func resetMakeup() {
+        adjustments.makeup = nil
+        status = "已归零妆容设置。"
     }
 
     // MARK: Portrait refinement

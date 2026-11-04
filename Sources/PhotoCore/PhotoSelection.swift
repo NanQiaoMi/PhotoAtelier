@@ -150,11 +150,126 @@ public enum PhotoSelection {
         return combined.sorted(by: isOrderedBefore)
     }
 
+    // MARK: - Culling session helpers (P1-C C4)
+
+    /// Ratings are session state in a fixed `0...5` range.
+    public static let ratingRange = 0...5
+
+    /// Clamps a rating into `0...5`.
+    public static func clampedRating(_ rating: Int) -> Int {
+        min(5, max(0, rating))
+    }
+
+    /// Rating after one keyboard/slider step (used by the UI shortcuts).
+    public static func steppedRating(_ rating: Int, delta: Int) -> Int {
+        clampedRating(rating + delta)
+    }
+
+    /// Auto-cull suggestion derived from one heuristic quality report.
+    ///
+    /// Mapping (documented, advisory only): `keep` → 5 stars, `review` → 3 stars,
+    /// `reject` → 1 star plus the session rejection mark. Manual ratings are never
+    /// overwritten by `applyingAutoCull`.
+    public struct AutoCullAssignment: Codable, Equatable {
+        public var rating: Int
+        public var isRejected: Bool
+        public init(rating: Int, isRejected: Bool) {
+            self.rating = min(5, max(0, rating))
+            self.isRejected = isRejected
+        }
+    }
+
+    public static func autoCullAssignment(for report: QualityReport) -> AutoCullAssignment {
+        switch report.recommendation {
+        case .keep: return AutoCullAssignment(rating: 5, isRejected: false)
+        case .review: return AutoCullAssignment(rating: 3, isRejected: false)
+        case .reject: return AutoCullAssignment(rating: 1, isRejected: true)
+        }
+    }
+
+    /// Applies auto-cull reports to matching photos without overwriting manual
+    /// session edits (rating > 0 or an explicit rejection mark). Returns the number
+    /// of photos that received a report.
+    @discardableResult
+    public static func applyingAutoCull(reports: [String: QualityReport],
+                                        to items: inout [PhotoItem]) -> Int {
+        var applied = 0
+        for index in items.indices {
+            guard let report = reports[items[index].id] else { continue }
+            items[index].qualityReport = report
+            if items[index].rating == 0 && !items[index].isRejected {
+                let assignment = autoCullAssignment(for: report)
+                items[index].rating = assignment.rating
+                items[index].isRejected = assignment.isRejected
+            }
+            applied += 1
+        }
+        return applied
+    }
+
+    /// Sidebar filter over the session culling state.
+    public static func filtered(_ items: [PhotoItem], filter: PhotoCullFilter) -> [PhotoItem] {
+        items.filter(filter.matches)
+    }
+
+    /// True when the photo should be exported under the session options.
+    public static func shouldExport(_ item: PhotoItem,
+                                    options: ExportSelectionOptions) -> Bool {
+        skipReason(for: item, options: options) == nil
+    }
+
+    /// Human-readable reason when the photo will be skipped, nil when exported.
+    public static func skipReason(for item: PhotoItem,
+                                  options: ExportSelectionOptions) -> String? {
+        if options.skipRejectedPhotos && item.isRejected {
+            return "已标记为废片，按导出设置跳过。"
+        }
+        if options.skipUnselectedPhotos && item.rating == 0 && !item.isRejected {
+            return "尚未评级（未选），按导出设置跳过。"
+        }
+        return nil
+    }
+
     private static func isOrderedBefore(_ lhs: PhotoItem, _ rhs: PhotoItem) -> Bool {
         switch lhs.relativePath.localizedStandardCompare(rhs.relativePath) {
         case .orderedAscending: return true
         case .orderedDescending: return false
         case .orderedSame: return lhs.url.path < rhs.url.path
+        }
+    }
+}
+
+/// Sidebar filter over the session culling state (ratings/rejections are not
+/// persisted and are not recipe data).
+public enum PhotoCullFilter: String, Codable, CaseIterable, Identifiable, Equatable {
+    case all
+    case recommended
+    case kept
+    case rejected
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .all: return "全部"
+        case .recommended: return "推荐"
+        case .kept: return "保留"
+        case .rejected: return "废片"
+        }
+    }
+
+    /// Filter predicate. `recommended` = heuristic keep recommendation or a
+    /// manual 4–5 star rating; `kept` = not marked as waste; `rejected` = waste.
+    public func matches(_ item: PhotoItem) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .recommended:
+            return item.qualityRecommendation == .keep || item.rating >= 4
+        case .kept:
+            return !item.isRejected
+        case .rejected:
+            return item.isRejected
         }
     }
 }

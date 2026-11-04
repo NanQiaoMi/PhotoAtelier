@@ -741,6 +741,71 @@ final class BatchTests: XCTestCase {
         XCTAssertEqual(entries.first?["watermarkApplied"] as? Bool, true)
     }
 
+    func testBatchSkipsRejectedAndUnratedPhotosAndRecordsManifest() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        for name in ["rated.png", "unrated.png", "waste.png"] {
+            try TestFiles.writeFixture(to: input.appendingPathComponent(name), width: 16, height: 12)
+        }
+        var items = try PhotoLoader.scan(folder: input, recursive: false)
+        for index in items.indices {
+            switch items[index].relativePath {
+            case "rated.png": items[index].rating = 3
+            case "waste.png": items[index].isRejected = true
+            default: break
+            }
+        }
+
+        var export = ExportSettings(); export.format = .png
+        var recipe = Recipe(export: export); recipe.version = 12
+        var selection = ExportSelectionOptions()
+        selection.skipRejectedPhotos = true
+        selection.skipUnselectedPhotos = true
+        let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil, selection: selection,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        XCTAssertEqual(summary.skipped, 2)
+        XCTAssertEqual(summary.failed, 0, "跳过的照片不得计入失败")
+        XCTAssertEqual(summary.cancelled, false)
+
+        let manifest = try manifestObject(summary)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 3)
+        let skipped = entries.filter { $0["status"] as? String == "skipped" }
+        XCTAssertEqual(skipped.count, 2)
+        XCTAssertEqual(Set(skipped.compactMap { $0["input"] as? String }),
+                       ["unrated.png", "waste.png"])
+        for entry in skipped {
+            XCTAssertNil(entry["output"] as? String, "被跳过项不得有输出路径")
+            XCTAssertNil(entry["report"] as? [String: Any], "被跳过项未处理，不应有处理报告")
+        }
+        let completed = entries.filter { $0["status"] as? String == "completed" }
+        XCTAssertEqual(completed.count, 1)
+        XCTAssertEqual(completed.first?["input"] as? String, "rated.png")
+
+        let selectionPayload = try XCTUnwrap(manifest["selection"] as? [String: Any],
+                                             "清单必须记录本次会话的跳过选项")
+        XCTAssertEqual(selectionPayload["skipRejectedPhotos"] as? Bool, true)
+        XCTAssertEqual(selectionPayload["skipUnselectedPhotos"] as? Bool, true)
+        let exportSummary = try XCTUnwrap(manifest["exportSummary"] as? [String])
+        XCTAssertTrue(exportSummary.contains("exportSelection=skipRejected+skipUnselected"))
+
+        // The same session with neutral options exports everything again.
+        let allOutput = output.appendingPathComponent("all", isDirectory: true)
+        let all = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: allOutput,
+                                           recipe: recipe, lut: nil,
+                                           cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(all.succeeded, 3)
+        XCTAssertEqual(all.skipped, 0)
+        let allManifest = try manifestObject(all)
+        XCTAssertNil(allManifest["selection"] as? [String: Any],
+                     "中性选项不应写入清单 selection")
+    }
+
     private func manifestObject(_ summary: BatchSummary) throws -> [String: Any] {
         let data = try Data(contentsOf: XCTUnwrap(summary.manifestURL))
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -814,4 +879,142 @@ final class BatchTests: XCTestCase {
             throw AtelierError.imageWrite("测试 JPEG 写入失败")
         }
     }
+
+    // MARK: - P1-C C6 parallel batch integration
+
+    func testParallelAndSerialBatchExportsAreByteIdenticalAndKeepManifestOrder() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        for name in ["a.png", "b.png", "c.png", "d.png", "e.png"] {
+            try TestFiles.writeFixture(to: input.appendingPathComponent(name), width: 64, height: 48)
+        }
+        var export = ExportSettings(); export.format = .png
+        var recipe = Recipe(); recipe.export = export
+        let items = try PhotoLoader.scan(folder: input, recursive: true)
+
+        func run(maxConcurrency: Int, output: URL) throws -> BatchSummary {
+            try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                     recipe: recipe, lut: nil, maxConcurrency: maxConcurrency,
+                                     cancellation: CancellationToken(), onEvent: { _ in })
+        }
+        let serialOutput = temp.appendingPathComponent("serial", isDirectory: true)
+        let parallelOutput = temp.appendingPathComponent("parallel", isDirectory: true)
+        let serial = try run(maxConcurrency: 1, output: serialOutput)
+        let parallel = try run(maxConcurrency: 4, output: parallelOutput)
+        XCTAssertEqual(serial.succeeded, items.count)
+        XCTAssertEqual(parallel.succeeded, items.count)
+        XCTAssertEqual(parallel.failed, 0)
+        XCTAssertFalse(parallel.cancelled)
+
+        func pngFiles(_ url: URL) throws -> [String] {
+            try FileManager.default.contentsOfDirectory(atPath: url.path)
+                .filter { $0.hasSuffix(".png") }.sorted()
+        }
+        let serialFiles = try pngFiles(serialOutput)
+        let parallelFiles = try pngFiles(parallelOutput)
+        XCTAssertEqual(serialFiles, parallelFiles, "parallel export must keep the same file names")
+        for name in serialFiles {
+            let serialBytes = try Data(contentsOf: serialOutput.appendingPathComponent(name))
+            let parallelBytes = try Data(contentsOf: parallelOutput.appendingPathComponent(name))
+            XCTAssertEqual(serialBytes, parallelBytes,
+                           "parallel export must be byte-identical to serial export for \(name)")
+        }
+
+        func entryOrder(_ summary: BatchSummary) throws -> [String] {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: Data(contentsOf: try XCTUnwrap(summary.manifestURL))) as? [String: Any])
+            let entries = try XCTUnwrap(json["entries"] as? [[String: Any]])
+            return entries.map { "\($0["input"] as? String ?? "?")|\($0["status"] as? String ?? "?")" }
+        }
+        let serialOrder = try entryOrder(serial)
+        let parallelOrder = try entryOrder(parallel)
+        XCTAssertEqual(parallelOrder, serialOrder, "manifest entries must be in input order")
+        XCTAssertEqual(parallelOrder.map { $0.components(separatedBy: "|")[0] },
+                       items.map(\.relativePath))
+        XCTAssertTrue(parallelOrder.allSatisfy { $0.hasSuffix("|completed") })
+    }
+
+    func testCancelledParallelBatchKeepsOnlyCompletedWholeFilesAndOrderedManifest() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        for index in 0..<8 {
+            try TestFiles.writeFixture(to: input.appendingPathComponent(String(format: "photo-%02d.png", index)),
+                                       width: 320, height: 240)
+        }
+        var export = ExportSettings(); export.format = .png
+        var recipe = Recipe(); recipe.export = export
+        let items = try PhotoLoader.scan(folder: input, recursive: true)
+        XCTAssertEqual(items.count, 8)
+        let token = CancellationToken()
+        let lock = NSLock()
+        var completedEvents = 0
+        // Cancel once two photos are complete (events are emitted from the worker
+        // as each photo finishes), so later photos must stop without partial files.
+        let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil, maxConcurrency: 3,
+                                               cancellation: token) { event in
+            guard event.kind == .completed else { return }
+            lock.lock()
+            completedEvents += 1
+            if completedEvents >= 2 { token.cancel() }
+            lock.unlock()
+        }
+        XCTAssertTrue(summary.cancelled)
+        XCTAssertEqual(summary.failed, 0, "cancelled work must never be counted as a photo failure")
+        XCTAssertLessThan(summary.succeeded, items.count)
+        let files = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "png" }
+        XCTAssertEqual(files.count, summary.succeeded, "no partial or orphan output may survive a cancel")
+        for file in files {
+            // Every surviving file is a complete decodable image.
+            _ = try PhotoLoader.load(url: file, lensCorrection: false)
+        }
+        XCTAssertFalse(files.isEmpty)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: try XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, items.count, "every input must be recorded exactly once")
+        XCTAssertEqual(entries.map { $0["input"] as? String ?? "" }, items.map(\.relativePath))
+        XCTAssertEqual(entries.filter { $0["status"] as? String == "completed" }.count, summary.succeeded)
+        XCTAssertEqual(entries.filter { $0["status"] as? String == "cancelled" }.count,
+                       items.count - summary.succeeded)
+        XCTAssertEqual(entries.filter { $0["status"] as? String == "failed" }.count, 0)
+        for entry in entries where entry["status"] as? String == "completed" {
+            let relative = try XCTUnwrap(entry["output"] as? String)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent(relative).path))
+        }
+    }
+
+    func testParallelFailureIsolationAndConcurrencyClamp() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        try Data("not an image".utf8).write(to: input.appendingPathComponent("broken.png"))
+        for name in ["valid-a.png", "valid-b.png", "valid-c.png"] {
+            try TestFiles.writeFixture(to: input.appendingPathComponent(name), width: 32, height: 24)
+        }
+        let items = try PhotoLoader.scan(folder: input, recursive: true)
+        XCTAssertEqual(items.count, 4)
+        // A request outside 1...8 is clamped instead of crashing the export.
+        let summary = try BatchProcessor().run(items: items, inputRoot: input, outputRoot: output,
+                                               recipe: Recipe(), lut: nil, maxConcurrency: 64,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 3)
+        XCTAssertEqual(summary.failed, 1)
+        XCTAssertFalse(summary.cancelled)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: try XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["input"] as? String ?? "" }, items.map(\.relativePath))
+        XCTAssertEqual(entries.filter { $0["status"] as? String == "completed" }.count, 3)
+        XCTAssertEqual(entries.filter { $0["status"] as? String == "failed" }.count, 1)
+    }
+
 }

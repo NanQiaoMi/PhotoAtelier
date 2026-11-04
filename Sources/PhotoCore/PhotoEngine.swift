@@ -258,6 +258,24 @@ public final class PhotoEngine {
         ])
     }
 
+    /// Downsamples an image for analysis-only use (never for export): the analysis
+    /// pipeline measures a small raster anyway, so feeding a capped sample avoids
+    /// decoding full-resolution graphs repeatedly for previews. The caller keeps
+    /// the original image for the actual render, so export pixels are unchanged.
+    public func analysisSample(_ image: CIImage, maxDimension: Int = 1024) -> CIImage {
+        let extent = image.extent
+        guard extent.width.isFinite, extent.height.isFinite,
+              extent.width > 1, extent.height > 1 else { return image }
+        let limit = CGFloat(max(64, maxDimension))
+        let scale = min(1, limit / max(extent.width, extent.height))
+        guard scale < 0.999 else { return image }
+        let translated = image.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+        let scaled = translated.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let width = max(1, Int((extent.width * scale).rounded(.up)))
+        let height = max(1, Int((extent.height * scale).rounded(.up)))
+        return scaled.cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+    }
+
     /// Shared recipe/configuration validation used by both processing and UI
     /// recipe loading. Ranges match the normalized controls in AdjustmentSettings.
     public static func validate(_ settings: AdjustmentSettings) throws {
@@ -288,6 +306,7 @@ public final class PhotoEngine {
             try certificate.validated()
         }
         if let repair = settings.repairBrush { try repair.validate() }
+        if let makeup = settings.makeup, !makeup.isNeutral { try makeup.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -341,7 +360,8 @@ public final class PhotoEngine {
                         preparedContentSelections: ContentSelectionResult? = nil,
                         preparedLUTContext: LUTSemanticContext? = nil,
                         preparedPersonMatte: PersonMatte? = nil,
-                        preparedCertificateFaceBox: CGRect? = nil) throws -> ProcessedPhoto {
+                        preparedCertificateFaceBox: CGRect? = nil,
+                        preparedMakeupFaces: [FaceLandmarkSet]? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -434,10 +454,28 @@ public final class PhotoEngine {
         let portraitActive = settings.portrait.map { !$0.isNeutral } ?? false
         let referenceColor = settings.referenceColor
         let referenceColorActive = referenceColor.map { !$0.isNeutral } ?? false
-        let needsFaceMasks = portraitActive || (referenceColorActive && referenceColor?.skinOnly == true)
-        let preparedFaceMasks = needsFaceMasks
-            ? PortraitSemanticMaskProvider.masks(in: working)
-            : []
+        let makeupActive = settings.makeup.map { !$0.isNeutral } ?? false
+        let needsFaceMasks = portraitActive
+            || (referenceColorActive && referenceColor?.skinOnly == true)
+            || makeupActive
+        // One Vision detection feeds portrait masks, skin-limited reference color
+        // and the make-up stage (the same landmarks are reused instead of running a
+        // second detector in the make-up branch). Portrait/refcolor keep their
+        // historical first-4-face window; make-up may use up to its own limit when
+        // it is the only reason for detecting.
+        let detectedFaces: [FaceLandmarkSet]
+        if needsFaceMasks {
+            detectedFaces = FaceSemanticAnalyzer.detect(in: working,
+                maxFaces: makeupActive ? MakeupEngine.maximumFaces : 4)
+        } else {
+            detectedFaces = []
+        }
+        let preparedFaceMasks = detectedFaces.prefix(4).map { landmarks in
+            FaceSemanticAnalyzer.masks(image: working,
+                                       faceBounds: landmarks.boundingBox,
+                                       landmarks: landmarks)
+        }.filter { !$0.isEmpty }
+        let preparedLandmarks = detectedFaces
         if let portrait = settings.portrait, portraitActive {
             let faces = preparedFaceMasks
             if faces.isEmpty {
@@ -453,6 +491,54 @@ public final class PhotoEngine {
                 if let note = portraitResult.report.note {
                     report.warnings.append(note)
                 }
+            }
+        }
+        try cancellation?.check()
+
+        // P1-C v13 heuristic make-up: after portrait refinement and before
+        // reference color / local masks, so the match and local edits see the
+        // made-up pixels. Absent or fully neutral settings skip the stage and keep
+        // the pre-v13 pixel path exact. No usable face → explicit skip with report
+        // and warning, never a silent edit.
+        //
+        // Output headroom: C2 clamps its tinted layer to <=1.5 linear, so this
+        // stage may hand >1 values to the next stages. ReferenceColor and the LUT
+        // kernels clamp their inputs to 0...1 (documented in their engines), so the
+        // >1 headroom does not leak past them; local masks can still sample up to
+        // 1.5 before the LUT. `report.makeup.applied == true` means "stage ran with
+        // usable landmarks"; heuristic masks can still be a geometric no-op on an
+        // individual face.
+        if let makeup = settings.makeup, !makeup.isNeutral {
+            let faces: [FaceLandmarkSet]
+            if let preparedMakeupFaces {
+                faces = preparedMakeupFaces
+            } else {
+                faces = preparedLandmarks
+            }
+            if faces.contains(where: { $0.hasUsableGeometry }) {
+                do {
+                    let madeUp = try MakeupEngine.apply(to: working, faces: faces,
+                                                        settings: makeup)
+                    if renderedDifference(working, madeUp) > 0.0001 {
+                        working = madeUp
+                        report.makeup = MakeupReport(applied: true, faceCount: faces.count)
+                    } else {
+                        let note = "检测到人脸但妆容掩码未命中有效区域（启发式蒙版为空/过小），该段未改变像素。"
+                        working = madeUp
+                        report.makeup = MakeupReport(applied: false, faceCount: faces.count,
+                                                     note: note)
+                        report.warnings.append(note)
+                    }
+                } catch {
+                    let note = "妆容应用失败：\(error.localizedDescription)；该段已跳过（原图保持不变）。"
+                    report.makeup = MakeupReport(applied: false, faceCount: faces.count,
+                                                 note: note)
+                    report.warnings.append(note)
+                }
+            } else {
+                let note = "未检测到可用人脸或本机 Vision 不可用，妆容已跳过（原图保持不变）。"
+                report.makeup = MakeupReport(applied: false, faceCount: 0, note: note)
+                report.warnings.append(note)
             }
         }
         try cancellation?.check()
@@ -794,7 +880,8 @@ public final class PhotoEngine {
     }
 
     /// Lowest recipe version that can encode `adjustments`/`automatic` without a
-    /// silent downgrade. Version 12 is required when a v12-only field
+    /// silent downgrade. Version 13 is required when the v13-only make-up field
+    /// can take effect anywhere; version 12 when a v12-only field
     /// (`certificatePhoto`, `repairBrush`) can take effect anywhere; version 11 when a v11-only
     /// field (color tools, lens effects or liquify) can; version 10 when
     /// a v10-only field (portrait refinement or reference color) can. A
@@ -809,6 +896,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let makeupGroups = [adjustments.makeup,
+                            automatic?.baseline.makeup,
+                            automatic?.referenceSettings.makeup]
+        if makeupGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 13 }
         let certificateGroups = [adjustments.certificatePhoto,
                                  automatic?.baseline.certificatePhoto,
                                  automatic?.referenceSettings.certificatePhoto]
@@ -847,6 +938,45 @@ public final class PhotoEngine {
     private static func validatePoint(_ point: MaskPoint, named name: String) throws {
         try require(point.x, within: 0...1, named: "\(name) X")
         try require(point.y, within: 0...1, named: "\(name) Y")
+    }
+
+    /// Cheap 48px peak-difference probe used to tell "stage executed" from
+    /// "stage produced identical pixels" (heuristic masks can miss every region).
+    private func renderedDifference(_ first: CIImage, _ second: CIImage) -> Float {
+        let firstExtent = first.extent
+        let secondExtent = second.extent
+        guard abs(firstExtent.width - secondExtent.width) < 0.5,
+              abs(firstExtent.height - secondExtent.height) < 0.5 else { return 1 }
+        let longest = max(firstExtent.width, firstExtent.height)
+        guard longest.isFinite, longest > 0 else { return 0 }
+        let scale = min(1, 48 / longest)
+        let width = max(1, Int((firstExtent.width * scale).rounded()))
+        let height = max(1, Int((firstExtent.height * scale).rounded()))
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        func sample(_ image: CIImage) -> [Float] {
+            let prepared = image
+                .transformed(by: CGAffineTransform(translationX: -firstExtent.minX,
+                                                   y: -firstExtent.minY))
+                .transformed(by: CGAffineTransform(scaleX: CGFloat(width) / firstExtent.width,
+                                                   y: CGFloat(height) / firstExtent.height))
+                .cropped(to: bounds)
+            var pixels = [Float](repeating: 0, count: width * height * 4)
+            pixels.withUnsafeMutableBytes { buffer in
+                guard let address = buffer.baseAddress else { return }
+                context.render(prepared, toBitmap: address,
+                               rowBytes: width * 4 * MemoryLayout<Float>.stride,
+                               bounds: bounds, format: .RGBAf, colorSpace: space)
+            }
+            return pixels
+        }
+        let firstPixels = sample(first)
+        let secondPixels = sample(second)
+        var maximum: Float = 0
+        for index in firstPixels.indices {
+            maximum = max(maximum, abs(firstPixels[index] - secondPixels[index]))
+        }
+        return maximum
     }
 
     private func validExtent(of image: CIImage) throws -> CGRect {
@@ -1568,4 +1698,36 @@ public final class PhotoEngine {
         }
         return filter
     }
+}
+
+/// Latest-wins gate for asynchronous preview work.
+///
+/// The app starts a render for a generation id and only publishes its results if
+/// `admits(generation)` is still true when the render finishes. A newer request
+/// begins a new generation, so a slow stale render can never overwrite fresher
+/// pixels (the in-flight render itself is cancelled through its token).
+public struct PreviewRequestGate {
+    private var current = UUID()
+
+    public init() {}
+
+    /// Begins a new request generation and returns its id.
+    public mutating func begin() -> UUID {
+        current = UUID()
+        return current
+    }
+
+    /// Invalidates every in-flight request (e.g. when the selection changes).
+    public mutating func invalidate() {
+        current = UUID()
+    }
+
+    /// True only for the newest generation; stale results must be dropped.
+    public func admits(_ generation: UUID) -> Bool {
+        generation == current
+    }
+
+    /// Current generation id, for checks that compare against the latest request
+    /// without starting a new one.
+    public var currentGeneration: UUID { current }
 }

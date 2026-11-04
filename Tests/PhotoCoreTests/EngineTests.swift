@@ -647,4 +647,233 @@ final class EngineTests: XCTestCase {
         validSettings.certificatePhoto = validActive
         XCTAssertNoThrow(try PhotoEngine.validate(validSettings))
     }
+
+    // MARK: - P1-C make-up pipeline
+
+    private func makeupTestImage() -> CIImage {
+        let size = 128
+        var components = [Float](repeating: 0, count: size * size * 4)
+        for row in 0..<size {
+            let y = 1 - (Double(row) + 0.5) / Double(size)
+            for column in 0..<size {
+                let x = (Double(column) + 0.5) / Double(size)
+                let face = ((x - 0.5) / 0.32) * ((x - 0.5) / 0.32)
+                    + ((y - 0.5) / 0.40) * ((y - 0.5) / 0.40)
+                var color: (Float, Float, Float) = (0.34, 0.33, 0.31)
+                if face <= 1 {
+                    let lips = ((x - 0.5) / 0.10) * ((x - 0.5) / 0.10)
+                        + ((y - 0.42) / 0.032) * ((y - 0.42) / 0.032)
+                    let brows = ((x - 0.5) / 0.22) * ((x - 0.5) / 0.22)
+                        + ((y - 0.62) / 0.018) * ((y - 0.62) / 0.018)
+                    if lips <= 1 {
+                        color = (0.62, 0.12, 0.16)
+                    } else if brows <= 1 {
+                        color = (0.09, 0.07, 0.06)
+                    } else {
+                        color = (0.68, 0.52, 0.42)
+                    }
+                }
+                let offset = (row * size + column) * 4
+                components[offset] = color.0
+                components[offset + 1] = color.1
+                components[offset + 2] = color.2
+                components[offset + 3] = 1
+            }
+        }
+        let data = components.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        return CIImage(bitmapData: data,
+                       bytesPerRow: size * 4 * MemoryLayout<Float>.stride,
+                       size: CGSize(width: CGFloat(size), height: CGFloat(size)),
+                       format: .RGBAf, colorSpace: linearColorSpace)
+    }
+
+    private func makeupTestLandmarks() -> FaceLandmarkSet {
+        func ellipse(_ center: CGPoint, _ rx: Double, _ ry: Double) -> [CGPoint] {
+            (0..<24).map { index in
+                let angle = Double(index) / 24 * 2 * Double.pi
+                return CGPoint(x: center.x + CGFloat(cos(angle) * rx),
+                               y: center.y + CGFloat(sin(angle) * ry))
+            }
+        }
+        return FaceLandmarkSet(
+            boundingBox: CGRect(x: 0.18, y: 0.10, width: 0.64, height: 0.80),
+            confidence: 1,
+            faceContour: ellipse(CGPoint(x: 0.5, y: 0.5), 0.32, 0.40),
+            leftEye: ellipse(CGPoint(x: 0.42, y: 0.55), 0.045, 0.018),
+            rightEye: ellipse(CGPoint(x: 0.58, y: 0.55), 0.045, 0.018),
+            leftEyebrow: [CGPoint(x: 0.32, y: 0.615), CGPoint(x: 0.48, y: 0.625),
+                          CGPoint(x: 0.48, y: 0.605), CGPoint(x: 0.32, y: 0.595)],
+            rightEyebrow: [CGPoint(x: 0.52, y: 0.625), CGPoint(x: 0.68, y: 0.615),
+                           CGPoint(x: 0.68, y: 0.595), CGPoint(x: 0.52, y: 0.605)],
+            nose: ellipse(CGPoint(x: 0.5, y: 0.47), 0.03, 0.04),
+            outerLips: ellipse(CGPoint(x: 0.5, y: 0.42), 0.10, 0.032),
+            innerLips: ellipse(CGPoint(x: 0.5, y: 0.42), 0.06, 0.014),
+            leftPupil: CGPoint(x: 0.42, y: 0.55),
+            rightPupil: CGPoint(x: 0.58, y: 0.55))
+    }
+
+    func testMakeupNeutralAndAbsentKeepLegacyPixels() throws {
+        let engine = PhotoEngine()
+        let source = makeupTestImage()
+        var baselineSettings = neutralSettings()
+        baselineSettings.exposureEV = 0.1
+        let without = try engine.process(source, settings: baselineSettings, lut: nil)
+        var neutralSettingsValue = baselineSettings
+        neutralSettingsValue.makeup = MakeupSettings()
+        let neutral = try engine.process(source, settings: neutralSettingsValue, lut: nil)
+        XCTAssertNil(without.report.makeup)
+        XCTAssertNil(neutral.report.makeup)
+        // F1 (C5 round 2): a colour-only neutral field must stay pixel-identical and
+        // keep the legacy version path, even though the UI retains the selection.
+        var colourOnly = MakeupSettings()
+        colourOnly.lipColor = SRGBColor(red: 0.9, green: 0.1, blue: 0.2)
+        colourOnly.cheekRadius = 0.8
+        XCTAssertTrue(colourOnly.isNeutral)
+        var colourOnlySettings = baselineSettings
+        colourOnlySettings.makeup = colourOnly
+        let colourOnlyOutput = try engine.process(source, settings: colourOnlySettings, lut: nil)
+        XCTAssertNil(colourOnlyOutput.report.makeup)
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: colourOnlySettings,
+                                                       automatic: nil), 9)
+        for point in [(10, 10), (64, 54), (100, 100)] {
+            let first = try pixel(without.image, x: point.0, y: point.1, engine: engine)
+            let second = try pixel(neutral.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(second[component], first[component], accuracy: 1e-6,
+                               "中性/缺失妆容必须保持旧像素路径")
+            }
+        }
+    }
+
+    func testMakeupRunsBeforeLutWithPreparedFaces() throws {
+        let engine = PhotoEngine()
+        let source = makeupTestImage()
+        let landmarks = makeupTestLandmarks()
+        var makeupSettingsValue = MakeupSettings(lipIntensity: 0.8)
+        var makeupOnly = neutralSettings()
+        makeupOnly.makeup = makeupSettingsValue
+        let makeupResult = try engine.process(source, settings: makeupOnly, lut: nil,
+                                              preparedMakeupFaces: [landmarks])
+        XCTAssertTrue(makeupResult.report.makeup?.applied == true)
+        XCTAssertEqual(makeupResult.report.makeup?.faceCount, 1)
+
+        var combined = makeupOnly
+        combined.lutIntensity = 1
+        let cube = inversionCube()
+        let actual = try engine.process(source, settings: combined, lut: cube,
+                                        preparedMakeupFaces: [landmarks])
+        var lutOnly = neutralSettings()
+        lutOnly.lutIntensity = 1
+        let expected = try engine.process(makeupResult.image, settings: lutOnly, lut: cube)
+
+        let lipRing = (x: Int((0.5 + 0.08) * 128), y: Int(0.42 * 128))
+        let actualLip = try pixel(actual.image, x: lipRing.x, y: lipRing.y, engine: engine)
+        let expectedLip = try pixel(expected.image, x: lipRing.x, y: lipRing.y, engine: engine)
+        for component in 0..<3 {
+            XCTAssertEqual(actualLip[component], expectedLip[component], accuracy: 0.004,
+                           "妆容必须在 LUT 之前应用")
+        }
+
+        // Reversed order (LUT first, then make-up) must differ: the LUT inverts the
+        // lip colour before tinting, so tinting cannot reproduce the ordered result.
+        let lutFirst = try engine.process(source, settings: lutOnly, lut: cube)
+        let reversed = try MakeupEngine.apply(to: lutFirst.image, faces: [landmarks],
+                                              settings: makeupSettingsValue)
+        let reversedLip = try pixel(reversed, x: lipRing.x, y: lipRing.y, engine: engine)
+        let delta = abs(actualLip[0] - reversedLip[0]) + abs(actualLip[1] - reversedLip[1])
+            + abs(actualLip[2] - reversedLip[2])
+        XCTAssertGreaterThan(delta, 0.01,
+                             "顺序颠倒必须产生不同像素，证明妆容在 LUT 之前")
+    }
+
+    func testMakeupWithoutFaceSkipsExplicitly() throws {
+        let engine = PhotoEngine()
+        let source = solidImage(0.4, 0.4, 0.4, width: 96, height: 128)
+        var settings = neutralSettings()
+        settings.makeup = MakeupSettings(lipIntensity: 0.8, cheekIntensity: 0.6)
+        let processed = try engine.process(source, settings: settings, lut: nil)
+        let baseline = try engine.process(source, settings: neutralSettings(), lut: nil)
+        XCTAssertEqual(processed.image.extent, baseline.image.extent)
+        for point in [(8, 8), (48, 64), (88, 120)] {
+            let first = try pixel(baseline.image, x: point.0, y: point.1, engine: engine)
+            let second = try pixel(processed.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(second[component], first[component], accuracy: 1e-6,
+                               "无脸时妆容不得改像素")
+            }
+        }
+        let report = try XCTUnwrap(processed.report.makeup)
+        XCTAssertFalse(report.applied)
+        XCTAssertNotNil(report.note)
+        XCTAssertTrue(report.note?.contains("人脸") == true)
+        XCTAssertTrue(processed.report.warnings.contains { $0.contains("妆容") })
+    }
+
+    func testMakeupBatchManifestRecordsSkipAndVersion13() throws {
+        let temp = try TestFiles.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let input = temp.appendingPathComponent("input", isDirectory: true)
+        let output = temp.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
+        let engine = PhotoEngine()
+        let image = solidImage(0.4, 0.4, 0.4, width: 64, height: 96)
+        var export = ExportSettings(); export.format = .png
+        try PhotoExporter.write(image: image, to: input.appendingPathComponent("flat.png"),
+                                settings: export, sourceProperties: [:], context: engine.context)
+        var settings = AdjustmentSettings()
+        settings.makeup = MakeupSettings(lipIntensity: 0.6)
+        var recipe = Recipe(adjustments: settings)
+        recipe.version = 13
+        let summary = try BatchProcessor().run(items: PhotoLoader.scan(folder: input, recursive: false),
+                                               inputRoot: input, outputRoot: output,
+                                               recipe: recipe, lut: nil,
+                                               cancellation: CancellationToken(), onEvent: { _ in })
+        XCTAssertEqual(summary.succeeded, 1)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(summary.manifestURL))) as? [String: Any])
+        let recipePayload = try XCTUnwrap(manifest["recipe"] as? [String: Any])
+        XCTAssertEqual(recipePayload["version"] as? Int, 13)
+        let entries = try XCTUnwrap(manifest["entries"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        let report = try XCTUnwrap(entry["report"] as? [String: Any])
+        let makeup = try XCTUnwrap(report["makeup"] as? [String: Any],
+                                   "批量清单必须记录妆容决策")
+        XCTAssertEqual(makeup["applied"] as? Bool, false)
+        XCTAssertNotNil(makeup["note"] as? String)
+    }
+
+    func testMakeupWithFaceButNoEffectiveMaskReportsNotApplied() throws {
+        let engine = PhotoEngine()
+        let source = makeupTestImage()
+        var landmarks = makeupTestLandmarks()
+        // Keep only usable face geometry: no lip/eyebrow/eye polygons → the lip
+        // pass has no semantic mask and its polygon fallback is empty.
+        landmarks.outerLips = []
+        landmarks.innerLips = []
+        landmarks.leftEyebrow = []
+        landmarks.rightEyebrow = []
+        landmarks.leftEye = []
+        landmarks.rightEye = []
+        var settings = neutralSettings()
+        settings.makeup = MakeupSettings(lipIntensity: 0.8)
+        let processed = try engine.process(source, settings: settings, lut: nil,
+                                           preparedMakeupFaces: [landmarks])
+        let report = try XCTUnwrap(processed.report.makeup)
+        XCTAssertFalse(report.applied,
+                       "有脸但妆容掩码未命中有效区域时不得虚报 applied=true")
+        XCTAssertEqual(report.faceCount, 1)
+        XCTAssertTrue(report.note?.contains("掩码") == true)
+        XCTAssertTrue(processed.report.warnings.contains { $0.contains("妆容") })
+        let baseline = try engine.process(source, settings: neutralSettings(), lut: nil)
+        for point in [(20, 20), (64, 54), (100, 80)] {
+            let first = try pixel(baseline.image, x: point.0, y: point.1, engine: engine)
+            let second = try pixel(processed.image, x: point.0, y: point.1, engine: engine)
+            for component in 0..<3 {
+                XCTAssertEqual(second[component], first[component], accuracy: 1e-5,
+                               "掩码未命中时不得改像素")
+            }
+        }
+    }
 }
