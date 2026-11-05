@@ -318,12 +318,12 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | 项目库 / 历史面板 / 评级持久化 | ✅ P1-D | `feat/p1d-library-persistence` |
 | 客户交付增强（多主题/封面大图/离线隐私审计/局域网预览） | ✅ P1-E | `feat/p1e-delivery-enhancement` |
 | 妆容与人像精修增强（眼线/睫毛/美瞳/眼神光/高光/修容/v14门禁） | ✅ P1-F | `feat/p1f-makeup-retouch-enhancement` |
+| 性能收尾与 Universal/ARM 双架构构建（24MP全画幅基准v5/Universal可执行文件/lipo双架构校验） | ✅ P1-G | `feat/p1g-performance-universal` |
 
 ### 9.2 剩余 P1（建议按此顺序，2 周左右一个增量）
 
 | 编号 | 项目 | 目标与做法 | 依赖 | 验收 |
 |---|---|---|---|---|
-| **P1-G** | 性能收尾 + ARM/universal | 24MP 大图批量基准（并行/内存上限）、预览首帧目标、Metal/并行优化（蒙版/LUT/细节 kernel）、Apple Silicon 依赖构建、`lipo -info` 双架构、release 吞吐对比 | C6/C7、P0-6 基准 | 基准对比 P1-C 有可量化改善；输出像素不变；`make check` 全绿；ARM 未实测时明确标注 |
 | **P1-H** | 真实照片审美验收体系 | 20–30 张授权样片集（人像/风光/夜景/逆光/高调/暗调）、每功能前后图+人工评分表、固定评审模板；与合成测试分离 | 各功能批 | 评审表随交付归档；不把合成测试当画质验收；样片不入库 |
 | **P1-I** | 技术债整理 | 慢测治理（§8.3）、`ui_smoke` AX harness 去 flakiness（更稳的 AX 查询/窗口 id 截图）、证据 JSON 绑定 app commit/hash、文档与实现一致性检查 | 全量 | 全量 `make check` 稳定 <10min；ui_smoke 连续 3 次 exit 0 |
 

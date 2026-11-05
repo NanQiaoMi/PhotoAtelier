@@ -37,6 +37,9 @@
 //   wall times, speedup and order preservation (debug objects, load-dependent,
 //   not release throughput).
 // - schemaVersion 4 adds those P1-C phases; earlier phases keep their meaning.
+// - schemaVersion 5 adds 24MP (6000x4000 full-frame sensor) fixtures, exercises
+//   P1-F enhanced makeup stages in the makeup probe, and records 24MP full-frame
+//   pipeline timing, concurrency speedup, and peak RSS.
 //
 // Compile against already-built PhotoCore objects (same approach as
 // docs/adaptive-detail.md:62). From the repository root:
@@ -44,12 +47,12 @@
 //   BIN="$(swift build --show-bin-path)"   # e.g. .build/x86_64-apple-macosx/debug
 //   swiftc -I "$BIN" -I "$BIN/CLensfunBridge.build" Scripts/benchmark.swift \
 //     "$BIN"/PhotoCore.build/*.o "$BIN"/CLensfunBridge.build/CLensfunBridge.c.o \
-//     -o artifacts/p1c-c7-verify/benchmark/benchmark
-//   artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
+//     -o artifacts/p1g-performance-verify/benchmark/benchmark
+//   artifacts/p1g-performance-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 // The object layout is SwiftPM's standard debug layout; --show-bin-path keeps the
 // command portable across architectures and custom scratch directories.
 //
-// Output defaults to artifacts/p1c-c7-verify/benchmark/benchmark.json and all
+// Output defaults to artifacts/p1g-performance-verify/benchmark/benchmark.json and all
 // generated inputs/exports stay under artifacts/ (gitignored). Input photographs
 // outside the synthetic corpus are never read.
 
@@ -71,8 +74,8 @@ guard manager.fileExists(atPath: root.appendingPathComponent("Package.swift").pa
     FileHandle.standardError.write(Data("benchmark: run from the repository root (Package.swift not found in \(root.path))\n".utf8))
     exit(2)
 }
-let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1c-c7-verify/benchmark/benchmark.json")
-let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1c-c7-verify/benchmark", isDirectory: true)
+let outputURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : "artifacts/p1g-performance-verify/benchmark/benchmark.json")
+let workRoot = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : "artifacts/p1g-performance-verify/benchmark", isDirectory: true)
 let corpusRoot = workRoot.appendingPathComponent("corpus", isDirectory: true)
 let runStamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 let exportRoot = workRoot.appendingPathComponent("export-\(runStamp)", isDirectory: true)
@@ -123,7 +126,7 @@ struct CorpusSpec {
     var displayName: String { "\(format.uppercased()) \(longEdge)px" }
 }
 
-let corpusSpecs: [CorpusSpec] = [1024, 4032, 8192].flatMap { edge in
+let corpusSpecs: [CorpusSpec] = [1024, 4032, 6000, 8192].flatMap { edge in
     ["jpeg", "png", "heic"].map { CorpusSpec(longEdge: edge, format: $0) }
 }
 
@@ -398,7 +401,13 @@ func benchmarkMakeupSettings() -> MakeupSettings {
                    cheekColor: SRGBColor(red: 0.93, green: 0.48, blue: 0.48), cheekIntensity: 0.35,
                    cheekRadius: 0.5,
                    eyeshadowColor: SRGBColor(red: 0.55, green: 0.36, blue: 0.46),
-                   eyeshadowIntensity: 0.30)
+                   eyeshadowIntensity: 0.30,
+                   eyelinerIntensity: 0.25,
+                   eyelashIntensity: 0.20,
+                   irisIntensity: 0.20,
+                   catchlightIntensity: 0.30,
+                   highlightIntensity: 0.15,
+                   contourIntensity: 0.15)
 }
 
 /// Deterministic synthetic face geometry for the makeup phase: contour + eyes +
@@ -945,6 +954,12 @@ do {
                      "browDensity": makeupSettings.browDensity,
                      "cheekIntensity": makeupSettings.cheekIntensity,
                      "eyeshadowIntensity": makeupSettings.eyeshadowIntensity,
+                     "eyelinerIntensity": makeupSettings.eyelinerIntensity,
+                     "eyelashIntensity": makeupSettings.eyelashIntensity,
+                     "irisIntensity": makeupSettings.irisIntensity,
+                     "catchlightIntensity": makeupSettings.catchlightIntensity,
+                     "highlightIntensity": makeupSettings.highlightIntensity,
+                     "contourIntensity": makeupSettings.contourIntensity,
                      "faces": "1 deterministic synthetic landmark set"] as [String: Any],
         "note": "headless real MakeupEngine with synthetic face landmarks; not a real-face or beauty acceptance",
     ] as [String: Any]
@@ -1071,7 +1086,7 @@ do {
     let peak = peakResidentBytes()
     let totalMS = milliseconds(since: processStart)
     var report: [String: Any] = [
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
         "command": arguments.joined(separator: " "),
         "workRoot": workRoot.path,
@@ -1109,6 +1124,7 @@ do {
             "P1-C makeup uses one deterministic synthetic face-landmark set; it is not a real-face or beauty acceptance",
             "P1-C parallelBatch compares serial vs bounded-parallel runs of the same CPU-bound synthetic pipeline; the speedup depends on debug objects, machine load and synthetic data, and is not release throughput",
             "schemaVersion 4 adds the P1-C phases; P0/P1/P1-B phases keep their earlier meaning",
+            "schemaVersion 5 adds 24MP (6000x4000 full-frame sensor) fixtures, exercises P1-F enhanced makeup, and records 24MP pipeline timing/memory metrics; earlier phases keep their meaning",
         ],
     ]
     if !failures.isEmpty { report["failures"] = failures }

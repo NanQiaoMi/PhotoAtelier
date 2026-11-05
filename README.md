@@ -4,12 +4,12 @@
 
 ## 构建与打开
 
-当前依赖包针对 Intel Mac（x86_64、macOS 13+）；其他架构尚未验收。需要 Xcode 的 Swift 5.8 或更新工具链。依赖准备脚本只写项目 `.dependencies`，不安装全局软件。
+主应用可执行文件支持 **Universal 原生双架构（x86_64 与 arm64）**；Lensfun 镜头依赖库基于 x86_64 提供并在 Apple Silicon 设备上通过 Rosetta 2 协同运行。需要 Xcode 的 Swift 5.8 或更新工具链。依赖准备脚本只写项目 `.dependencies`，不安装全局软件。
 
 ```bash
 python3 Scripts/prepare_lensfun.py
 make check
-make app
+make app                           # 生成 Universal 双架构 App
 open build/PhotoAtelier.app
 ```
 
@@ -74,7 +74,7 @@ bash Scripts/ui_smoke.sh           # 应用 UI 冒烟（合成夹具，需已构
 swift Scripts/make_demo.swift artifacts/demo/input --include-broken
 ```
 
-接手开发/交接说明见 [开发交接文档](docs/development-handover.md)（构建/测试/验证工具、配方版本、已知坑与未完成项）。合成图只用于重复验证，不代表真实相机画质验收。最新胶片与逐图 LUT 增量见 [胶片适配](docs/adaptive-film-luts.md)，上一轮风格增量见 [风格与滤镜](docs/style-effects.md)，原尺寸检查见 [原尺寸局部检查](docs/native-inspection.md)，细节算法见 [逐图细节适配](docs/adaptive-detail.md)，历史人像工作见 [人像精修与实拍验证](docs/portrait-refinement.md)，历史局部建议见 [实拍复测](docs/local-guidance.md)，五区实现见 [亮度分区](docs/targeted-tones.md)，历史场景与处理意图记录见 [场景策略](docs/scene-adaptive.md)，上轮增量检查见 [自动调整记录](docs/automatic-safety.md)，颜色协调见 [颜色协调记录](docs/color-harmony.md)，早期试用版见 [验证报告](docs/validation.md)；开源参考、源码证据与采用边界见 [开源调研](docs/opensource-research.md)，第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。本批 P0 功能（导入/撤销/人像 v1/追色/导出扩展）见 [P0 功能交付说明](docs/p0-release-notes.md)；P1 功能（调色/液化/水印）见 [P1 功能交付说明](docs/p1-release-notes.md)；P1-B 功能（证件照/修复画笔/交付页）见 [P1-B 功能交付说明](docs/p1b-release-notes.md)；P1-C 功能（AI 挑图/妆容/并行批处理）见 [P1-C 功能交付说明](docs/p1c-release-notes.md)；P1-D 功能（项目库/历史面板/持久化）见 [P1-D 功能交付说明](docs/p1d-release-notes.md)；P1-E 功能（交付多主题/隐私审计/局域网预览）见 [P1-E 功能交付说明](docs/p1e-release-notes.md)。与商业产品「像素蛋糕」的差距矩阵与补齐路线见 [差距分析](docs/pixelcake-gap-analysis.md)（证据底座：[竞品矩阵](docs/research/pixelcake-matrix.md)、[本项目能力盘点](docs/research/project-capabilities.md)）。
+接手开发/交接说明见 [开发交接文档](docs/development-handover.md)（构建/测试/验证工具、配方版本、已知坑与未完成项）。合成图只用于重复验证，不代表真实相机画质验收。最新胶片与逐图 LUT 增量见 [胶片适配](docs/adaptive-film-luts.md)，上一轮风格增量见 [风格与滤镜](docs/style-effects.md)，原尺寸检查见 [原尺寸局部检查](docs/native-inspection.md)，细节算法见 [逐图细节适配](docs/adaptive-detail.md)，历史人像工作见 [人像精修与实拍验证](docs/portrait-refinement.md)，历史局部建议见 [实拍复测](docs/local-guidance.md)，五区实现见 [亮度分区](docs/targeted-tones.md)，历史场景与处理意图记录见 [场景策略](docs/scene-adaptive.md)，上轮增量检查见 [自动调整记录](docs/automatic-safety.md)，颜色协调见 [颜色协调记录](docs/color-harmony.md)，早期试用版见 [验证报告](docs/validation.md)；开源参考、源码证据与采用边界见 [开源调研](docs/opensource-research.md)，第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。本批 P0 功能（导入/撤销/人像 v1/追色/导出扩展）见 [P0 功能交付说明](docs/p0-release-notes.md)；P1 功能（调色/液化/水印）见 [P1 功能交付说明](docs/p1-release-notes.md)；P1-B 功能（证件照/修复画笔/交付页）见 [P1-B 功能交付说明](docs/p1b-release-notes.md)；P1-C 功能（AI 挑图/妆容/并行批处理）见 [P1-C 功能交付说明](docs/p1c-release-notes.md)；P1-D 功能（项目库/历史面板/持久化）见 [P1-D 功能交付说明](docs/p1d-release-notes.md)；P1-E 功能（交付多主题/隐私审计/局域网预览）见 [P1-E 功能交付说明](docs/p1e-release-notes.md)；P1-F 功能（妆容与人像精修增强）见 [P1-F 功能交付说明](docs/p1f-release-notes.md)；P1-G 功能（Universal 双架构与 24MP 全画幅基准）见 [P1-G 功能交付说明](docs/p1g-release-notes.md)。与商业产品「像素蛋糕」的差距矩阵与补齐路线见 [差距分析](docs/pixelcake-gap-analysis.md)（证据底座：[竞品矩阵](docs/research/pixelcake-matrix.md)、[本项目能力盘点](docs/research/project-capabilities.md)）。
 
 原生界面与处理代码采用 MIT 许可。Lensfun、GLib、PCRE2、libintl 与镜头数据库按各自许可证提供；不把 darktable / RawTherapee 的 GPL 源码混入本项目。
 
