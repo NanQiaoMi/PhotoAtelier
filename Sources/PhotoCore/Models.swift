@@ -686,7 +686,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...13).contains(version) else {
+        guard (1...14).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         let portraitSettings = [adjustments.portrait,
@@ -734,6 +734,9 @@ public struct Recipe: Codable, Equatable {
         let makeupGroups = [adjustments.makeup,
                             automatic?.baseline.makeup,
                             automatic?.referenceSettings.makeup]
+        guard version >= 14 || makeupGroups.allSatisfy({ $0 == nil || !$0!.requiresVersion14 }) else {
+            throw AtelierError.invalidConfiguration("眼线/睫毛/美瞳/眼神光/高光修容等增强妆容需要配方版本 14，不能静默降级。")
+        }
         guard version >= 13 || makeupGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("非中性的妆容需要配方版本 13，不能静默降级。")
         }

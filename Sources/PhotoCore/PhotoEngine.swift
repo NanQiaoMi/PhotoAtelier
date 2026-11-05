@@ -306,7 +306,7 @@ public final class PhotoEngine {
             try certificate.validated()
         }
         if let repair = settings.repairBrush { try repair.validate() }
-        if let makeup = settings.makeup, !makeup.isNeutral { try makeup.validated() }
+        if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -920,6 +920,7 @@ public final class PhotoEngine {
         let makeupGroups = [adjustments.makeup,
                             automatic?.baseline.makeup,
                             automatic?.referenceSettings.makeup]
+        if makeupGroups.contains(where: { $0.map { $0.requiresVersion14 } ?? false }) { return 14 }
         if makeupGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 13 }
         let certificateGroups = [adjustments.certificatePhoto,
                                  automatic?.baseline.certificatePhoto,

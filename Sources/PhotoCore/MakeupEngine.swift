@@ -28,6 +28,22 @@ public struct MakeupSettings: Codable, Equatable {
     /// Eyeshadow strength `0...1` (`0` disables).
     public var eyeshadowIntensity: Double
 
+    // P1-F: Enhanced makeup fields
+    public var eyelinerColor: SRGBColor
+    /// Eyeliner intensity `0...1` (`0` disables).
+    public var eyelinerIntensity: Double
+    /// Eyelash density strength `0...1` (`0` disables).
+    public var eyelashIntensity: Double
+    public var irisColor: SRGBColor
+    /// Iris/contact-lens tint strength `0...1` (`0` disables).
+    public var irisIntensity: Double
+    /// Catchlight specular brightening `0...1` (`0` disables).
+    public var catchlightIntensity: Double
+    /// T-zone and cheek high-point brightening `0...1` (`0` disables).
+    public var highlightIntensity: Double
+    /// Face contour and jawline shading `0...1` (`0` disables).
+    public var contourIntensity: Double
+
     public init(lipColor: SRGBColor = SRGBColor(red: 0.78, green: 0.22, blue: 0.30),
                 lipIntensity: Double = 0,
                 browColor: SRGBColor = SRGBColor(red: 0.28, green: 0.20, blue: 0.15),
@@ -36,7 +52,15 @@ public struct MakeupSettings: Codable, Equatable {
                 cheekIntensity: Double = 0,
                 cheekRadius: Double = 0.5,
                 eyeshadowColor: SRGBColor = SRGBColor(red: 0.55, green: 0.35, blue: 0.45),
-                eyeshadowIntensity: Double = 0) {
+                eyeshadowIntensity: Double = 0,
+                eyelinerColor: SRGBColor = SRGBColor(red: 0.12, green: 0.10, blue: 0.10),
+                eyelinerIntensity: Double = 0,
+                eyelashIntensity: Double = 0,
+                irisColor: SRGBColor = SRGBColor(red: 0.42, green: 0.32, blue: 0.22),
+                irisIntensity: Double = 0,
+                catchlightIntensity: Double = 0,
+                highlightIntensity: Double = 0,
+                contourIntensity: Double = 0) {
         self.lipColor = lipColor
         self.lipIntensity = lipIntensity
         self.browColor = browColor
@@ -46,26 +70,79 @@ public struct MakeupSettings: Codable, Equatable {
         self.cheekRadius = cheekRadius
         self.eyeshadowColor = eyeshadowColor
         self.eyeshadowIntensity = eyeshadowIntensity
+        self.eyelinerColor = eyelinerColor
+        self.eyelinerIntensity = eyelinerIntensity
+        self.eyelashIntensity = eyelashIntensity
+        self.irisColor = irisColor
+        self.irisIntensity = irisIntensity
+        self.catchlightIntensity = catchlightIntensity
+        self.highlightIntensity = highlightIntensity
+        self.contourIntensity = contourIntensity
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case lipColor, lipIntensity, browColor, browDensity
+        case cheekColor, cheekIntensity, cheekRadius, eyeshadowColor, eyeshadowIntensity
+        case eyelinerColor, eyelinerIntensity, eyelashIntensity, irisColor, irisIntensity
+        case catchlightIntensity, highlightIntensity, contourIntensity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lipColor = try container.decodeIfPresent(SRGBColor.self, forKey: .lipColor) ?? SRGBColor(red: 0.78, green: 0.22, blue: 0.30)
+        lipIntensity = try container.decodeIfPresent(Double.self, forKey: .lipIntensity) ?? 0
+        browColor = try container.decodeIfPresent(SRGBColor.self, forKey: .browColor) ?? SRGBColor(red: 0.28, green: 0.20, blue: 0.15)
+        browDensity = try container.decodeIfPresent(Double.self, forKey: .browDensity) ?? 0
+        cheekColor = try container.decodeIfPresent(SRGBColor.self, forKey: .cheekColor) ?? SRGBColor(red: 0.92, green: 0.45, blue: 0.45)
+        cheekIntensity = try container.decodeIfPresent(Double.self, forKey: .cheekIntensity) ?? 0
+        cheekRadius = try container.decodeIfPresent(Double.self, forKey: .cheekRadius) ?? 0.5
+        eyeshadowColor = try container.decodeIfPresent(SRGBColor.self, forKey: .eyeshadowColor) ?? SRGBColor(red: 0.55, green: 0.35, blue: 0.45)
+        eyeshadowIntensity = try container.decodeIfPresent(Double.self, forKey: .eyeshadowIntensity) ?? 0
+        eyelinerColor = try container.decodeIfPresent(SRGBColor.self, forKey: .eyelinerColor) ?? SRGBColor(red: 0.12, green: 0.10, blue: 0.10)
+        eyelinerIntensity = try container.decodeIfPresent(Double.self, forKey: .eyelinerIntensity) ?? 0
+        eyelashIntensity = try container.decodeIfPresent(Double.self, forKey: .eyelashIntensity) ?? 0
+        irisColor = try container.decodeIfPresent(SRGBColor.self, forKey: .irisColor) ?? SRGBColor(red: 0.42, green: 0.32, blue: 0.22)
+        irisIntensity = try container.decodeIfPresent(Double.self, forKey: .irisIntensity) ?? 0
+        catchlightIntensity = try container.decodeIfPresent(Double.self, forKey: .catchlightIntensity) ?? 0
+        highlightIntensity = try container.decodeIfPresent(Double.self, forKey: .highlightIntensity) ?? 0
+        contourIntensity = try container.decodeIfPresent(Double.self, forKey: .contourIntensity) ?? 0
     }
 
     /// True when no pass would change a pixel (all strengths zero).
     public var isNeutral: Bool {
         lipIntensity == 0 && browDensity == 0 && cheekIntensity == 0
-            && eyeshadowIntensity == 0
+            && eyeshadowIntensity == 0 && eyelinerIntensity == 0
+            && eyelashIntensity == 0 && irisIntensity == 0
+            && catchlightIntensity == 0 && highlightIntensity == 0
+            && contourIntensity == 0
+    }
+
+    /// True when any P1-F enhanced makeup feature is active (requires recipe version 14).
+    public var requiresVersion14: Bool {
+        eyelinerIntensity > 0 || eyelashIntensity > 0 || irisIntensity > 0
+            || catchlightIntensity > 0 || highlightIntensity > 0 || contourIntensity > 0
     }
 
     /// Validates ranges/NaN and colour components. Every color is validated even
     /// for a disabled pass so a malformed payload fails loudly instead of
     /// silently producing a different preview later.
     public func validated() throws -> MakeupSettings {
-        try lipColor.validated()
-        try browColor.validated()
-        try cheekColor.validated()
-        try eyeshadowColor.validated()
+        _ = try lipColor.validated()
+        _ = try browColor.validated()
+        _ = try cheekColor.validated()
+        _ = try eyeshadowColor.validated()
+        _ = try eyelinerColor.validated()
+        _ = try irisColor.validated()
         try Self.requireUnit(lipIntensity, named: "唇色强度")
         try Self.requireUnit(browDensity, named: "眉色密度")
         try Self.requireUnit(cheekIntensity, named: "腮红强度")
         try Self.requireUnit(eyeshadowIntensity, named: "眼影强度")
+        try Self.requireUnit(eyelinerIntensity, named: "眼线强度")
+        try Self.requireUnit(eyelashIntensity, named: "睫毛浓度")
+        try Self.requireUnit(irisIntensity, named: "美瞳强度")
+        try Self.requireUnit(catchlightIntensity, named: "眼神光强度")
+        try Self.requireUnit(highlightIntensity, named: "面部高光强度")
+        try Self.requireUnit(contourIntensity, named: "面部修容强度")
         guard cheekRadius.isFinite, (0.2...1.0).contains(cheekRadius) else {
             throw AtelierError.invalidConfiguration("腮红半径必须在 0.2...1.0 之间。")
         }
@@ -188,6 +265,50 @@ public enum MakeupEngine {
                                        radiusScale: 1.0)
             output = try tint(output, mask: mask, color: settings.eyeshadowColor,
                               intensity: settings.eyeshadowIntensity, luminanceScale: 0.9)
+        }
+        // Eyeliner (P1-F): upper eyelid contour darkening and tint
+        if settings.eyelinerIntensity > 0 {
+            let mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .eyeliner)
+            output = try tint(output, mask: mask, color: settings.eyelinerColor,
+                              intensity: settings.eyelinerIntensity, luminanceScale: 0.25)
+        }
+        // Eyelash (P1-F): upper margin density darkening
+        if settings.eyelashIntensity > 0 {
+            let mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .eyelash)
+            output = try tint(output, mask: mask, color: SRGBColor(red: 0.08, green: 0.08, blue: 0.08),
+                              intensity: settings.eyelashIntensity, luminanceScale: 0.20)
+        }
+        // Iris (P1-F): pupil-centered iris tinting, clipped to eye opening
+        if settings.irisIntensity > 0 {
+            let mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .iris)
+            output = try tint(output, mask: mask, color: settings.irisColor,
+                              intensity: settings.irisIntensity, luminanceScale: 1.15)
+        }
+        // Catchlight (P1-F): specular micro-brightening in the pupil
+        if settings.catchlightIntensity > 0 {
+            let mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .catchlight)
+            output = try tint(output, mask: mask, color: SRGBColor(red: 1.0, green: 1.0, blue: 1.0),
+                              intensity: settings.catchlightIntensity, luminanceScale: 2.2)
+        }
+        // Face Highlight (P1-F): T-zone and cheek high-point diffuse glow, clipped to skin
+        if settings.highlightIntensity > 0 {
+            var mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .highlight)
+            if isUsableMask(semantic.skin), let skin = semantic.skin {
+                mask = try multiplyMasks(mask, skin, extent: extent)
+            }
+            output = try tint(output, mask: mask, color: SRGBColor(red: 1.0, green: 0.98, blue: 0.94),
+                              intensity: settings.highlightIntensity, luminanceScale: 1.35)
+        }
+        // Face Contour (P1-F): jawline and cheek hollow shading, clipped to skin
+        if settings.contourIntensity > 0 {
+            var mask = try extendedGeometricMask(faces: usableFaces, extent: extent, kind: .contour)
+            let faceRegion = try ellipseMask(faces: usableFaces, extent: extent, kind: .faceRegion, radiusScale: 1.0)
+            mask = try multiplyMasks(mask, faceRegion, extent: extent)
+            if isUsableMask(semantic.skin), let skin = semantic.skin {
+                mask = try multiplyMasks(mask, skin, extent: extent)
+            }
+            output = try tint(output, mask: mask, color: SRGBColor(red: 0.42, green: 0.34, blue: 0.28),
+                              intensity: settings.contourIntensity, luminanceScale: 0.65)
         }
         return output.cropped(to: extent)
     }
@@ -338,6 +459,202 @@ public enum MakeupEngine {
         }
         return try rasterCoverage(coverage, width: width, height: height, extent: extent,
                                   featherFraction: 0.012)
+    }
+
+    enum ExtendedGeometricKind {
+        case eyeliner
+        case eyelash
+        case iris
+        case catchlight
+        case highlight
+        case contour
+    }
+
+    /// Builds feathered geometric masks for eye enhancements (eyeliner, eyelash, iris, catchlight)
+    /// and facial sculpting (highlight, contour).
+    static func extendedGeometricMask(faces: [FaceLandmarkSet], extent: CGRect,
+                                      kind: ExtendedGeometricKind) throws -> CIImage {
+        let scale = min(1, CGFloat(maskRasterDimension) / max(extent.width, extent.height))
+        let width = max(8, Int((extent.width * scale).rounded()))
+        let height = max(8, Int((extent.height * scale).rounded()))
+        var coverage = [Float](repeating: 0, count: width * height)
+
+        for face in faces {
+            let box = face.boundingBox
+            guard box.width > 0.01, box.height > 0.01 else { continue }
+            let faceWidth = Double(box.width)
+            let faceHeight = Double(box.height)
+            let midX = Double(box.midX)
+            let midY = Double(box.midY)
+
+            switch kind {
+            case .eyeliner:
+                for eye in [face.leftEye, face.rightEye] {
+                    let points = eye.filter { $0.x.isFinite && $0.y.isFinite }
+                    guard points.count >= 3, let eyeBox = unionBox(points) else { continue }
+                    let eyeH = Double(eyeBox.height)
+                    let eyeMidY = Double(eyeBox.midY)
+                    let upper = points.filter { Double($0.y) >= eyeMidY - 0.10 * eyeH }.sorted { $0.x < $1.x }
+                    guard upper.count >= 2 else { continue }
+                    let thickness = max(0.003, 0.08 * eyeH)
+                    rasterizePolyline(&coverage, width: width, height: height, points: upper, thickness: thickness)
+                }
+
+            case .eyelash:
+                for eye in [face.leftEye, face.rightEye] {
+                    let points = eye.filter { $0.x.isFinite && $0.y.isFinite }
+                    guard points.count >= 3, let eyeBox = unionBox(points) else { continue }
+                    let eyeH = Double(eyeBox.height)
+                    let eyeMidY = Double(eyeBox.midY)
+                    let upper = points.filter { Double($0.y) >= eyeMidY - 0.10 * eyeH }.sorted { $0.x < $1.x }
+                    guard upper.count >= 2 else { continue }
+                    let shifted = upper.map { CGPoint(x: $0.x, y: $0.y + CGFloat(0.06 * eyeH)) }
+                    let thickness = max(0.004, 0.14 * eyeH)
+                    rasterizePolyline(&coverage, width: width, height: height, points: shifted, thickness: thickness)
+                }
+
+            case .iris:
+                for (eye, pupil) in [(face.leftEye, face.leftPupil), (face.rightEye, face.rightPupil)] {
+                    let points = eye.filter { $0.x.isFinite && $0.y.isFinite }
+                    guard points.count >= 3, let eyeBox = unionBox(points) else { continue }
+                    let eyeW = Double(eyeBox.width)
+                    let eyeH = Double(eyeBox.height)
+                    let center = pupil.map { (Double($0.x), Double($0.y)) } ?? (Double(eyeBox.midX), Double(eyeBox.midY))
+                    let radiusX = max(0.003, 0.22 * eyeW)
+                    let radiusY = max(0.003, 0.35 * eyeH)
+                    fillEllipse(&coverage, width: width, height: height,
+                                centerX: center.0, centerY: center.1,
+                                radiusX: radiusX, radiusY: radiusY)
+                }
+
+            case .catchlight:
+                for (eye, pupil) in [(face.leftEye, face.leftPupil), (face.rightEye, face.rightPupil)] {
+                    let points = eye.filter { $0.x.isFinite && $0.y.isFinite }
+                    guard points.count >= 3, let eyeBox = unionBox(points) else { continue }
+                    let eyeW = Double(eyeBox.width)
+                    let eyeH = Double(eyeBox.height)
+                    let p = pupil.map { (Double($0.x), Double($0.y)) } ?? (Double(eyeBox.midX), Double(eyeBox.midY))
+                    let cx = p.0 + 0.05 * eyeW
+                    let cy = p.1 + 0.08 * eyeH
+                    let rX = max(0.002, 0.06 * eyeW)
+                    let rY = max(0.002, 0.08 * eyeH)
+                    fillEllipse(&coverage, width: width, height: height,
+                                centerX: cx, centerY: cy,
+                                radiusX: rX, radiusY: rY)
+                }
+
+            case .highlight:
+                // Forehead center
+                fillEllipse(&coverage, width: width, height: height,
+                            centerX: midX, centerY: midY + 0.35 * faceHeight,
+                            radiusX: 0.12 * faceWidth, radiusY: 0.06 * faceHeight)
+                // Nose bridge
+                fillEllipse(&coverage, width: width, height: height,
+                            centerX: midX, centerY: midY + 0.10 * faceHeight,
+                            radiusX: 0.04 * faceWidth, radiusY: 0.12 * faceHeight)
+                // Cheek high points
+                for side in [-1.0, 1.0] {
+                    fillEllipse(&coverage, width: width, height: height,
+                                centerX: midX + side * 0.24 * faceWidth,
+                                centerY: midY + 0.06 * faceHeight,
+                                radiusX: 0.07 * faceWidth, radiusY: 0.05 * faceHeight)
+                }
+
+            case .contour:
+                // Lower jawline & cheek hollows
+                for side in [-1.0, 1.0] {
+                    fillEllipse(&coverage, width: width, height: height,
+                                centerX: midX + side * 0.38 * faceWidth,
+                                centerY: midY - 0.18 * faceHeight,
+                                radiusX: 0.12 * faceWidth, radiusY: 0.16 * faceHeight)
+                }
+                // Chin bottom
+                fillEllipse(&coverage, width: width, height: height,
+                            centerX: midX, centerY: midY - 0.44 * faceHeight,
+                            radiusX: 0.16 * faceWidth, radiusY: 0.05 * faceHeight)
+            }
+        }
+
+        let feather: Double
+        switch kind {
+        case .eyeliner: feather = 0.004
+        case .eyelash: feather = 0.006
+        case .iris: feather = 0.005
+        case .catchlight: feather = 0.003
+        case .highlight: feather = 0.020
+        case .contour: feather = 0.025
+        }
+        var mask = try rasterCoverage(coverage, width: width, height: height, extent: extent,
+                                      featherFraction: feather)
+
+        // For iris and catchlight, clip to eye opening polygons so no effect bleeds outside eyes
+        if kind == .iris || kind == .catchlight {
+            var eyePolygons: [[CGPoint]] = []
+            for face in faces {
+                if let left = polygonPoints(face.leftEye) { eyePolygons.append(left) }
+                if let right = polygonPoints(face.rightEye) { eyePolygons.append(right) }
+            }
+            if !eyePolygons.isEmpty {
+                let eyeMatte = try polygonCoverageMask(include: eyePolygons, exclude: [], extent: extent)
+                mask = try multiplyMasks(mask, eyeMatte, extent: extent)
+            }
+        }
+        return mask
+    }
+
+    private static func rasterizePolyline(_ coverage: inout [Float], width: Int, height: Int,
+                                          points: [CGPoint], thickness: Double) {
+        guard points.count >= 2, thickness > 0 else { return }
+        var minX = points[0].x, maxX = points[0].x
+        var minY = points[0].y, maxY = points[0].y
+        for p in points {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        }
+        let pad = CGFloat(thickness * 1.5)
+        let minCol = max(0, Int(((Double(minX - pad)) * Double(width)).rounded(.down)))
+        let maxCol = min(width - 1, Int(((Double(maxX + pad)) * Double(width)).rounded(.up)))
+        let minR = max(0, Int(((1 - Double(maxY + pad)) * Double(height)).rounded(.down)))
+        let maxR = min(height - 1, Int(((1 - Double(minY - pad)) * Double(height)).rounded(.up)))
+        guard minCol <= maxCol, minR <= maxR else { return }
+
+        for r in minR...maxR {
+            let py = 1 - (Double(r) + 0.5) / Double(height)
+            for c in minCol...maxCol {
+                let px = (Double(c) + 0.5) / Double(width)
+                var minDist = Double.infinity
+                for i in 0..<(points.count - 1) {
+                    let d = distanceToSegment(px: px, py: py,
+                                              x1: Double(points[i].x), y1: Double(points[i].y),
+                                              x2: Double(points[i + 1].x), y2: Double(points[i + 1].y))
+                    if d < minDist { minDist = d }
+                }
+                if minDist <= thickness {
+                    let val = Float(max(0, min(1, 1.0 - (minDist / thickness))))
+                    let idx = r * width + c
+                    if val > coverage[idx] { coverage[idx] = val }
+                }
+            }
+        }
+    }
+
+    private static func distanceToSegment(px: Double, py: Double,
+                                          x1: Double, y1: Double,
+                                          x2: Double, y2: Double) -> Double {
+        let dx = x2 - x1
+        let dy = y2 - y1
+        let lenSq = dx * dx + dy * dy
+        if lenSq < 1e-12 {
+            let rx = px - x1
+            let ry = py - y1
+            return sqrt(rx * rx + ry * ry)
+        }
+        let t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq))
+        let projX = x1 + t * dx
+        let projY = y1 + t * dy
+        let rx = px - projX
+        let ry = py - projY
+        return sqrt(rx * rx + ry * ry)
     }
 
     /// Fallback lip matte: outer-lip polygon minus inner-lip polygon.
