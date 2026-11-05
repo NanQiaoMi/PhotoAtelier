@@ -12,6 +12,52 @@ enum AtelierPalette {
     static let line = Color.white.opacity(0.07)
 }
 
+private struct InspectorTab: Identifiable {
+    let id: Int
+    let title: String
+    let icon: String
+}
+
+/// Two-row (4x2) inspector tab grid. Replaces the 8-segment segmented Picker,
+/// whose intrinsic width (336pt) overflowed the 312pt inspector and clipped the
+/// last tab ("证件照") at the window edge.
+private struct InspectorTabBar: View {
+    @Binding var selection: Int
+    private static let tabs: [InspectorTab] = [
+        .init(id: 0, title: "分析", icon: "chart.bar.xaxis"),
+        .init(id: 1, title: "基础", icon: "slider.horizontal.3"),
+        .init(id: 2, title: "局部", icon: "circle.dashed"),
+        .init(id: 3, title: "人像", icon: "person.crop.circle"),
+        .init(id: 4, title: "追色", icon: "eyedropper.halffull"),
+        .init(id: 5, title: "导出", icon: "square.and.arrow.up"),
+        .init(id: 6, title: "调色", icon: "circle.lefthalf.filled"),
+        .init(id: 7, title: "证件照", icon: "person.text.rectangle")
+    ]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 6) {
+            ForEach(Self.tabs) { tab in
+                let isSelected = selection == tab.id
+                Button { selection = tab.id } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: tab.icon).font(.system(size: 10, weight: .medium))
+                        Text(tab.title).font(.system(size: 10.5, weight: .medium)).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity).frame(height: 28)
+                    .foregroundColor(isSelected ? AtelierPalette.accent : AtelierPalette.muted)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? AtelierPalette.accent.opacity(0.16) : Color.clear))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(isSelected ? AtelierPalette.accent.opacity(0.55) : Color.clear, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.title)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .disabled(false)
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: AppModel
     @State private var inspectorTab = 0
@@ -20,7 +66,18 @@ struct ContentView: View {
     @State private var showLog = false
     @State private var showLensPicker = false
     @State private var dropTargeted = false
-    init(model: AppModel, initialTab: Int = 0, initialCompare: Bool = true) {
+    /// Test/verification hook: `--initial-tab <0...7>` opens the inspector on a
+    /// specific tab so layout screenshots do not depend on accessibility clicks.
+    private static var defaultInspectorTab: Int {
+        let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--initial-tab"), args.count > index + 1,
+           let value = Int(args[index + 1]) {
+            return min(max(value, 0), 7)
+        }
+        return 0
+    }
+
+    init(model: AppModel, initialTab: Int = ContentView.defaultInspectorTab, initialCompare: Bool = true) {
         self.model = model
         self._inspectorTab = State(initialValue: initialTab)
         self._compare = State(initialValue: initialCompare)
@@ -359,37 +416,69 @@ struct ContentView: View {
     }
 
     private var presetShelf: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
                 sectionLabel("色彩风格")
-                Text("LUT COLLECTION").font(.system(size: 8, weight: .medium)).tracking(1.5).foregroundColor(AtelierPalette.muted)
-                Spacer()
-                Button("比较全部 \(model.lutOptions.count) 种风格") { model.showStyleBrowser = true }
-                    .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(AtelierPalette.accent)
+                Text("\(model.lutOptions.count)")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundColor(AtelierPalette.muted)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 3).fill(AtelierPalette.raised))
+                    .help("内置与导入的 LUT 风格总数")
+                Spacer(minLength: 8)
+                ViewThatFits(in: .horizontal) {
+                    Button { model.showStyleBrowser = true } label: {
+                        HStack(spacing: 3) {
+                            Text("全部 \(model.lutOptions.count) 种")
+                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(AtelierPalette.accent)
+                        .lineLimit(1).fixedSize()
+                    }.buttonStyle(.plain).help("打开风格库浏览全部 \(model.lutOptions.count) 种风格")
+                    Button { model.showStyleBrowser = true } label: {
+                        Image(systemName: "rectangle.grid.2x2")
+                            .font(.system(size: 11)).foregroundColor(AtelierPalette.accent)
+                            .frame(width: 18, height: 18)
+                    }.buttonStyle(.plain).help("浏览全部 \(model.lutOptions.count) 种风格")
+                }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(Array(model.lutOptions.enumerated()), id: \.element.id) { index, option in
-                        Button { model.selectLUT(option.id) } label: {
-                            VStack(alignment: .leading, spacing: 7) {
-                                ZStack(alignment: .bottomLeading) {
-                                    AtelierPalette.raised
-                                    Image(systemName: option.id == "none" ? "circle.lefthalf.filled" : "camera.filters")
-                                        .font(.system(size: 17, weight: .ultraLight)).foregroundColor(Color.white.opacity(0.8)).padding(10)
-                                    if model.selectedLUT == option.id {
-                                        Image(systemName: "checkmark.circle.fill").foregroundColor(AtelierPalette.accent)
-                                            .font(.system(size: 12)).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(6)
-                                    }
-                                }.frame(width: 94, height: 58).clipped().clipShape(RoundedRectangle(cornerRadius: 5))
-                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(model.selectedLUT == option.id ? AtelierPalette.accent : .clear, lineWidth: 1.5))
-                                Text(option.name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                                    .foregroundColor(model.selectedLUT == option.id ? AtelierPalette.accent : .white.opacity(0.8))
-                            }.frame(width: 94, alignment: .leading).help(option.detail)
-                        }.buttonStyle(.plain).disabled(model.batchRunning)
-                    }
-                }.padding(.vertical, 2)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(model.lutOptions.enumerated()), id: \.element.id) { index, option in
+                            Button { model.selectLUT(option.id) } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ZStack(alignment: .bottomLeading) {
+                                        AtelierPalette.raised
+                                        Image(systemName: option.id == "none" ? "circle.lefthalf.filled" : "camera.filters")
+                                            .font(.system(size: 17, weight: .ultraLight)).foregroundColor(Color.white.opacity(0.8)).padding(10)
+                                        if model.selectedLUT == option.id {
+                                            Image(systemName: "checkmark.circle.fill").foregroundColor(AtelierPalette.accent)
+                                                .font(.system(size: 12)).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(6)
+                                        }
+                                    }.frame(width: 96, height: 60).clipped().clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(model.selectedLUT == option.id ? AtelierPalette.accent : .clear, lineWidth: 1.5))
+                                    Text(option.name).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                                        .frame(width: 96, alignment: .leading)
+                                        .foregroundColor(model.selectedLUT == option.id ? AtelierPalette.accent : .white.opacity(0.8))
+                                }.frame(width: 96, alignment: .leading).help(option.detail)
+                            }.buttonStyle(.plain).disabled(model.batchRunning).id(index)
+                        }
+                        Color.clear.frame(width: 24, height: 1)
+                    }.padding(.vertical, 2)
+                }
+                .onChange(of: model.selectedLUT) { selected in
+                    guard let index = model.lutOptions.firstIndex(where: { $0.id == selected }) else { return }
+                    withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(index, anchor: .center) }
+                }
             }
-        }.padding(.horizontal, 22).padding(.vertical, 18)
+            .overlay(alignment: .trailing) {
+                LinearGradient(colors: [AtelierPalette.panel.opacity(0), AtelierPalette.panel.opacity(0.92)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: 18).allowsHitTesting(false)
+            }
+        }.padding(.horizontal, 22).padding(.vertical, 16)
             .background(AtelierPalette.panel.opacity(0.65))
     }
 
@@ -406,12 +495,8 @@ struct ContentView: View {
                 Text("阴影"); Spacer(); Text("中间调"); Spacer(); Text("高光")
             }.font(.system(size: 8, design: .monospaced)).foregroundColor(AtelierPalette.muted)
                 .padding(.horizontal, 20).padding(.top, 5)
-            Picker("调整分类", selection: $inspectorTab) {
-                Text("分析").tag(0); Text("基础").tag(1); Text("局部").tag(2)
-                Text("人像").tag(3); Text("追色").tag(4); Text("导出").tag(5)
-                Text("调色").tag(6)
-                Text("证件照").tag(7)
-            }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 17).padding(.vertical, 18)
+            InspectorTabBar(selection: $inspectorTab)
+                .padding(.horizontal, 17).padding(.vertical, 14)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if inspectorTab == 0 {

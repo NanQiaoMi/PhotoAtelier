@@ -67,7 +67,10 @@ final class ColorCompatibilityTests: XCTestCase {
         let size = 128
         let text = "LUT_3D_SIZE \(size)\n"
             + String(repeating: "0 0 0\n", count: size * size * size - 1) + "1 0.5 0.25\n"
+        let start = Date()
         let lut = try LUTCube.parse(text)
+        let parseElapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(parseElapsed, 15.0, "128³ 文本解析应在 15 秒内完成，防止阻塞测试套件")
         var settings = lutSettings(.sRGB)
         settings.colorHarmony = ColorHarmonySettings()
         settings.colorHarmony?.enabled = false
