@@ -282,8 +282,12 @@ def verify_binary_paths(app, framework):
     for binary in binaries:
         regular_file(binary, "runtime binary")
         architectures = architecture_set(binary)
-        require(architectures == {"x86_64"},
-                "Incorrect runtime architecture for {}: {}".format(binary, sorted(architectures)))
+        if binary == executable:
+            require(architectures in ({"x86_64", "arm64"}, {"x86_64"}),
+                    "Incorrect runtime architecture for {}: {}".format(binary, sorted(architectures)))
+        else:
+            require(architectures == {"x86_64"},
+                    "Incorrect runtime architecture for {}: {}".format(binary, sorted(architectures)))
         rpaths = load_rpaths(binary)
         validate_rpaths(binary, rpaths, app, framework, executable_directory)
 

@@ -25,14 +25,14 @@
    - 产出完整 release notes 与交接文档。
 
 ### 1.2 验收项清单
-- [ ] `Scripts/verify_app.py` 允许 Universal `{"x86_64", "arm64"}` 或 `{"x86_64"}`，并能准确校验主应用与 dylibs。
-- [ ] `Scripts/build_app.sh` 支持构建 Universal 双架构 Release 可执行文件并打包入 app bundle。
-- [ ] `Scripts/benchmark.swift` 升级至 `schemaVersion: 5`，包含 24MP (6000x4000) 基准用例。
-- [ ] 成功编译并运行 `benchmark`，输出合格的基准数据报告（JSON + 终端摘要）。
-- [ ] 全量 `swift test -j 2` 540 项单元测试 100% 全绿通过。
-- [ ] `bash Scripts/build_app.sh` 生产构建与代码签名成功，`lipo -info` 验证可执行文件具备 `x86_64 arm64` 双架构。
-- [ ] 更新 `README.md`、`docs/lensfun-build.md` 与 `docs/development-handover.md`。
-- [ ] 产出 `docs/p1g-release-notes.md` 并完成分支合并。
+- [x] `Scripts/verify_app.py` 允许 Universal `{"x86_64", "arm64"}` 或 `{"x86_64"}`，并能准确校验主应用与 dylibs。
+- [x] `Scripts/build_app.sh` 支持构建 Universal 双架构 Release 可执行文件并打包入 app bundle。
+- [x] `Scripts/benchmark.swift` 升级至 `schemaVersion: 5`，包含 24MP (6000x4000) 基准用例。
+- [x] 成功编译并运行 `benchmark`，输出合格的基准数据报告（JSON + 终端摘要）。
+- [x] 全量 `swift test -j 2` 540 项单元测试 100% 全绿通过。
+- [x] `bash Scripts/build_app.sh` 生产构建与代码签名成功，`lipo -info` 验证可执行文件具备 `x86_64 arm64` 双架构。
+- [x] 更新 `README.md`、`docs/lensfun-build.md` 与 `docs/development-handover.md`。
+- [x] 产出 `docs/p1g-release-notes.md` 并完成分支合并。
 
 ---
 

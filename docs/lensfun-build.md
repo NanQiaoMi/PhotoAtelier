@@ -84,6 +84,10 @@ MyApp.app/Contents/Resources/Lensfun/licenses/*
 
 打包后的 app 会把本指南和准备脚本复制到 `Contents/Resources/docs/lensfun-build.md` 与 `Contents/Resources/Scripts/prepare_lensfun.py`，第三方声明中的相对链接可在 app 资源目录中打开。当前构建仅面向本机验证：其中的 wheel 和准备脚本记录了固定二进制来源及提取过程，但 app 不包含 GLib、PCRE2、gettext 等每个 LGPL 库的完整对应源码树或完整发行构建环境。公开分发前仍需单独准备并随发行物提供各许可要求的对应源码、修改记录和构建材料；本机 app 不应被视为公开发行包。
 
+## Universal 双架构构建说明
+
+主应用 `PhotoAtelier` 支持构建为 Universal 二进制（`x86_64` + `arm64`，通过 `bash Scripts/build_app.sh --universal` 打包），在 Intel Mac 及 Apple Silicon Mac 原生运行。Lensfun 运行时当前动态库保持固定来源的 `x86_64` 构建，在 Apple Silicon 上由系统通过 Rosetta 2 动态兼容加载或待后续引入原生 arm64 wheel 升级。
+
 ## 本机实测
 
 准备脚本的本机 C API 查询结果：`lf_db_load_directory` 返回成功；数据库枚举出 948 个相机和 1304 个镜头；`Canon EOS 5D Mark IV` 查询命中 1 个相机，`Canon EF 24-70mm f/2.8L USM` 命中 2 个镜头。查询加载的是 `.dependencies/lensfun/db` 中由 wheel 固定的 XML 文件。

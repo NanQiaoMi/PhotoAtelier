@@ -5,8 +5,26 @@ TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$TASK_ROOT"
 python3 Scripts/prepare_lensfun.py --verify
 
-swift build -c release -j 2
-TASK_BIN="$(swift build -c release --show-bin-path)"
+BUILD_UNIVERSAL="${BUILD_UNIVERSAL:-0}"
+for arg in "$@"; do
+    case "$arg" in
+        --universal)
+            BUILD_UNIVERSAL=1
+            ;;
+    esac
+done
+
+if [[ "$BUILD_UNIVERSAL" == "1" ]]; then
+    printf 'Building PhotoAtelier universal binary (x86_64 + arm64)...\n'
+    swift build -c release --triple x86_64-apple-macosx -j 2
+    swift build -c release --triple arm64-apple-macosx -j 2
+    TASK_BIN_X86="$(swift build -c release --triple x86_64-apple-macosx --show-bin-path)"
+    TASK_BIN_ARM="$(swift build -c release --triple arm64-apple-macosx --show-bin-path)"
+    TASK_BIN="$TASK_BIN_X86"
+else
+    swift build -c release -j 2
+    TASK_BIN="$(swift build -c release --show-bin-path)"
+fi
 TASK_BUILD_ROOT="$TASK_ROOT/build"
 TASK_APP="$TASK_BUILD_ROOT/PhotoAtelier.app"
 mkdir -p "$TASK_BUILD_ROOT"
@@ -24,7 +42,13 @@ report_staging_path() {
 trap report_staging_path EXIT
 
 mkdir -p "$TASK_STAGED_APP/Contents/MacOS" "$TASK_RESOURCES/Lensfun" "$TASK_FRAMEWORK"
-cp "$TASK_BIN/PhotoAtelier" "$TASK_STAGED_APP/Contents/MacOS/PhotoAtelier"
+if [[ "$BUILD_UNIVERSAL" == "1" ]]; then
+    lipo -create -output "$TASK_STAGED_APP/Contents/MacOS/PhotoAtelier" \
+        "$TASK_BIN_X86/PhotoAtelier" "$TASK_BIN_ARM/PhotoAtelier"
+    lipo -info "$TASK_STAGED_APP/Contents/MacOS/PhotoAtelier"
+else
+    cp "$TASK_BIN/PhotoAtelier" "$TASK_STAGED_APP/Contents/MacOS/PhotoAtelier"
+fi
 cp Resources/Info.plist "$TASK_STAGED_APP/Contents/Info.plist"
 ditto .dependencies/lensfun/lib "$TASK_FRAMEWORK"
 ditto .dependencies/lensfun/db "$TASK_RESOURCES/Lensfun/db"
