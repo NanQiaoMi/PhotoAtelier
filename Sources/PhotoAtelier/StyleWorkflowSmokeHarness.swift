@@ -167,7 +167,7 @@ final class StyleWorkflowSmokeSession {
                 try snapshot(ContentView(model: model, initialTab: 1), name: "effects-workbench.png", size: .init(width: 1400, height: 900))
                 let encoded = try JSONEncoder().encode(model.recipe)
                 let restored = try JSONDecoder().decode(Recipe.self, from: encoded)
-                try require(restored.version == 9 && restored.adjustments.creativeEffects == model.adjustments.creativeEffects,
+                try require(restored.version >= 9 && restored.adjustments.creativeEffects == model.adjustments.creativeEffects,
                             "Recipe v9 round-trips selected effects")
                 model.closeNativeInspection()
                 model.exportSettings.format = .tiff; model.exportSettings.colorSpace = .displayP3
@@ -179,7 +179,7 @@ final class StyleWorkflowSmokeSession {
                 let json = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any]
                 let recipe = json?["recipe"] as? [String: Any]
                 let adjustments = recipe?["adjustments"] as? [String: Any]
-                try require(recipe?["version"] as? Int == 9 && adjustments?["creativeEffects"] != nil,
+                try require((recipe?["version"] as? Int ?? 0) >= 9 && adjustments?["creativeEffects"] != nil,
                             "Batch manifest freezes the v9 creative settings")
                 model.selectLUT("film-fuji-classic-neg")
                 model.requestPreview(immediate: true); phaseStarted = now; phase = 90

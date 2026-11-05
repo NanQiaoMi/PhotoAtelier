@@ -93,7 +93,7 @@ final class PortraitSmokeSession {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let data = try encoder.encode(recipe)
                 try data.write(to: evidence.appendingPathComponent("portrait-recipe.json"))
-                try require(try JSONDecoder().decode(Recipe.self, from: data) == recipe && recipe.version == 9,
+                try require(try JSONDecoder().decode(Recipe.self, from: data) == recipe && recipe.version >= 9,
                             "Portrait recipe version nine round-trips all three semantic targets and detail")
                 recipe.version = 5
                 var rejected = false

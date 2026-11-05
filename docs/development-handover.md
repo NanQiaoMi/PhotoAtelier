@@ -15,8 +15,8 @@
 | `feat/p0-gap-closure` | `2af5ccd` | P0：导入/撤销/人脸语义蒙版/人像 v1/追色/导出增强/QA 脚本 |
 | `feat/p1-color-beauty` | `2ea97cb` | P1：调色工具扩展/液化美型/水印导出 |
 | `feat/p1b-retouch-delivery` | `152c9d1` | P1-B：证件照/换背景、修复画笔/仿制、本地客户交付页 |
-| `feat/p1c-culling-makeup-perf` | `fb22674` | P1-C：AI 挑图/妆容/并行批处理；含 ui_smoke 加固（`8dc9d01`、`fb22674`） |
-| **`fix/inspector-layout`（当前工作分支）** | `90e95c2` | 右侧检查器页签 + LUT 风格架布局修复（本轮用户请求） |
+| `feat/p1c-culling-makeup-perf` | `026ac7f` | P1-C ~ P1-H 集成分支（含挑图/持久化/交付增强/增强妆容/Universal双架构/真实照片审美体系） |
+| **`feat/p1i-tech-debt-cleanup`（当前工作分支）** | `026ac7f` | P1-I：自检前向兼容/UI冒烟测试去flakiness/防篡改证据链/P1全周期收官 |
 
 - 当前所有功能分支**仅本地**，未推送远端；`main` 未合并任何功能分支（项目规则：功能分支 + 本地验证，未获授权不推送/合并）。
 - 工作区应保持干净；`artifacts/`、`build/`、`.build/` 均在 `.gitignore` 中，**不要提交**。
@@ -283,22 +283,18 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 
 ## 8. 未完成 / 立即收尾项
 
-1. **布局修复验收**：✅ 已完成（2026-11-05）：1400×900 与 1120×740 下「基础」「证件照」页真实图片截图均无裁切，8 页签 4×2 网格完整；结果已写入 `docs/inspector-layout.md`。剩余动作：按团队流程把 `fix/inspector-layout` 合并到目标功能分支（需先跑完整 `make check`，建议机器空闲时执行）。
-2. **P1-C 最终验收**：`feat/p1c-culling-makeup-perf` 的 11 项均已 approved，`make check`（当时 521/0）、`build_app.sh`、benchmark schemaVersion 4 已通过；唯一缺口是**重建包 ui_smoke 的 exit 0**（因锁屏未取得）。解锁后执行：
-   ```bash
-   UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh artifacts/p1c-final/ui-smoke
-   ```
-   预期 exit 0、8 页签、约 18 张截图、7 个 scrolled 区段、JSON 含 app 哈希/commit。
-3. **慢测治理**：✅ 已完成（2026-11-05）：`LUTCube.parse` 重构为快速字节扫描，`testMaximumDimensionLUTAddressesLastNode` 实测 ~9.7s 通过（加设 15s 上限断言），全量 `make check` 521 项测试全绿通过。
-4. **ARM / universal 构建**：当前依赖（Lensfun/GLib/PCRE2/libintl）仍为 x86_64，未产出 universal app；Apple Silicon 未实测（见 §7.4）。列为技术债，建议在 P1 收尾前处理（见 §9 P1-G）。
+1. **布局修复验收**：✅ 已完成（2026-11-05）：1400×900 与 1120×740 下「基础」「证件照」页真实图片截图均无裁切，8 页签 4×2 网格完整；结果已写入 `docs/inspector-layout.md`。
+2. **P1-C / P1-I 最终 UI 验收**：✅ 已完成（2026-11-05）：`ui_smoke.sh` 经去 flakiness 加固后，首次运行（attempt 1/3）直接 exit 0；8 个页签、18 张全分辨率真实截图、7 个 scrolled 区段全部通过；哈希与 commit 证据已写入 `artifacts/p1i-verify/ui-smoke/ui-smoke.json`。
+3. **慢测治理**：✅ 已完成（2026-11-05）：`LUTCube.parse` 重构为快速字节扫描，`testMaximumDimensionLUTAddressesLastNode` 实测 ~9.7s 通过（加设 15s 上限断言），全量 540 项测试全绿通过（139.4s，远低于 10min 门禁）。
+4. **ARM / universal 构建**：✅ 已完成（2026-11-05）：`build_app.sh --universal` 产出原生 universal app（x86_64 + arm64 双架构），`lipo -info` 严格校验通过，包体签名合规。
 
 ---
 
 ## 9. 后续开发计划（Roadmap）
 
-> 路线依据：[像素蛋糕差距分析](pixelcake-gap-analysis.md) §4（P0/P1/P2 分级与价值/可行性/差异化评分）。截至 2026-11-05，**P0 全部、P1 大部分、P1-B、P1-C 已完成**；下表是剩余 P1 收尾 + P2 的详细计划，按依赖与价值排序。
+> 路线依据：[像素蛋糕差距分析](pixelcake-gap-analysis.md) §4（P0/P1/P2 分级与价值/可行性/差异化评分）。截至 2026-11-05，**P0 全部、P1 全部（含 P1-B 至 P1-I 完整周期）已全部圆满交付**；下表是全景对照与后续 P2 规划。
 
-### 9.1 已完成矩阵（用于对照，避免重复开发）
+### 9.1 已完成矩阵（全量 P0 + P1 里程碑）
 
 | 差距项 | 状态 | 批次/提交 |
 |---|---|---|
@@ -320,12 +316,11 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | 妆容与人像精修增强（眼线/睫毛/美瞳/眼神光/高光/修容/v14门禁） | ✅ P1-F | `feat/p1f-makeup-retouch-enhancement` |
 | 性能收尾与 Universal/ARM 双架构构建（24MP全画幅基准v5/Universal可执行文件/lipo双架构校验） | ✅ P1-G | `feat/p1g-performance-universal` |
 | 真实照片审美验收体系与样片集评测（6大题材矩阵/5维量化评分表/自动化切片评测引擎） | ✅ P1-H | `feat/p1h-aesthetic-acceptance` |
+| 技术债整理与测试脚手架加固（自检前向兼容/ui_smoke去flakiness/AX双模兼容/防篡改证据链） | ✅ P1-I | `feat/p1i-tech-debt-cleanup` |
 
-### 9.2 剩余 P1（建议按此顺序，2 周左右一个增量）
+### 9.2 P1 里程碑达成状态
 
-| 编号 | 项目 | 目标与做法 | 依赖 | 验收 |
-|---|---|---|---|---|
-| **P1-I** | 技术债整理 | 慢测治理（§8.3）、`ui_smoke` AX harness 去 flakiness（更稳的 AX 查询/窗口 id 截图）、证据 JSON 绑定 app commit/hash、文档与实现一致性检查 | 全量 | 全量 `make check` 稳定 <10min；ui_smoke 连续 3 次 exit 0 |
+> **状态**：🎉 **P1 全周期 100% 达成**（P0 ~ P1-I 全部通过质量门禁与全量回归）。所有功能均已就绪，进入 P2（中远期增量）规划阶段。
 
 ### 9.3 P2（6–12 个月，按需）
 

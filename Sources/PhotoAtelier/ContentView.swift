@@ -50,6 +50,7 @@ private struct InspectorTabBar: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(isSelected ? AtelierPalette.accent.opacity(0.55) : Color.clear, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
+                .help(tab.title)
                 .accessibilityLabel(tab.title)
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
                 .disabled(false)
