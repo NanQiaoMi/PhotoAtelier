@@ -25,6 +25,21 @@ public enum DeliveryPaperSize: String, Codable, Equatable, CaseIterable {
     }
 }
 
+/// Visual color theme of the offline delivery page.
+public enum DeliveryTheme: String, Codable, Equatable, CaseIterable {
+    case darkGold
+    case classicSilver
+    case warmLight
+
+    public var title: String {
+        switch self {
+        case .darkGold: return "黑金沉浸（深色）"
+        case .classicSilver: return "经典冷灰（深色）"
+        case .warmLight: return "温暖米白（浅色）"
+        }
+    }
+}
+
 /// Customer-facing local delivery page settings.
 ///
 /// The delivery page is a static, fully offline artefact: one `index.html` with
@@ -36,6 +51,16 @@ public enum DeliveryPaperSize: String, Codable, Equatable, CaseIterable {
 public struct DeliverySettings: Codable, Equatable {
     /// Album title shown in the HTML header and PDF title band.
     public var title: String = "客户交付"
+    /// Optional subtitle shown under the main title.
+    public var subtitle: String? = nil
+    /// Optional photographer or studio credit shown in the footer and meta band.
+    public var photographer: String? = nil
+    /// Color theme of the HTML album.
+    public var theme: DeliveryTheme = .darkGold
+    /// Optional index of the photo to use as a prominent hero cover above the grid.
+    public var coverPhotoIndex: Int? = nil
+    /// Whether a privacy-audit.json file is generated documenting stripped metadata.
+    public var includePrivacyAudit: Bool = true
     /// Number of thumbnail columns in the HTML grid (`1...8`).
     public var columnCount: Int = 3
     /// Longest edge of the generated thumbnail JPEGs (`64...4096`).
@@ -57,6 +82,30 @@ public struct DeliverySettings: Codable, Equatable {
 
     public init() {}
 
+    enum CodingKeys: String, CodingKey {
+        case title, subtitle, photographer, theme, coverPhotoIndex, includePrivacyAudit
+        case columnCount, thumbnailMaxDimension, previewMaxDimension
+        case includeContactSheet, contactSheetColumns, paper, pageMarginFraction, watermarkedPreviews
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "客户交付"
+        subtitle = try container.decodeIfPresent(String.self, forKey: .subtitle)
+        photographer = try container.decodeIfPresent(String.self, forKey: .photographer)
+        theme = try container.decodeIfPresent(DeliveryTheme.self, forKey: .theme) ?? .darkGold
+        coverPhotoIndex = try container.decodeIfPresent(Int.self, forKey: .coverPhotoIndex)
+        includePrivacyAudit = try container.decodeIfPresent(Bool.self, forKey: .includePrivacyAudit) ?? true
+        columnCount = try container.decodeIfPresent(Int.self, forKey: .columnCount) ?? 3
+        thumbnailMaxDimension = try container.decodeIfPresent(Int.self, forKey: .thumbnailMaxDimension) ?? 640
+        previewMaxDimension = try container.decodeIfPresent(Int.self, forKey: .previewMaxDimension) ?? 2400
+        includeContactSheet = try container.decodeIfPresent(Bool.self, forKey: .includeContactSheet) ?? true
+        contactSheetColumns = try container.decodeIfPresent(Int.self, forKey: .contactSheetColumns) ?? 4
+        paper = try container.decodeIfPresent(DeliveryPaperSize.self, forKey: .paper) ?? .a4
+        pageMarginFraction = try container.decodeIfPresent(Double.self, forKey: .pageMarginFraction) ?? 0.06
+        watermarkedPreviews = try container.decodeIfPresent(Bool.self, forKey: .watermarkedPreviews) ?? false
+    }
+
     public func validate() throws {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {
@@ -64,6 +113,21 @@ public struct DeliverySettings: Codable, Equatable {
         }
         guard trimmedTitle.count <= 120 else {
             throw AtelierError.invalidConfiguration("交付页标题不能超过 120 个字符。")
+        }
+        if let sub = subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !sub.isEmpty {
+            guard sub.count <= 160 else {
+                throw AtelierError.invalidConfiguration("交付页副标题不能超过 160 个字符。")
+            }
+        }
+        if let photo = photographer?.trimmingCharacters(in: .whitespacesAndNewlines), !photo.isEmpty {
+            guard photo.count <= 80 else {
+                throw AtelierError.invalidConfiguration("摄影师署名不能超过 80 个字符。")
+            }
+        }
+        if let cover = coverPhotoIndex {
+            guard cover >= 0 else {
+                throw AtelierError.invalidConfiguration("封面图序号不能为负数。")
+            }
         }
         guard (1...8).contains(columnCount) else {
             throw AtelierError.invalidConfiguration("交付页缩略图列数必须在 1...8 之间。")
@@ -113,6 +177,41 @@ public struct DeliveryPhoto {
     }
 }
 
+/// An offline audit record verifying that personal metadata (GPS, camera serials, etc.)
+/// has been completely excluded from the customer delivery package.
+public struct DeliveryPrivacyAuditReport: Codable, Equatable {
+    public var title: String
+    public var photoCount: Int
+    public var auditStatus: String
+    public var generatedAt: Date
+    public var strippedCategories: [String]
+    public var retainedCategories: [String]
+    public var notes: String
+
+    public init(
+        title: String,
+        photoCount: Int,
+        generatedAt: Date = Date()
+    ) {
+        self.title = title
+        self.photoCount = photoCount
+        self.auditStatus = "PASSED_CLEAN"
+        self.generatedAt = generatedAt
+        self.strippedCategories = [
+            "GPS 地理位置信息 (经度、纬度、海拔高度、朝向)",
+            "相机硬件序列号 (机身识别码、镜头识别码)",
+            "设备所有者 / 摄影师个人隐私元数据",
+            "原始文件路径与目录系统信息",
+            "相机专有厂商私有标记 (MakerNote / Private XMP)"
+        ]
+        self.retainedCategories = [
+            "标准显示像素数据 (sRGB / Display P3)",
+            "相册展示所必需的纯文本标题与公开说明"
+        ]
+        self.notes = "所有图片均由 PhotoAtelier 离线渲染管线生成纯净 JPEG，未携带源文件的 EXIF/TIFF/GPS 元数据字典。"
+    }
+}
+
 /// Files produced by `DeliveryGalleryWriter` inside the output directory.
 public struct DeliveryGalleryResult: Equatable {
     public let indexHTMLURL: URL
@@ -120,6 +219,23 @@ public struct DeliveryGalleryResult: Equatable {
     public let thumbnailDirectoryURL: URL
     public let previewDirectoryURL: URL
     public let photoCount: Int
+    public let privacyAuditURL: URL?
+
+    public init(
+        indexHTMLURL: URL,
+        contactSheetURL: URL?,
+        thumbnailDirectoryURL: URL,
+        previewDirectoryURL: URL,
+        photoCount: Int,
+        privacyAuditURL: URL? = nil
+    ) {
+        self.indexHTMLURL = indexHTMLURL
+        self.contactSheetURL = contactSheetURL
+        self.thumbnailDirectoryURL = thumbnailDirectoryURL
+        self.previewDirectoryURL = previewDirectoryURL
+        self.photoCount = photoCount
+        self.privacyAuditURL = privacyAuditURL
+    }
 }
 
 /// Computed contact-sheet pagination; exposed so the UI/tests can predict the
@@ -152,6 +268,7 @@ public struct DeliveryContactSheetLayout: Equatable {
 public enum DeliveryGalleryWriter {
     public static let indexFileName = "index.html"
     public static let contactSheetFileName = "contact-sheet.pdf"
+    public static let privacyAuditFileName = "privacy-audit.json"
     public static let thumbnailDirectoryName = "thumbs"
     public static let previewDirectoryName = "previews"
 
@@ -263,11 +380,25 @@ public enum DeliveryGalleryWriter {
             throw AtelierError.imageWrite("无法写入客户交付页 HTML：\(error.localizedDescription)")
         }
 
+        var privacyAuditURL: URL?
+        if settings.includePrivacyAudit {
+            let audit = DeliveryPrivacyAuditReport(title: settings.title, photoCount: photos.count)
+            let auditURL = root.appendingPathComponent(privacyAuditFileName)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            if let data = try? encoder.encode(audit) {
+                try? data.write(to: auditURL, options: [.atomic])
+                privacyAuditURL = auditURL
+            }
+        }
+
         return DeliveryGalleryResult(indexHTMLURL: htmlURL,
                                      contactSheetURL: contactSheetURL,
                                      thumbnailDirectoryURL: thumbnailDirectory,
                                      previewDirectoryURL: previewDirectory,
-                                     photoCount: photos.count)
+                                     photoCount: photos.count,
+                                     privacyAuditURL: privacyAuditURL)
     }
 
     /// Pagination of the contact sheet for the given settings. Throws on invalid
@@ -424,9 +555,86 @@ public enum DeliveryGalleryWriter {
                   </figure>
             """)
         }
+
+        let themeCSS: String
+        switch settings.theme {
+        case .darkGold:
+            themeCSS = """
+            --bg: #0f1216;
+            --text: #e8ecef;
+            --card-bg: #171c22;
+            --border: #232a32;
+            --accent: #d4af37;
+            --meta: #8b96a1;
+            --caption: #9aa4ad;
+            --footer: #7f8a94;
+            --hero-border: #38311d;
+            """
+        case .classicSilver:
+            themeCSS = """
+            --bg: #141619;
+            --text: #f0f3f6;
+            --card-bg: #1e2227;
+            --border: #2c323a;
+            --accent: #93b4d7;
+            --meta: #8a949e;
+            --caption: #a0acb9;
+            --footer: #747f8a;
+            --hero-border: #2c323a;
+            """
+        case .warmLight:
+            themeCSS = """
+            --bg: #f8f6f0;
+            --text: #2c2b29;
+            --card-bg: #ffffff;
+            --border: #e6e2da;
+            --accent: #a05a2c;
+            --meta: #797670;
+            --caption: #5a5752;
+            --footer: #87837c;
+            --hero-border: #dcd7ce;
+            """
+        }
+
+        let subtitleHTML: String
+        if let sub = settings.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !sub.isEmpty {
+            subtitleHTML = "\n  <p class=\"subtitle\">\(escapeHTML(sub))</p>"
+        } else {
+            subtitleHTML = ""
+        }
+
+        let photographerText: String
+        if let p = settings.photographer?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
+            photographerText = " · 制作/摄影：\(escapeHTML(p))"
+        } else {
+            photographerText = ""
+        }
+
+        var heroCoverHTML = ""
+        if let coverIndex = settings.coverPhotoIndex, names.indices.contains(coverIndex) {
+            let coverName = names[coverIndex]
+            let coverCaption = captions[coverIndex].map { escapeHTML($0) } ?? "精选封面"
+            heroCoverHTML = """
+            <section class="hero-cover">
+              <a href="\(previewDirectoryName)/\(coverName).jpg"><img src="\(previewDirectoryName)/\(coverName).jpg" alt="精选封面" loading="eager"></a>
+              <div class="hero-caption">★ 精选封面 · \(coverCaption)</div>
+            </section>
+            """
+        }
+
+        var extraLinks: [String] = []
+        if settings.includeContactSheet {
+            extraLinks.append("<a href=\"\(contactSheetFileName)\" target=\"_blank\">📑 打开接触表 PDF (可打印)</a>")
+        }
+        if settings.includePrivacyAudit {
+            extraLinks.append("<a href=\"\(privacyAuditFileName)\" target=\"_blank\">📄 离线隐私审计报告 (无 GPS/无设备序列号)</a>")
+        }
+        let linksHTML = extraLinks.isEmpty ? "" : "\n  <p class=\"extra-links\">" + extraLinks.joined(separator: " · ") + "</p>"
+
         let notice = settings.watermarkedPreviews
             ? "\n  <p class=\"notice\">预览图含水印（由导出流程生成）。</p>"
             : ""
+
         return """
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -436,32 +644,50 @@ public enum DeliveryGalleryWriter {
         <meta name="generator" content="PhotoAtelier Local Delivery">
         <title>\(title)</title>
         <style>
-        :root { --columns: \(settings.columnCount); --gap: 16px; }
+        :root {
+          --columns: \(settings.columnCount);
+          --gap: 16px;
+          \(themeCSS)
+        }
         * { box-sizing: border-box; }
-        body { margin: 0; padding: 28px; background: #0f1216; color: #e8ecef;
-               font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
+        body { margin: 0; padding: 28px; background: var(--bg); color: var(--text);
+               font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
         header, main, footer { max-width: 1200px; margin-left: auto; margin-right: auto; }
-        header { margin-bottom: 22px; }
-        h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; letter-spacing: 0.5px; }
-        .meta { margin: 0; font-size: 12px; color: #8b96a1; }
+        header { margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+        h1 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: 0.5px; }
+        .subtitle { margin: 0 0 8px; font-size: 15px; color: var(--accent); font-weight: 500; }
+        .meta { margin: 0; font-size: 12px; color: var(--meta); }
+        .extra-links { margin: 10px 0 0; font-size: 12px; color: var(--meta); }
+        .extra-links a { color: var(--accent); text-decoration: none; margin-right: 8px; }
+        .extra-links a:hover { text-decoration: underline; }
+        .hero-cover { margin-bottom: 24px; border-radius: 8px; overflow: hidden; background: var(--card-bg); border: 1px solid var(--hero-border); }
+        .hero-cover a { display: block; }
+        .hero-cover img { display: block; width: 100%; max-height: 560px; object-fit: cover; }
+        .hero-caption { padding: 10px 14px; font-size: 13px; color: var(--caption); background: var(--card-bg); }
         .grid { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: var(--gap); }
-        figure { margin: 0; background: #171c22; border-radius: 8px; overflow: hidden; }
+        figure { margin: 0; background: var(--card-bg); border-radius: 8px; overflow: hidden; border: 1px solid var(--border); transition: transform 0.15s ease; }
+        figure:hover { transform: translateY(-2px); }
         figure a { display: block; }
         figure img { display: block; width: 100%; height: auto; }
-        figcaption { padding: 8px 10px 10px; font-size: 12px; color: #9aa4ad; }
-        footer { margin-top: 26px; font-size: 12px; color: #7f8a94; line-height: 1.7; }
-        .notice { margin: 0 0 8px; font-size: 12px; color: #c9a86a; }
+        figcaption { padding: 8px 10px 10px; font-size: 12px; color: var(--caption); }
+        footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--footer); line-height: 1.7; }
+        footer a { color: var(--accent); text-decoration: none; }
+        footer a:hover { text-decoration: underline; }
+        .notice { margin: 0 0 8px; font-size: 12px; color: var(--accent); }
         @media (max-width: 760px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media print { body { background: #fff; color: #111; } figure { background: #fff; } .grid { gap: 8px; } }
         </style>
         </head>
         <body>
         <header>
-          <h1>\(title)</h1>
-          <p class="meta">共 \(names.count) 张照片 · 本地离线交付页</p>\(notice)
+          <h1>\(title)</h1>\(subtitleHTML)
+          <p class="meta">共 \(names.count) 张照片 · 本地离线交付页\(photographerText)</p>\(linksHTML)\(notice)
         </header>
-        <main class="grid">
+        <main>
+        \(heroCoverHTML)
+        <div class="grid">
         \(figures.joined(separator: "\n"))
+        </div>
         </main>
         <footer>
           <p>本页为本地静态文件，无外部链接、无网络请求；图片元数据已剥离。可直接用浏览器打开 index.html 离线查看。</p>

@@ -326,10 +326,13 @@ public final class BatchProcessor {
                     let htmlURL = directory.appendingPathComponent(result.indexHTMLURL.lastPathComponent)
                     let contactSheetURL = result.contactSheetURL
                         .map { directory.appendingPathComponent($0.lastPathComponent) }
+                    let privacyAuditURL = result.privacyAuditURL
+                        .map { directory.appendingPathComponent($0.lastPathComponent) }
                     finalManifest.deliveryPage = BatchDeliveryPageRecord(
                         directory: relativePath(of: directory, under: output) ?? directory.lastPathComponent,
                         html: relativePath(of: htmlURL, under: output) ?? htmlURL.lastPathComponent,
                         contactSheet: contactSheetURL.flatMap { relativePath(of: $0, under: output) },
+                        privacyAudit: privacyAuditURL.flatMap { relativePath(of: $0, under: output) },
                         photoCount: result.photoCount,
                         settings: deliverySettings
                     )
@@ -544,6 +547,7 @@ private struct BatchDeliveryPageRecord: Codable {
     var directory: String
     var html: String
     var contactSheet: String?
+    var privacyAudit: String?
     var photoCount: Int
     var settings: DeliverySettings
 }
@@ -640,7 +644,7 @@ private func validateFileNameTemplate(_ template: String) throws {
 
 private func expandFileNameTemplate(_ template: String, name: String, suffix: String,
                                     index: Int) throws -> String {
-    var expanded = template
+    let expanded = template
         .replacingOccurrences(of: "{name}", with: name)
         .replacingOccurrences(of: "{suffix}", with: suffix)
         .replacingOccurrences(of: "{index}", with: String(index))

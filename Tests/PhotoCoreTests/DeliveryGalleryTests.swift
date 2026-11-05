@@ -398,6 +398,210 @@ final class DeliveryGalleryTests: XCTestCase {
         XCTAssertEqual(try imageSize(output.appendingPathComponent("thumbs/01.jpg")).height, 240)
     }
 
+    // MARK: - P1-E Delivery Enhancements
+
+    func testDeliveryThemesRenderCustomCSSVariables() throws {
+        let root = try makeTemporaryDirectory()
+        let images = [makeImage(width: 400, height: 300, color: (0.5, 0.5, 0.5))]
+
+        // Test 1: darkGold
+        var settings1 = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settings1.theme = .darkGold
+        let res1 = try DeliveryGalleryWriter.write(images: images, settings: settings1,
+                                                   outputDirectory: root.appendingPathComponent("theme_gold"))
+        let html1 = try readText(res1.indexHTMLURL)
+        XCTAssertTrue(html1.contains("--bg: #0f1216"), "darkGold 主题背景变量应为 #0f1216")
+        XCTAssertTrue(html1.contains("--accent: #d4af37"), "darkGold 主题强调色应为 #d4af37")
+
+        // Test 2: classicSilver
+        var settings2 = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settings2.theme = .classicSilver
+        let res2 = try DeliveryGalleryWriter.write(images: images, settings: settings2,
+                                                   outputDirectory: root.appendingPathComponent("theme_silver"))
+        let html2 = try readText(res2.indexHTMLURL)
+        XCTAssertTrue(html2.contains("--bg: #141619"), "classicSilver 主题背景变量应为 #141619")
+        XCTAssertTrue(html2.contains("--accent: #93b4d7"), "classicSilver 主题强调色应为 #93b4d7")
+
+        // Test 3: warmLight
+        var settings3 = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settings3.theme = .warmLight
+        let res3 = try DeliveryGalleryWriter.write(images: images, settings: settings3,
+                                                   outputDirectory: root.appendingPathComponent("theme_warm"))
+        let html3 = try readText(res3.indexHTMLURL)
+        XCTAssertTrue(html3.contains("--bg: #f8f6f0"), "warmLight 主题背景变量应为 #f8f6f0")
+        XCTAssertTrue(html3.contains("--accent: #a05a2c"), "warmLight 主题强调色应为 #a05a2c")
+    }
+
+    func testDeliveryHeroCoverSection() throws {
+        let root = try makeTemporaryDirectory()
+        let images = [
+            makeImage(width: 600, height: 400, color: (0.9, 0.1, 0.1)),
+            makeImage(width: 400, height: 600, color: (0.1, 0.9, 0.1))
+        ]
+
+        // 1. With coverPhotoIndex = 0
+        var settingsWithCover = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settingsWithCover.coverPhotoIndex = 0
+        let resWithCover = try DeliveryGalleryWriter.write(images: images, settings: settingsWithCover,
+                                                           outputDirectory: root.appendingPathComponent("with_cover"))
+        let htmlWithCover = try readText(resWithCover.indexHTMLURL)
+        XCTAssertTrue(htmlWithCover.contains("class=\"hero-cover\""), "启用封面图时应生成 hero-cover 区域")
+        XCTAssertTrue(htmlWithCover.contains("previews/01.jpg"), "hero-cover 应引用首张预览图")
+
+        // 2. Without coverPhotoIndex
+        var settingsNoCover = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settingsNoCover.coverPhotoIndex = nil
+        let resNoCover = try DeliveryGalleryWriter.write(images: images, settings: settingsNoCover,
+                                                         outputDirectory: root.appendingPathComponent("no_cover"))
+        let htmlNoCover = try readText(resNoCover.indexHTMLURL)
+        XCTAssertFalse(htmlNoCover.contains("class=\"hero-cover\""), "未启用封面图时不应生成 hero-cover 区域")
+    }
+
+    func testDeliverySubtitleAndPhotographer() throws {
+        let root = try makeTemporaryDirectory()
+        let images = [makeImage(width: 400, height: 300, color: (0.4, 0.4, 0.4))]
+        var settings = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settings.title = "大理旅拍"
+        settings.subtitle = "风花雪月 <2026>"
+        settings.photographer = "摄影师阿木 & Studio"
+
+        let res = try DeliveryGalleryWriter.write(images: images, settings: settings,
+                                                  outputDirectory: root.appendingPathComponent("meta_test"))
+        let html = try readText(res.indexHTMLURL)
+        XCTAssertTrue(html.contains("<p class=\"subtitle\">风花雪月 &lt;2026&gt;</p>"), "副标题应渲染且进行 HTML 转义")
+        XCTAssertTrue(html.contains("制作/摄影：摄影师阿木 &amp; Studio"), "摄影师署名应渲染且进行 HTML 转义")
+    }
+
+    func testDeliveryPrivacyAuditReportGeneration() throws {
+        let root = try makeTemporaryDirectory()
+        let images = [
+            makeImage(width: 500, height: 400, color: (0.3, 0.3, 0.3)),
+            makeImage(width: 500, height: 400, color: (0.6, 0.6, 0.6))
+        ]
+
+        // 1. With privacy audit enabled (default)
+        var settingsWithAudit = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settingsWithAudit.includePrivacyAudit = true
+        let resWithAudit = try DeliveryGalleryWriter.write(images: images, settings: settingsWithAudit,
+                                                           outputDirectory: root.appendingPathComponent("with_audit"))
+        XCTAssertNotNil(resWithAudit.privacyAuditURL)
+        let auditURL = resWithAudit.privacyAuditURL!
+        XCTAssertTrue(FileManager.default.fileExists(atPath: auditURL.path))
+
+        let auditData = try Data(contentsOf: auditURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let report = try decoder.decode(DeliveryPrivacyAuditReport.self, from: auditData)
+        XCTAssertEqual(report.photoCount, 2)
+        XCTAssertEqual(report.auditStatus, "PASSED_CLEAN")
+        XCTAssertTrue(report.strippedCategories.contains(where: { $0.contains("GPS") }))
+        XCTAssertTrue(report.strippedCategories.contains(where: { $0.contains("序列号") }))
+
+        // Check HTML link
+        let html = try readText(resWithAudit.indexHTMLURL)
+        XCTAssertTrue(html.contains("privacy-audit.json"))
+
+        // 2. With privacy audit disabled
+        var settingsNoAudit = standardSettings(columns: 2, thumbnail: 200, preview: 400)
+        settingsNoAudit.includePrivacyAudit = false
+        let noAuditDir = root.appendingPathComponent("no_audit")
+        let resNoAudit = try DeliveryGalleryWriter.write(images: images, settings: settingsNoAudit,
+                                                         outputDirectory: noAuditDir)
+        XCTAssertNil(resNoAudit.privacyAuditURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: noAuditDir.appendingPathComponent("privacy-audit.json").path))
+    }
+
+    func testDeliveryServerLifecycleAndPathTraversal() throws {
+        let root = try makeTemporaryDirectory()
+        let testDir = root.appendingPathComponent("server_site", isDirectory: true)
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+
+        let indexFile = testDir.appendingPathComponent("index.html")
+        let indexContent = "<!DOCTYPE html><html><body><h1>Atelier Delivery Server Test</h1></body></html>"
+        try indexContent.write(to: indexFile, atomically: true, encoding: .utf8)
+
+        let secretFile = root.appendingPathComponent("secret.txt")
+        try "SENSITIVE_SECRET".write(to: secretFile, atomically: true, encoding: .utf8)
+
+        let server = DeliveryServer()
+        XCTAssertFalse(server.isRunning)
+
+        try server.start(directory: testDir, preferredPort: 18880)
+        XCTAssertTrue(server.isRunning)
+        XCTAssertGreaterThan(server.port, 0)
+        XCTAssertNotNil(server.localURL)
+
+        guard let localURL = server.localURL else {
+            XCTFail("server.localURL must not be nil")
+            server.stop()
+            return
+        }
+
+        // Test 1: GET / or index.html should return 200 OK
+        let expect200 = expectation(description: "GET / returns 200 OK")
+        let task = URLSession.shared.dataTask(with: localURL) { data, response, error in
+            XCTAssertNil(error)
+            if let httpResp = response as? HTTPURLResponse {
+                XCTAssertEqual(httpResp.statusCode, 200)
+                XCTAssertTrue(httpResp.value(forHTTPHeaderField: "Content-Type")?.contains("text/html") ?? false)
+            }
+            if let data = data, let text = String(data: data, encoding: .utf8) {
+                XCTAssertTrue(text.contains("Atelier Delivery Server Test"))
+            }
+            expect200.fulfill()
+        }
+        task.resume()
+        wait(for: [expect200], timeout: 5.0)
+
+        // Test 2: GET non-existent file should return 404
+        let expect404 = expectation(description: "GET non-existent returns 404")
+        let notFoundURL = localURL.appendingPathComponent("missing.jpg")
+        let task404 = URLSession.shared.dataTask(with: notFoundURL) { _, response, error in
+            XCTAssertNil(error)
+            if let httpResp = response as? HTTPURLResponse {
+                XCTAssertEqual(httpResp.statusCode, 404)
+            }
+            expect404.fulfill()
+        }
+        task404.resume()
+        wait(for: [expect404], timeout: 5.0)
+
+        // Test 3: Path traversal protection
+        // A client sending raw GET /../secret.txt should be blocked with 403 Forbidden
+        let port = server.port
+        let clientFd = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(clientFd, 0)
+        if clientFd >= 0 {
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(port).bigEndian
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+
+            let connectRes = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(clientFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            XCTAssertEqual(connectRes, 0, "Socket connection to delivery server failed")
+
+            let rawRequest = "GET /../secret.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            _ = rawRequest.withCString { send(clientFd, $0, strlen($0), 0) }
+
+            var buffer = [CChar](repeating: 0, count: 1024)
+            let readBytes = recv(clientFd, &buffer, buffer.count - 1, 0)
+            close(clientFd)
+
+            XCTAssertGreaterThan(readBytes, 0)
+            let responseString = String(cString: buffer)
+            XCTAssertTrue(responseString.contains("403 Forbidden"), "路径穿越应返回 403 Forbidden")
+            XCTAssertFalse(responseString.contains("SENSITIVE_SECRET"), "不得泄露目录外机密文件")
+        }
+
+        // Test 4: Clean stop
+        server.stop()
+        XCTAssertFalse(server.isRunning)
+    }
+
     // MARK: - Helpers
 
     private func standardSettings(columns: Int, thumbnail: Int, preview: Int) -> DeliverySettings {
