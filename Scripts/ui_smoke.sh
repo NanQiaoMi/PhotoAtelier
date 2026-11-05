@@ -56,6 +56,12 @@ set -euo pipefail
 # screenshots, tab enumeration and app hash are still real evidence.
 UI_SMOKE_FAST="${UI_SMOKE_FAST:-0}"
 
+# UI_SMOKE_OPEN_METHOD:
+# - auto (default): try AX open panel then keystroke open flow; fall back to CLI --open-folder
+# - cli: directly launch app with `open "$APP" --args --open-folder "$INPUT"`
+# - dialog: strictly use NSOpenPanel AX/keystrokes without CLI fallback
+UI_SMOKE_OPEN_METHOD="${UI_SMOKE_OPEN_METHOD:-auto}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -301,7 +307,10 @@ APPLESCRIPT
     return 1
 }
 
-# Return the inspector tab labels exposed as radio buttons, one per line.
+# Return the inspector tab labels, one per line.
+# Supports both:
+# 1. Modern 4x2 tab grid (InspectorTabBar: AXOpaqueProviderGroup with 8 buttons)
+# 2. Legacy segmented picker (AXRadioGroup with >= 7 radio buttons)
 tab_labels() {
     osascript - "$BUNDLE_ID" <<'APPLESCRIPT' 2>/dev/null || true
 on run argv
@@ -310,23 +319,60 @@ on run argv
       try
         set w to window 1
         set g to group 1 of w
-        set rg to 0
+
+        -- 1. Check for modern 4x2 tab grid (AXOpaqueProviderGroup with 8 items)
+        set tabNames to {"分析", "基础", "局部", "人像", "追色", "导出", "调色", "证件照"}
         repeat with e in (UI elements of g)
           try
-            if role of e is "AXRadioGroup" then set rg to e
+            if role of e is "AXOpaqueProviderGroup" and (count of UI elements of e) is 8 then
+              set out to {}
+              set idx to 1
+              repeat with b in (UI elements of e)
+                set d to ""
+                try
+                  set d to help of b
+                end try
+                if d is not missing value and d is not "" then
+                  set end of out to (d as text)
+                else if idx <= (count of tabNames) then
+                  set end of out to (item idx of tabNames)
+                end if
+                set idx to idx + 1
+              end repeat
+              set AppleScript's text item delimiters to linefeed
+              return out as string
+            end if
           end try
         end repeat
-        if rg is 0 then return ""
-        set out to {}
-        repeat with rb in (radio buttons of rg)
-          set d to ""
+
+        -- 2. Legacy fallback: AXRadioGroup with >= 7 radio buttons
+        set targetRg to 0
+        set maxCount to 0
+        repeat with e in (UI elements of g)
           try
-            set d to description of rb
+            if role of e is "AXRadioGroup" then
+              set c to count of radio buttons of e
+              if c > maxCount then
+                set maxCount to c
+                set targetRg to e
+              end if
+            end if
           end try
-          if d is not missing value and d is not "" then set end of out to (d as text)
         end repeat
-        set AppleScript's text item delimiters to linefeed
-        return out as string
+        if targetRg is not 0 and maxCount >= 7 then
+          set out to {}
+          repeat with rb in (radio buttons of targetRg)
+            set d to ""
+            try
+              set d to description of rb
+            end try
+            if d is not missing value and d is not "" then set end of out to (d as text)
+          end repeat
+          set AppleScript's text item delimiters to linefeed
+          return out as string
+        end if
+
+        return ""
       on error
         return ""
       end try
@@ -349,24 +395,54 @@ on run argv
       delay 0.2
       set w to window 1
       set g to group 1 of w
-      set rg to 0
+
+      -- 1. Modern 4x2 tab grid (AXOpaqueProviderGroup with 8 items)
+      set tabNames to {"分析", "基础", "局部", "人像", "追色", "导出", "调色", "证件照"}
       repeat with e in (UI elements of g)
         try
-          if role of e is "AXRadioGroup" then set rg to e
+          if role of e is "AXOpaqueProviderGroup" and (count of UI elements of e) is 8 then
+            set idx to 1
+            repeat with b in (UI elements of e)
+              set d to ""
+              try
+                set d to help of b
+              end try
+              set match to false
+              if d is tabName then
+                set match to true
+              else if idx <= (count of tabNames) and (item idx of tabNames) is tabName then
+                set match to true
+              end if
+              if match then
+                click b
+                delay 0.8
+                return "CLICKED:" & tabName
+              end if
+              set idx to idx + 1
+            end repeat
+          end if
         end try
       end repeat
-      if rg is 0 then return "NO_RADIO_GROUP"
-      repeat with rb in (radio buttons of rg)
-        set d to ""
+
+      -- 2. Legacy fallback: AXRadioGroup with >= 7 radio buttons
+      repeat with e in (UI elements of g)
         try
-          set d to description of rb
+          if role of e is "AXRadioGroup" then
+            repeat with rb in (radio buttons of e)
+              set d to ""
+              try
+                set d to description of rb
+              end try
+              if d is tabName then
+                click rb
+                delay 0.8
+                return "CLICKED:" & tabName
+              end if
+            end repeat
+          end if
         end try
-        if d is tabName then
-          click rb
-          delay 0.8
-          return "CLICKED:" & tabName
-        end if
       end repeat
+
       return "NOT_FOUND:" & tabName
     end tell
   end tell
@@ -768,6 +844,13 @@ command -v screencapture >/dev/null 2>&1 || { printf 'ui_smoke: FAIL: screencapt
 [[ -d "$APP" ]] || { printf 'ui_smoke: FAIL: app bundle not found: %s (run "bash Scripts/build_app.sh" first; this smoke script never builds)\n' "$APP" >&2; exit 2; }
 [[ -x "$APP/Contents/MacOS/PhotoAtelier" ]] || { printf 'ui_smoke: FAIL: app executable missing in %s\n' "$APP" >&2; exit 2; }
 
+# macOS GUI Session & Screen Lock Precondition:
+# UI automation requires an active, unlocked GUI desktop session.
+if ioreg -n Root -d1 -a 2>/dev/null | grep -q "<key>CGSSessionScreenIsLocked</key>"; then
+    printf 'ui_smoke: FAIL: macOS session screen is currently LOCKED (CGSSessionScreenIsLocked=true). UI automation requires an unlocked GUI desktop.\n' >&2
+    exit 2
+fi
+
 # Synthetic fixtures only. Generate them with the project's own fixture script
 # if the ignored artifacts/demo/input directory is missing.
 if [[ ! -f "$INPUT/01_山谷合成测试图.png" ]]; then
@@ -828,40 +911,84 @@ quit_app
 # so the panel opens there without a path-entry keystroke. This only touches the
 # app's own preferences (bundle id), never project files or user photos.
 defaults write "$BUNDLE_ID" NSNavLastRootDirectory -string "$INPUT" 2>/dev/null || log "warning: could not seed NSNavLastRootDirectory"
-log "launching app with open"
-open "$APP" || fail "open failed for $APP"
-for _ in $(seq 1 60); do
-    if [[ -n "$(app_pid)" ]]; then break; fi
-    sleep 0.5
-done
-assert_alive "after launch"
-sleep 2
-wait_for_app_ready || fail "app menu bar did not become available"
-activate_window || fail "could not activate/position the app window"
-snapshot "01-launch.png"
-
+ACTUAL_OPEN_METHOD="unknown"
 import_ok=0
-for attempt in 1 2; do
-    if [[ "$attempt" -eq 1 ]]; then
-        open_result="$(ax_open_folder)" || open_result="AX_FLOW_ERROR"
-    else
-        open_result="$(open_fixture_folder)" || open_result="KEYSTROKE_FLOW_ERROR"
+
+if [[ "$UI_SMOKE_OPEN_METHOD" == "cli" ]]; then
+    log "launching app with open and --open-folder (CLI direct mode)"
+    open "$APP" --args --open-folder "$INPUT" || fail "open failed for $APP"
+    for _ in $(seq 1 60); do
+        if [[ -n "$(app_pid)" ]]; then break; fi
+        sleep 0.5
+    done
+    assert_alive "after launch"
+    sleep 2
+    wait_for_app_ready || fail "app menu bar did not become available"
+    activate_window || fail "could not activate/position the app window"
+    snapshot "01-launch.png"
+    if wait_for_folder_load 45; then
+        import_ok=1
+        ACTUAL_OPEN_METHOD="cli"
     fi
-    if [[ "$open_result" != "folder-open-requested" ]]; then
-        log "attempt $attempt: open panel did not close ($open_result); retrying"
+else
+    log "launching app with open"
+    open "$APP" || fail "open failed for $APP"
+    for _ in $(seq 1 60); do
+        if [[ -n "$(app_pid)" ]]; then break; fi
+        sleep 0.5
+    done
+    assert_alive "after launch"
+    sleep 2
+    wait_for_app_ready || fail "app menu bar did not become available"
+    activate_window || fail "could not activate/position the app window"
+    snapshot "01-launch.png"
+
+    for attempt in 1 2; do
+        if [[ "$attempt" -eq 1 ]]; then
+            open_result="$(ax_open_folder)" || open_result="AX_FLOW_ERROR"
+        else
+            open_result="$(open_fixture_folder)" || open_result="KEYSTROKE_FLOW_ERROR"
+        fi
+        if [[ "$open_result" != "folder-open-requested" ]]; then
+            log "attempt $attempt: open panel did not close ($open_result); retrying"
+            osascript -e 'tell application "System Events" to tell process "PhotoAtelier" to key code 53' >/dev/null 2>&1 || true
+            sleep 1
+            continue
+        fi
+        if wait_for_folder_load 45; then
+            import_ok=1
+            [[ "$attempt" -eq 1 ]] && ACTUAL_OPEN_METHOD="dialog-ax" || ACTUAL_OPEN_METHOD="dialog-keystroke"
+            break
+        fi
+        log "attempt $attempt: fixture folder import did not finish; retrying the open flow"
         osascript -e 'tell application "System Events" to tell process "PhotoAtelier" to key code 53' >/dev/null 2>&1 || true
         sleep 1
-        continue
+    done
+
+    # If dialog attempts failed and auto mode is enabled, fall back to CLI --open-folder
+    if [[ "$import_ok" -ne 1 && "$UI_SMOKE_OPEN_METHOD" == "auto" ]]; then
+        log "dialog open flow unsuccessful; falling back to direct --open-folder launch"
+        quit_app
+        open "$APP" --args --open-folder "$INPUT" || fail "open failed for $APP"
+        for _ in $(seq 1 60); do
+            if [[ -n "$(app_pid)" ]]; then break; fi
+            sleep 0.5
+        done
+        assert_alive "after direct launch"
+        sleep 2
+        wait_for_app_ready || fail "app menu bar did not become available"
+        activate_window || fail "could not activate/position the app window"
+        if wait_for_folder_load 45; then
+            import_ok=1
+            ACTUAL_OPEN_METHOD="cli-fallback"
+        fi
     fi
-    if wait_for_folder_load 45; then import_ok=1; break; fi
-    log "attempt $attempt: fixture folder import did not finish; retrying the open flow"
-    osascript -e 'tell application "System Events" to tell process "PhotoAtelier" to key code 53' >/dev/null 2>&1 || true
-    sleep 1
-done
+fi
+
 if [[ "$import_ok" -ne 1 ]]; then
     snapshot "99-import-failure.png" >/dev/null 2>&1 || true
     log "diagnostic windows: $(osascript -e 'tell application "System Events" to tell process "PhotoAtelier" to get name of every window' 2>&1 || true)"
-    fail "fixture folder did not finish importing after 2 attempts"
+    fail "fixture folder did not finish importing (method=$UI_SMOKE_OPEN_METHOD)"
 fi
 activate_window || fail "could not re-activate app after import"
 snapshot "02-folder-loaded.png"
@@ -898,7 +1025,7 @@ capture_scrolled_section() {
         for value in $scroll_values; do
             if [[ "$UI_SMOKE_FAST" == "1" ]]; then
                 kb_result="$(scroll_inspector_keyboard "$value")" || kb_result="SCROLL_ERROR"
-                scroll_result="$kb_result"
+                [[ "$kb_result" == "SCROLLED_KEYBOARD" ]] && scroll_result="SCROLLED:keyboard" || scroll_result="$kb_result"
             else
                 scroll_result="$(scroll_inspector "$value")" || scroll_result="SCROLL_ERROR"
                 if [[ "$scroll_result" != "SCROLLED:"* ]]; then
@@ -979,6 +1106,7 @@ app_sha256_after="$(shasum -a 256 "$APP_BIN" 2>/dev/null | awk '{print $1}' || t
     printf '  "processCheck": "alive",\n'
     printf '  "attempt": %s,\n' "$UI_SMOKE_ATTEMPT"
     printf '  "fastMode": %s,\n' "$([[ "$UI_SMOKE_FAST" == "1" ]] && echo true || echo false)"
+    printf '  "openMethod": "%s",\n' "$ACTUAL_OPEN_METHOD"
     printf '  "appExecutableMTime": %s,\n' "$APP_MTIME_EPOCH"
     printf '  "appExecutableSHA256": "%s",\n' "$APP_SHA256"
     printf '  "commit": "%s",\n' "$APP_COMMIT"

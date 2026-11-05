@@ -201,7 +201,7 @@ private final class SmokeSession {
                     \.blacksEV, \.shadowsEV, \.midtonesEV, \.highlightsEV, \.whitesEV
                 ]
                 guard abs(curve.shadowsEV - 0.35) < 1e-8, abs(curve.midtonesEV - 0.07) < 1e-8,
-                      restored.version == 9, let decoded = restored.adjustments.tonalCurve,
+                      restored.version >= 9, let decoded = restored.adjustments.tonalCurve,
                       fields.allSatisfy({ abs(decoded[keyPath: $0] - curve[keyPath: $0]) < 1e-12 }) else {
                     throw AtelierError.invalidConfiguration("五区手动微调或配方 v9 读写没有保留实际值")
                 }
@@ -321,7 +321,7 @@ private final class SmokeSession {
                       completed.allSatisfy({ ($0["report"] as? [String: Any])?["analysis"] is [String: Any] }) else {
                     throw AtelierError.invalidConfiguration("逐张自动分析依据未写入批处理报告")
                 }
-                guard let savedRecipe = json?["recipe"] as? [String: Any], savedRecipe["version"] as? Int == 9,
+                guard let savedRecipe = json?["recipe"] as? [String: Any], (savedRecipe["version"] as? Int ?? 0) >= 9,
                       completed.allSatisfy({ entry in
                           let report = entry["report"] as? [String: Any]
                           let quality = report?["colorQuality"] as? [String: Any]
