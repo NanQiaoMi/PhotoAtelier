@@ -94,14 +94,41 @@ public struct UndoHistory {
         public var snapshot: UndoSnapshot
         /// Coalescing key of the edit that produced this entry.
         public var key: String
-        public init(snapshot: UndoSnapshot, key: String) {
+        public var timestamp: Date
+        public var title: String
+
+        public init(snapshot: UndoSnapshot, key: String, timestamp: Date = Date(), title: String? = nil) {
             self.snapshot = snapshot
             self.key = key
+            self.timestamp = timestamp
+            self.title = title ?? UndoHistory.humanReadableTitle(for: key)
         }
     }
 
     /// Key used for the pre-edit baseline state, so the first ⌘Z returns to it.
     public static let initialKey = "__initial__"
+
+    public static func humanReadableTitle(for key: String) -> String {
+        if key == initialKey { return "原始状态" }
+        if key.starts(with: "basic.exposure") { return "调整曝光" }
+        if key.starts(with: "basic.temp") || key.starts(with: "basic.tint") { return "调整白平衡" }
+        if key.starts(with: "basic.contrast") { return "调整对比度" }
+        if key.starts(with: "basic.saturation") { return "调整饱和度" }
+        if key.starts(with: "basic.highlights") || key.starts(with: "basic.shadows") { return "调整高光/阴影" }
+        if key.starts(with: "curve.") { return "调整色调曲线" }
+        if key.starts(with: "look.lut") { return "切换色彩风格" }
+        if key.starts(with: "look.") { return "风格质感微调" }
+        if key.starts(with: "geometry.") { return "几何与透视校正" }
+        if key.starts(with: "lens.") { return "镜头畸变校正" }
+        if key.starts(with: "mask.") { return "局部蒙版调节" }
+        if key.starts(with: "portrait.") { return "人像精修/美型" }
+        if key.starts(with: "makeup.") { return "AI 妆容" }
+        if key.starts(with: "colorTools.") { return "高级调色" }
+        if key.starts(with: "repair.") { return "修复画笔" }
+        if key.starts(with: "idPhoto.") { return "证件照与背景" }
+        if key.starts(with: "referenceColor") { return "AI 追色" }
+        return "调整参数"
+    }
 
     public let capacity: Int
     public let mergeInterval: TimeInterval
@@ -140,10 +167,11 @@ public struct UndoHistory {
         if !entries.isEmpty, entries[entries.count - 1].key == key,
            let lastTime = lastPushTime, moment.timeIntervalSince(lastTime) <= mergeInterval {
             entries[entries.count - 1].snapshot = snapshot
+            entries[entries.count - 1].timestamp = moment
             lastPushTime = moment
             return true
         }
-        entries.append(Entry(snapshot: snapshot, key: key))
+        entries.append(Entry(snapshot: snapshot, key: key, timestamp: moment))
         lastPushTime = moment
         if entries.count > capacity {
             entries.removeFirst(entries.count - capacity)
@@ -169,6 +197,15 @@ public struct UndoHistory {
     public mutating func redo() -> UndoSnapshot? {
         guard canRedo else { return nil }
         currentIndex += 1
+        lastPushTime = nil
+        return snapshot(at: currentIndex)
+    }
+
+    /// Directly jumps to a specific snapshot in the history stack.
+    @discardableResult
+    public mutating func jumpTo(index: Int) -> UndoSnapshot? {
+        guard entries.indices.contains(index) else { return nil }
+        currentIndex = index
         lastPushTime = nil
         return snapshot(at: currentIndex)
     }

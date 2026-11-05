@@ -31,6 +31,25 @@ struct ReferenceColorPanel: View {
                     .font(.system(size: 10))
                     .buttonStyle(.bordered)
                     .disabled(model.batchRunning || model.referenceColorBusy)
+                if model.isReferencePinned {
+                    Button("使用钉住参考图") { model.applyPinnedReference() }
+                        .font(.system(size: 10))
+                        .buttonStyle(.bordered)
+                        .disabled(model.batchRunning || model.referenceColorBusy)
+                }
+                if settings != nil, model.lastReferenceColorURL != nil {
+                    Button(model.isReferencePinned ? "取消钉住" : "📌 钉住此参考图") {
+                        if model.isReferencePinned {
+                            model.unpinReference()
+                        } else {
+                            model.pinCurrentReference()
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.accent)
+                    .disabled(model.batchRunning)
+                }
                 Button("清除") { model.clearReferenceColor() }
                     .font(.system(size: 10))
                     .buttonStyle(.plain)

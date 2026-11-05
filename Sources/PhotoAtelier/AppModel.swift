@@ -68,6 +68,15 @@ final class AppModel: ObservableObject {
     @Published var outputRoot: URL?
     @Published var photos: [PhotoItem] = []
     @Published var selectedID: String?
+    @Published var selectedIDs: Set<String> = []
+
+    // P1-D: Persistent non-destructive attribute library & pinned reference storage
+    let libraryIndex = PhotoLibraryIndex()
+    let referencePinStorage = ReferencePinStorage()
+    @Published var isReferencePinned: Bool = false
+    private(set) var lastReferenceColorURL: URL?
+    private var currentCatalog: FolderCatalog?
+    private var catalogSaveWorkItem: DispatchWorkItem?
 
     // P1-C culling session state: ratings/rejections/quality reports live on
     // `PhotoItem` and are deliberately never written to recipes or disk.
@@ -313,6 +322,7 @@ final class AppModel: ObservableObject {
         self.libraryRootOverride = libraryRoot
         self.preferences = preferences
         self.rememberedSpaces = preferences.dictionary(forKey: "lutColorSpaces") as? [String: String] ?? [:]
+        self.isReferencePinned = referencePinStorage.hasPinnedReference
         nativeInspection = NativeInspectionController(queue: previewQueue)
         stylePreviews = StylePreviewController(queue: previewQueue)
         lutOptions = [LUTOption(id: "none", name: "原色", detail: "只做基础调整", cube: nil, path: nil)]
@@ -503,7 +513,8 @@ final class AppModel: ObservableObject {
                     // `relativePath` (used for batch output naming) stays stable.
                     let libraryRoot = currentRoot ?? root
                     let incoming = PhotoSelection.items(fileURLs: importedURLs, root: libraryRoot)
-                    let merged = PhotoSelection.merge(existing: existing, incoming: incoming)
+                    var merged = PhotoSelection.merge(existing: existing, incoming: incoming)
+                    self.restoreCatalogAttributes(for: &merged, root: libraryRoot)
                     let added = merged.count - existing.count
                     self.photos = merged
                     self.status = added > 0
@@ -511,11 +522,13 @@ final class AppModel: ObservableObject {
                         : "没有新增照片；重复或不支持的项目已记录。"
                     if self.selectedID == nil, let first = merged.first { self.selectPhoto(first) }
                 } else {
-                    let incoming = PhotoSelection.items(fileURLs: importedURLs, root: root)
+                    var incoming = PhotoSelection.items(fileURLs: importedURLs, root: root)
+                    self.restoreCatalogAttributes(for: &incoming, root: root)
                     self.prepareLibraryTransition()
                     self.inputRoot = root
                     self.photos = incoming
                     self.selectedID = incoming.first?.id
+                    self.selectedIDs = incoming.first.map { [$0.id] } ?? []
                     self.beforeImage = nil; self.afterImage = nil; self.thumbnails = [:]
                     self.status = incoming.isEmpty
                         ? "所选项目中没有被支持的照片。"
@@ -539,6 +552,47 @@ final class AppModel: ObservableObject {
         errorMessage = "以下 \(importIssues.count) 个项目未导入：\n" + importIssues.joined(separator: "\n")
     }
 
+    // MARK: - P1-D Library Persistence (Non-destructive attribute catalog)
+
+    func restoreCatalogAttributes(for items: inout [PhotoItem], root: URL) {
+        let catalog = libraryIndex.loadCatalog(forRoot: root)
+        currentCatalog = catalog
+        for i in items.indices {
+            let rel = PhotoLibraryIndex.relativePath(of: items[i].url, relativeTo: root)
+            if let rec = catalog.records[rel] {
+                let (size, mtime) = PhotoLibraryIndex.fileAttributes(for: items[i].url) ?? (0, 0)
+                if rec.matches(fileSize: size, modificationTimestamp: mtime) {
+                    items[i].rating = rec.rating
+                    items[i].isRejected = rec.isRejected
+                    items[i].qualityReport = rec.qualityReport
+                }
+            }
+        }
+    }
+
+    func saveCatalogDebounced() {
+        catalogSaveWorkItem?.cancel()
+        guard let root = inputRoot else { return }
+        let currentPhotos = photos
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            var catalog = self.currentCatalog ?? self.libraryIndex.loadCatalog(forRoot: root)
+            for photo in currentPhotos {
+                self.libraryIndex.updateRecord(in: &catalog, for: photo.url, relativeTo: root) { rec in
+                    rec.rating = photo.rating
+                    rec.isRejected = photo.isRejected
+                    rec.qualityReport = photo.qualityReport
+                }
+            }
+            try? self.libraryIndex.saveCatalog(catalog, forRoot: root)
+            DispatchQueue.main.async {
+                self.currentCatalog = catalog
+            }
+        }
+        catalogSaveWorkItem = item
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
     func reloadFolder() {
         guard let root = inputRoot, !batchRunning else { return }
         nativeInspection.cancel()
@@ -556,9 +610,14 @@ final class AppModel: ObservableObject {
                 self.scanning = false
                 switch result {
                 case .success(let items):
-                    self.photos = items
-                    if !items.contains(where: { $0.id == self.selectedID }) { self.selectedID = items.first?.id }
-                    self.status = items.isEmpty ? "此文件夹中没有支持的照片。" : "已载入 \(items.count) 张照片 · 原图保持不变"
+                    var restoredItems = items
+                    self.restoreCatalogAttributes(for: &restoredItems, root: root)
+                    self.photos = restoredItems
+                    if !restoredItems.contains(where: { $0.id == self.selectedID }) {
+                        self.selectedID = restoredItems.first?.id
+                    }
+                    self.selectedIDs = self.selectedID.map { [$0] } ?? []
+                    self.status = restoredItems.isEmpty ? "此文件夹中没有支持的照片。" : "已载入 \(restoredItems.count) 张照片 · 原图保持不变"
                     self.requestPreview(immediate: true)
                 case .failure(let error): self.present(error)
                 }
@@ -663,6 +722,43 @@ final class AppModel: ObservableObject {
     }
 
     func selectPhoto(_ photo: PhotoItem) {
+        selectPhotoInternal(photo, updateMultiSelect: true)
+    }
+
+    func togglePhotoSelection(_ photo: PhotoItem) {
+        if selectedIDs.contains(photo.id) {
+            selectedIDs.remove(photo.id)
+            if selectedID == photo.id {
+                if let nextID = selectedIDs.first, let nextPhoto = photos.first(where: { $0.id == nextID }) {
+                    selectPhotoInternal(nextPhoto, updateMultiSelect: false)
+                } else {
+                    selectedID = nil
+                    beforeImage = nil; afterImage = nil
+                }
+            }
+        } else {
+            selectedIDs.insert(photo.id)
+            selectPhotoInternal(photo, updateMultiSelect: false)
+        }
+    }
+
+    func selectAllPhotos() {
+        selectedIDs = Set(photos.map(\.id))
+        if selectedID == nil, let first = photos.first {
+            selectPhotoInternal(first, updateMultiSelect: false)
+        }
+    }
+
+    func clearPhotoSelection() {
+        selectedIDs.removeAll()
+        selectedID = nil
+        beforeImage = nil; afterImage = nil
+    }
+
+    private func selectPhotoInternal(_ photo: PhotoItem, updateMultiSelect: Bool) {
+        if updateMultiSelect {
+            selectedIDs = [photo.id]
+        }
         guard selectedID != photo.id else { return }
         nativeInspection.cancel()
         nativeInspectionRegion.center = .init(x: 0.5, y: 0.5)
@@ -1133,9 +1229,16 @@ final class AppModel: ObservableObject {
     }
 
     func rateSelectedPhoto(_ rating: Int) {
-        guard let id = selectedID else { return }
-        setRating(rating, for: id)
-        status = rating == 0 ? "已清除当前照片的星级。" : "已为当前照片评 \(PhotoSelection.clampedRating(rating)) 星（会话状态）。"
+        let targets = selectedIDs.isEmpty ? (selectedID.map { [$0] } ?? []) : Array(selectedIDs)
+        guard !targets.isEmpty else { return }
+        let clamped = PhotoSelection.clampedRating(rating)
+        for id in targets {
+            setRating(clamped, for: id)
+        }
+        saveCatalogDebounced()
+        status = targets.count > 1
+            ? "已为选中的 \(targets.count) 张照片评 \(clamped) 星。"
+            : (clamped == 0 ? "已清除当前照片的星级。" : "已为当前照片评 \(clamped) 星。")
     }
 
     func stepSelectedRating(by delta: Int) {
@@ -1144,11 +1247,19 @@ final class AppModel: ObservableObject {
     }
 
     func toggleSelectedRejection() {
-        guard let id = selectedID, let index = photos.firstIndex(where: { $0.id == id }) else { return }
-        photos[index].isRejected.toggle()
-        status = photos[index].isRejected
-            ? "已标记为废片；导出时可勾选「跳过废片」。"
-            : "已取消废片标记。"
+        let targets = selectedIDs.isEmpty ? (selectedID.map { [$0] } ?? []) : Array(selectedIDs)
+        guard !targets.isEmpty else { return }
+        let indices = targets.compactMap { id in photos.firstIndex(where: { $0.id == id }) }
+        guard !indices.isEmpty else { return }
+        let allRejected = indices.allSatisfy { photos[$0].isRejected }
+        let newState = !allRejected
+        for idx in indices {
+            photos[idx].isRejected = newState
+        }
+        saveCatalogDebounced()
+        status = targets.count > 1
+            ? (newState ? "已将选中的 \(targets.count) 张照片标记为废片。" : "已取消选中照片的废片标记。")
+            : (newState ? "已标记为废片；导出时可勾选「跳过废片」。" : "已取消废片标记。")
     }
 
     /// Runs the heuristic culling analysis in the background. Results are applied
@@ -1194,6 +1305,7 @@ final class AppModel: ObservableObject {
                 var updated = self.photos
                 let applied = PhotoSelection.applyingAutoCull(reports: reports, to: &updated)
                 self.photos = updated
+                self.saveCatalogDebounced()
                 let cancelled = token.isCancelled
                 self.status = cancelled
                     ? "自动挑图已取消：已分析 \(applied) / \(items.count) 张，结果保留。"
@@ -1455,6 +1567,19 @@ final class AppModel: ObservableObject {
         guard let snapshot = undoHistory.redo() else { return }
         restoreUndoSnapshot(snapshot)
         status = "已重做上一步编辑。"
+    }
+
+    // MARK: - History stack inspection and jumping (P1-D)
+
+    var historyEntries: [UndoHistory.Entry] { undoHistory.entries }
+    var currentHistoryIndex: Int { undoHistory.currentIndex }
+
+    func jumpToHistory(at index: Int) {
+        guard !batchRunning else { return }
+        guard let snapshot = undoHistory.jumpTo(index: index) else { return }
+        restoreUndoSnapshot(snapshot)
+        let title = undoHistory.entries.indices.contains(index) ? undoHistory.entries[index].title : "历史记录"
+        status = "已跳转至历史记录：\(title)。"
     }
 
     func resetAdjustments() {
@@ -2501,6 +2626,7 @@ final class AppModel: ObservableObject {
     /// the error is surfaced instead of silently disabling the stage.
     func loadReferenceColor(from url: URL) {
         guard !batchRunning else { return }
+        lastReferenceColorURL = url
         let generation = UUID(); referenceColorGeneration = generation
         let previous = adjustments.referenceColor
         referenceColorBusy = true
@@ -2540,6 +2666,7 @@ final class AppModel: ObservableObject {
     }
 
     func clearReferenceColor() {
+        lastReferenceColorURL = nil
         referenceColorGeneration = UUID()
         referenceColorBusy = false
         adjustments.referenceColor = nil
@@ -2548,6 +2675,38 @@ final class AppModel: ObservableObject {
         referenceColorSourceName = nil
         status = "已清除参考图追色。"
         requestPreview(immediate: true)
+    }
+
+    // MARK: - Pinned Reference across folders (P1-D)
+
+    func pinCurrentReference() {
+        guard let url = lastReferenceColorURL else { return }
+        if let cg = try? PhotoLoader.thumbnail(url: url, maxDimension: 1024) {
+            try? referencePinStorage.pinReference(image: cg, name: referenceColorSourceName ?? url.lastPathComponent)
+            isReferencePinned = referencePinStorage.hasPinnedReference
+            status = "已将当前参考图「\(referenceColorSourceName ?? url.lastPathComponent)」钉住到项目库，跨文件夹均可复用。"
+        }
+    }
+
+    func unpinReference() {
+        referencePinStorage.clearPinnedReference()
+        isReferencePinned = referencePinStorage.hasPinnedReference
+        status = "已取消钉住参考图。"
+    }
+
+    func applyPinnedReference() {
+        guard !batchRunning, let pinned = referencePinStorage.loadPinnedReference() else { return }
+        let ciImage = CIImage(cgImage: pinned.image)
+        if let profile = try? ReferenceColorMatcher.profile(reference: ciImage) {
+            let current = adjustments.referenceColor
+            adjustments.referenceColor = PhotoEngine.mergedReferenceColorSettings(
+                measured: profile, current: current)
+            referenceColorThumbnail = NSImage(cgImage: pinned.image, size: .zero)
+            referenceColorThumbnailProfile = profile
+            referenceColorSourceName = "📌 " + pinned.name
+            status = "已应用钉住参考图：「\(pinned.name)」"
+            requestPreview(immediate: true)
+        }
     }
 
     /// Applies one reference-color edit. The profile is kept when only strength or
