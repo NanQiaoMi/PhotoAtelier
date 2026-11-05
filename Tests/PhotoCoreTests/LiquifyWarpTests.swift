@@ -296,6 +296,64 @@ final class LiquifyWarpTests: XCTestCase {
         let chin = field(parameters: FaceReshapeParameters(chin: 1), imageSize: size)
         XCTAssertLessThan(displacement(chin, CGPoint(x: 0.5, y: 0.25)).y, -0.002,
                           "下巴：正值应向下拉长下脸")
+
+        let cranial = field(parameters: FaceReshapeParameters(cranialTop: 1), imageSize: size)
+        XCTAssertGreaterThan(displacement(cranial, CGPoint(x: 0.5, y: 0.77)).y, 0.001,
+                             "高颅顶：发顶应向上抬升")
+
+        let hairline = field(parameters: FaceReshapeParameters(hairline: 1), imageSize: size)
+        XCTAssertLessThan(displacement(hairline, CGPoint(x: 0.5, y: 0.68)).y, -0.001,
+                          "发际线：正值应向下压低发际线")
+
+        let temple = field(parameters: FaceReshapeParameters(temple: 1), imageSize: size)
+        XCTAssertLessThan(displacement(temple, CGPoint(x: 0.30, y: 0.60)).x, -0.001,
+                          "丰太阳穴：左侧太阳穴应向外扩张")
+        XCTAssertGreaterThan(displacement(temple, CGPoint(x: 0.70, y: 0.60)).x, 0.001,
+                             "丰太阳穴：右侧太阳穴应向外扩张")
+    }
+
+    func testHairAndCranialTopParametersAndBackwardCompatibility() throws {
+        // 1. Neutrality
+        let neutral = FaceReshapeParameters()
+        XCTAssertTrue(neutral.isNeutral)
+        XCTAssertEqual(neutral.cranialTop, 0)
+        XCTAssertEqual(neutral.hairline, 0)
+        XCTAssertEqual(neutral.temple, 0)
+
+        // 2. Non-neutrality with individual parameters
+        XCTAssertFalse(FaceReshapeParameters(cranialTop: 0.5).isNeutral)
+        XCTAssertFalse(FaceReshapeParameters(hairline: -0.3).isNeutral)
+        XCTAssertFalse(FaceReshapeParameters(temple: 0.4).isNeutral)
+
+        // 3. Sanitized bounds (-1...1)
+        let outOfBounds = FaceReshapeParameters(cranialTop: 5.0, hairline: -3.0, temple: .nan)
+        let clean = outOfBounds.sanitized
+        XCTAssertEqual(clean.cranialTop, 1.0)
+        XCTAssertEqual(clean.hairline, -1.0)
+        XCTAssertEqual(clean.temple, 0.0)
+
+        // 4. Backward-compatible JSON decoding (legacy payload without new fields)
+        let legacyJSON = """
+        {
+            "slimFace": 0.2,
+            "smallFace": 0.1,
+            "enlargeEyes": 0.3,
+            "narrowNose": 0.15,
+            "lipWidth": 0.05,
+            "chin": -0.1
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(FaceReshapeParameters.self, from: legacyJSON)
+        XCTAssertEqual(decoded.slimFace, 0.2, accuracy: 1e-6)
+        XCTAssertEqual(decoded.cranialTop, 0.0, "缺失的新字段必须默认解码为中性 0")
+        XCTAssertEqual(decoded.hairline, 0.0)
+        XCTAssertEqual(decoded.temple, 0.0)
+
+        // 5. Full round-trip
+        let full = FaceReshapeParameters(slimFace: 0.1, cranialTop: 0.35, hairline: 0.15, temple: 0.25)
+        let encoded = try JSONEncoder().encode(full)
+        let restored = try JSONDecoder().decode(FaceReshapeParameters.self, from: encoded)
+        XCTAssertEqual(full, restored)
     }
 
     // MARK: - Presets

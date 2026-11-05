@@ -34,22 +34,28 @@ public enum FaceShapePreset: String, Codable, CaseIterable, Identifiable {
             return FaceReshapeParameters()
         case .youthful:
             return FaceReshapeParameters(slimFace: 0.20, smallFace: 0.25, enlargeEyes: 0.40,
-                                         narrowNose: 0.15, lipWidth: 0.10, chin: -0.30)
+                                         narrowNose: 0.15, lipWidth: 0.10, chin: -0.30,
+                                         cranialTop: 0.25, hairline: 0.10, temple: 0.15)
         case .heroic:
             return FaceReshapeParameters(slimFace: 0.50, smallFace: 0.15, enlargeEyes: 0,
-                                         narrowNose: 0.35, lipWidth: 0.05, chin: 0.25)
+                                         narrowNose: 0.35, lipWidth: 0.05, chin: 0.25,
+                                         cranialTop: 0.15, hairline: 0, temple: 0.10)
         case .boyish:
             return FaceReshapeParameters(slimFace: 0.30, smallFace: 0.20, enlargeEyes: 0.20,
-                                         narrowNose: 0.15, lipWidth: 0, chin: 0.10)
+                                         narrowNose: 0.15, lipWidth: 0, chin: 0.10,
+                                         cranialTop: 0.20, hairline: 0.05, temple: 0.10)
         case .round:
             return FaceReshapeParameters(slimFace: 0.55, smallFace: 0.40, enlargeEyes: 0.20,
-                                         narrowNose: 0.10, lipWidth: 0.15, chin: -0.20)
+                                         narrowNose: 0.10, lipWidth: 0.15, chin: -0.20,
+                                         cranialTop: 0.30, hairline: 0, temple: 0.05)
         case .long:
             return FaceReshapeParameters(slimFace: 0.10, smallFace: -0.30, enlargeEyes: 0,
-                                         narrowNose: 0.10, lipWidth: 0, chin: -0.35)
+                                         narrowNose: 0.10, lipWidth: 0, chin: -0.35,
+                                         cranialTop: 0, hairline: 0.20, temple: 0.20)
         case .square:
             return FaceReshapeParameters(slimFace: 0.35, smallFace: 0.10, enlargeEyes: 0,
-                                         narrowNose: 0.25, lipWidth: 0, chin: 0.15)
+                                         narrowNose: 0.25, lipWidth: 0, chin: 0.15,
+                                         cranialTop: 0.20, hairline: 0, temple: 0.15)
         }
     }
 }
@@ -62,7 +68,10 @@ public enum FaceShapePreset: String, Codable, CaseIterable, Identifiable {
 /// - `enlargeEyes`: eye region expands radially outward around each eye centre;
 /// - `narrowNose`: nose sides move toward the nose axis;
 /// - `lipWidth`: lip corners move toward the mouth centre (narrower mouth);
-/// - `chin`: chin moves down (longer lower face); negative moves it up.
+/// - `chin`: chin moves down (longer lower face); negative moves it up;
+/// - `cranialTop`: cranial top and hair volume move upward (+y), elevating the crown;
+/// - `hairline`: forehead hairline pulls downward (-y), reducing forehead height;
+/// - `temple`: temporal fossa between eyebrow ends and hairline expands outward.
 public struct FaceReshapeParameters: Codable, Equatable {
     public var slimFace: Double
     public var smallFace: Double
@@ -70,19 +79,27 @@ public struct FaceReshapeParameters: Codable, Equatable {
     public var narrowNose: Double
     public var lipWidth: Double
     public var chin: Double
+    public var cranialTop: Double
+    public var hairline: Double
+    public var temple: Double
 
     public init(slimFace: Double = 0, smallFace: Double = 0, enlargeEyes: Double = 0,
-                narrowNose: Double = 0, lipWidth: Double = 0, chin: Double = 0) {
+                narrowNose: Double = 0, lipWidth: Double = 0, chin: Double = 0,
+                cranialTop: Double = 0, hairline: Double = 0, temple: Double = 0) {
         self.slimFace = slimFace
         self.smallFace = smallFace
         self.enlargeEyes = enlargeEyes
         self.narrowNose = narrowNose
         self.lipWidth = lipWidth
         self.chin = chin
+        self.cranialTop = cranialTop
+        self.hairline = hairline
+        self.temple = temple
     }
 
     private enum CodingKeys: String, CodingKey {
         case slimFace, smallFace, enlargeEyes, narrowNose, lipWidth, chin
+        case cranialTop, hairline, temple
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,12 +110,16 @@ public struct FaceReshapeParameters: Codable, Equatable {
         narrowNose = try values.decodeIfPresent(Double.self, forKey: .narrowNose) ?? 0
         lipWidth = try values.decodeIfPresent(Double.self, forKey: .lipWidth) ?? 0
         chin = try values.decodeIfPresent(Double.self, forKey: .chin) ?? 0
+        cranialTop = try values.decodeIfPresent(Double.self, forKey: .cranialTop) ?? 0
+        hairline = try values.decodeIfPresent(Double.self, forKey: .hairline) ?? 0
+        temple = try values.decodeIfPresent(Double.self, forKey: .temple) ?? 0
     }
 
     /// All-neutral slider values.
     public var isNeutral: Bool {
         slimFace == 0 && smallFace == 0 && enlargeEyes == 0
             && narrowNose == 0 && lipWidth == 0 && chin == 0
+            && cranialTop == 0 && hairline == 0 && temple == 0
     }
 
     /// Non-finite values are treated as neutral so a corrupt payload cannot
@@ -109,7 +130,9 @@ public struct FaceReshapeParameters: Codable, Equatable {
         }
         return FaceReshapeParameters(slimFace: clean(slimFace), smallFace: clean(smallFace),
                                      enlargeEyes: clean(enlargeEyes), narrowNose: clean(narrowNose),
-                                     lipWidth: clean(lipWidth), chin: clean(chin))
+                                     lipWidth: clean(lipWidth), chin: clean(chin),
+                                     cranialTop: clean(cranialTop), hairline: clean(hairline),
+                                     temple: clean(temple))
     }
 
     func adding(_ other: FaceReshapeParameters) -> FaceReshapeParameters {
@@ -122,12 +145,16 @@ public struct FaceReshapeParameters: Codable, Equatable {
                                      enlargeEyes: sum(enlargeEyes, other.enlargeEyes),
                                      narrowNose: sum(narrowNose, other.narrowNose),
                                      lipWidth: sum(lipWidth, other.lipWidth),
-                                     chin: sum(chin, other.chin))
+                                     chin: sum(chin, other.chin),
+                                     cranialTop: sum(cranialTop, other.cranialTop),
+                                     hairline: sum(hairline, other.hairline),
+                                     temple: sum(temple, other.temple))
     }
 
     var allValues: [(name: String, value: Double)] {
         [("瘦脸", slimFace), ("小脸", smallFace), ("大眼", enlargeEyes),
-         ("鼻翼", narrowNose), ("嘴唇", lipWidth), ("下巴", chin)]
+         ("鼻翼", narrowNose), ("嘴唇", lipWidth), ("下巴", chin),
+         ("高颅顶", cranialTop), ("发际线", hairline), ("丰太阳穴", temple)]
     }
 }
 
@@ -260,9 +287,12 @@ public enum FaceReshapeEngine {
                             strength: strength, imageSize: imageSize)
             field.smooth(passes: 2)
             if settings.backgroundProtection {
+                var protectedRect = geometry.boundingBox
+                protectedRect.size.height = geometry.boundingBox.size.height * 1.55
+                protectedRect = protectedRect.insetBy(dx: -geometry.boundingBox.width * 0.15, dy: 0)
                 let feather = max(Double(geometry.boundingBox.width),
-                                  Double(geometry.boundingBox.height)) * 0.18
-                field.attenuateOutside(rect: geometry.boundingBox, feather: feather)
+                                  Double(geometry.boundingBox.height)) * 0.22
+                field.attenuateOutside(rect: protectedRect, feather: feather)
             }
         }
         for stroke in settings.strokes {
@@ -368,6 +398,41 @@ public enum FaceReshapeEngine {
             add(center: chin, radiusPixels: boundingWidthPixels * 0.45,
                 displacementPixels: SIMD2<Double>(0, -amount))
         }
+
+        // Cranial Top / Hair Volume: lifts the head crown vertically (+y)
+        if let cranial = geometry.cranialCenter, parameters.cranialTop != 0 {
+            let amount = boundingHeightPixels * 0.14 * parameters.cranialTop * strength
+            add(center: cranial, radiusPixels: boundingWidthPixels * 0.75,
+                displacementPixels: SIMD2<Double>(0, amount))
+        }
+
+        // Hairline: positive pulls hairline down (-y in Core Image) to reduce forehead height
+        if let hairline = geometry.hairlineCenter, parameters.hairline != 0 {
+            let amount = boundingHeightPixels * 0.10 * parameters.hairline * strength
+            let offset = boundingWidthPixels * 0.22
+            add(center: hairline, radiusPixels: boundingWidthPixels * 0.40,
+                displacementPixels: SIMD2<Double>(0, -amount))
+            add(center: CGPoint(x: hairline.x - offset / width, y: hairline.y - 0.01),
+                radiusPixels: boundingWidthPixels * 0.32,
+                displacementPixels: SIMD2<Double>(0, -amount * 0.85))
+            add(center: CGPoint(x: hairline.x + offset / width, y: hairline.y - 0.01),
+                radiusPixels: boundingWidthPixels * 0.32,
+                displacementPixels: SIMD2<Double>(0, -amount * 0.85))
+        }
+
+        // Temple: fills/widens temporal fossa outward
+        if parameters.temple != 0 {
+            let amount = boundingWidthPixels * 0.09 * parameters.temple * strength
+            let templeRadius = boundingWidthPixels * 0.35
+            if let left = geometry.templeLeft {
+                add(center: left, radiusPixels: templeRadius,
+                    displacementPixels: SIMD2<Double>(-amount, 0))
+            }
+            if let right = geometry.templeRight {
+                add(center: right, radiusPixels: templeRadius,
+                    displacementPixels: SIMD2<Double>(amount, 0))
+            }
+        }
     }
 }
 
@@ -382,6 +447,10 @@ private struct FaceReshapeGeometry {
     let nose: (center: CGPoint, widthPixels: Double)?
     let lips: (center: CGPoint, widthPixels: Double)?
     let chin: CGPoint?
+    let cranialCenter: CGPoint?
+    let hairlineCenter: CGPoint?
+    let templeLeft: CGPoint?
+    let templeRight: CGPoint?
 
     init?(landmarks: FaceLandmarkSet, imageSize: CGSize) {
         guard imageSize.width.isFinite, imageSize.height.isFinite,
@@ -437,7 +506,37 @@ private struct FaceReshapeGeometry {
             lips = nil
         }
 
-        chin = contour.min { $0.y < $1.y }
+        let foundChin = contour.min { $0.y < $1.y }
+        chin = foundChin
+
+        // Hair / Cranial / Temple geometric anchors
+        let eyebrowPoints = (landmarks.leftEyebrow + landmarks.rightEyebrow).filter(isFinite)
+        let eyebrowTopY: CGFloat
+        if !eyebrowPoints.isEmpty, let maxY = eyebrowPoints.map(\.y).max() {
+            eyebrowTopY = maxY
+        } else {
+            eyebrowTopY = box.minY + box.height * 0.70
+        }
+        let chinY = foundChin?.y ?? box.minY
+        let faceHeight = max(box.height * 0.5, eyebrowTopY - chinY)
+
+        let cranialY = min(0.98, eyebrowTopY + 0.50 * faceHeight)
+        cranialCenter = CGPoint(x: box.midX, y: cranialY)
+
+        let hairlineY = min(0.96, eyebrowTopY + 0.25 * faceHeight)
+        hairlineCenter = CGPoint(x: box.midX, y: hairlineY)
+
+        let leftEyebrows = landmarks.leftEyebrow.filter(isFinite)
+        let rightEyebrows = landmarks.rightEyebrow.filter(isFinite)
+        if !leftEyebrows.isEmpty, !rightEyebrows.isEmpty,
+           let leftTip = leftEyebrows.min(by: { $0.x < $1.x }),
+           let rightTip = rightEyebrows.max(by: { $0.x < $1.x }) {
+            templeLeft = CGPoint(x: leftTip.x - box.width * 0.08, y: leftTip.y + box.height * 0.04)
+            templeRight = CGPoint(x: rightTip.x + box.width * 0.08, y: rightTip.y + box.height * 0.04)
+        } else {
+            templeLeft = CGPoint(x: box.midX - box.width * 0.40, y: eyebrowTopY)
+            templeRight = CGPoint(x: box.midX + box.width * 0.40, y: eyebrowTopY)
+        }
     }
 }
 
