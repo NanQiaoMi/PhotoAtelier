@@ -319,12 +319,12 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | 客户交付增强（多主题/封面大图/离线隐私审计/局域网预览） | ✅ P1-E | `feat/p1e-delivery-enhancement` |
 | 妆容与人像精修增强（眼线/睫毛/美瞳/眼神光/高光/修容/v14门禁） | ✅ P1-F | `feat/p1f-makeup-retouch-enhancement` |
 | 性能收尾与 Universal/ARM 双架构构建（24MP全画幅基准v5/Universal可执行文件/lipo双架构校验） | ✅ P1-G | `feat/p1g-performance-universal` |
+| 真实照片审美验收体系与样片集评测（6大题材矩阵/5维量化评分表/自动化切片评测引擎） | ✅ P1-H | `feat/p1h-aesthetic-acceptance` |
 
 ### 9.2 剩余 P1（建议按此顺序，2 周左右一个增量）
 
 | 编号 | 项目 | 目标与做法 | 依赖 | 验收 |
 |---|---|---|---|---|
-| **P1-H** | 真实照片审美验收体系 | 20–30 张授权样片集（人像/风光/夜景/逆光/高调/暗调）、每功能前后图+人工评分表、固定评审模板；与合成测试分离 | 各功能批 | 评审表随交付归档；不把合成测试当画质验收；样片不入库 |
 | **P1-I** | 技术债整理 | 慢测治理（§8.3）、`ui_smoke` AX harness 去 flakiness（更稳的 AX 查询/窗口 id 截图）、证据 JSON 绑定 app commit/hash、文档与实现一致性检查 | 全量 | 全量 `make check` 稳定 <10min；ui_smoke 连续 3 次 exit 0 |
 
 ### 9.3 P2（6–12 个月，按需）
