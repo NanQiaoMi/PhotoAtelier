@@ -421,8 +421,8 @@ final class SceneAdaptiveTests: XCTestCase {
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        // v1-v13 are supported; 13 is the current version (P1-C make-up fields).
-        for version in 1...13 {
+        // v1-v14 are supported; 14 is the current version (P1-F enhanced make-up fields).
+        for version in 1...14 {
             var recipe = Recipe()
             recipe.version = version
             XCTAssertNoThrow(try BatchProcessor().run(items: [], inputRoot: input,
@@ -431,8 +431,8 @@ final class SceneAdaptiveTests: XCTestCase {
         }
         // Unknown future versions are rejected before the output directory is created.
         var unsupported = Recipe()
-        unsupported.version = 14
-        let rejectedOutput = root.appendingPathComponent("version-14")
+        unsupported.version = 15
+        let rejectedOutput = root.appendingPathComponent("version-15")
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: rejectedOutput, recipe: unsupported, lut: nil,
             cancellation: CancellationToken(), onEvent: { _ in }))

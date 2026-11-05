@@ -449,4 +449,141 @@ final class MakeupEngineTests: XCTestCase {
                                            renderPixel(source, x: cheekX, y: cheekY)),
                              0.005)
     }
+
+    // MARK: - P1-F Enhanced Makeup Tests
+
+    func testEyelinerAndEyelashLocalization() throws {
+        let source = paintedFace()
+        var settings = MakeupSettings()
+        settings.eyelinerColor = SRGBColor(red: 0.05, green: 0.05, blue: 0.05)
+        settings.eyelinerIntensity = 0.95
+        settings.eyelashIntensity = 0.90
+
+        let output = try MakeupEngine.apply(to: source, faces: [faceLandmarks()], settings: settings)
+
+        // Upper eyelid region should darken
+        let eyeUpperBefore = renderPixel(source, x: 107, y: 140)
+        let eyeUpperAfter = renderPixel(output, x: 107, y: 140)
+        XCTAssertLessThan(luminance(eyeUpperAfter), luminance(eyeUpperBefore), "眼线/睫毛应使上眼睑边缘变暗")
+
+        // Lips and background must stay completely untouched
+        let lipBefore = renderPixel(source, x: 128, y: 107)
+        let lipAfter = renderPixel(output, x: 128, y: 107)
+        XCTAssertLessThan(colorDistance(lipAfter, lipBefore), 1e-3, "眼线/睫毛不得影响唇部")
+
+        let cornerBefore = renderPixel(source, x: 8, y: 8)
+        let cornerAfter = renderPixel(output, x: 8, y: 8)
+        XCTAssertLessThan(colorDistance(cornerAfter, cornerBefore), 1e-4, "眼线/睫毛不得影响背景")
+    }
+
+    func testIrisAndCatchlightEnhancement() throws {
+        let source = paintedFace()
+        var settings = MakeupSettings()
+        settings.irisColor = SRGBColor(red: 0.20, green: 0.50, blue: 0.85) // Blue contact lens
+        settings.irisIntensity = 0.90
+        settings.catchlightIntensity = 0.85
+
+        let output = try MakeupEngine.apply(to: source, faces: [faceLandmarks()], settings: settings)
+
+        // Pupil/iris region should change toward blue/higher luminance (left pupil is at 0.42 * 256 = 108, 0.55 * 256 = 141)
+        let pupilBefore = renderPixel(source, x: 108, y: 141)
+        let pupilAfter = renderPixel(output, x: 108, y: 141)
+        XCTAssertGreaterThan(colorDistance(pupilAfter, pupilBefore), 0.005, "瞳孔虹膜区域应有明显润色与眼神光变化")
+
+        // Point outside the eye (e.g. cheek) must not be affected
+        let cheekBefore = renderPixel(source, x: 60, y: 128)
+        let cheekAfter = renderPixel(output, x: 60, y: 128)
+        XCTAssertLessThan(colorDistance(cheekAfter, cheekBefore), 1e-3, "美瞳与眼神光不得溢出眼部")
+    }
+
+    func testFaceHighlightAndContourLocalization() throws {
+        let source = paintedFace()
+
+        // 1. Highlight
+        var hlSettings = MakeupSettings()
+        hlSettings.highlightIntensity = 0.90
+        let hlOutput = try MakeupEngine.apply(to: source, faces: [faceLandmarks()], settings: hlSettings)
+
+        // Forehead center should brighten
+        let foreheadBefore = renderPixel(source, x: 128, y: 185)
+        let foreheadAfter = renderPixel(hlOutput, x: 128, y: 185)
+        XCTAssertGreaterThan(luminance(foreheadAfter), luminance(foreheadBefore), "面部高光应使额头中段提亮")
+
+        // 2. Contour
+        var ctSettings = MakeupSettings()
+        ctSettings.contourIntensity = 0.90
+        let ctOutput = try MakeupEngine.apply(to: source, faces: [faceLandmarks()], settings: ctSettings)
+
+        // Jawline edge should darken
+        let jawBefore = renderPixel(source, x: 80, y: 90)
+        let jawAfter = renderPixel(ctOutput, x: 80, y: 90)
+        XCTAssertLessThan(luminance(jawAfter), luminance(jawBefore), "面部修容应使下颌/侧颊暗化")
+    }
+
+    func testRecipeVersion14GateAndSilentDowngradeBan() throws {
+        // 1. Basic makeup only requires v13
+        var basic = MakeupSettings(lipIntensity: 0.5)
+        XCTAssertFalse(basic.requiresVersion14)
+
+        var recipeV13 = Recipe()
+        recipeV13.version = 13
+        recipeV13.adjustments.makeup = basic
+        XCTAssertNoThrow(try recipeV13.validateVersion())
+
+        // 2. Enhanced makeup requires v14
+        var enhanced = MakeupSettings()
+        enhanced.eyelinerIntensity = 0.4
+        XCTAssertTrue(enhanced.requiresVersion14)
+
+        var recipeV13Downgrade = Recipe()
+        recipeV13Downgrade.version = 13
+        recipeV13Downgrade.adjustments.makeup = enhanced
+        XCTAssertThrowsError(try recipeV13Downgrade.validateVersion(), "增强妆容不能降级保存为 v13")
+
+        var recipeV14 = Recipe()
+        recipeV14.version = 14
+        recipeV14.adjustments.makeup = enhanced
+        XCTAssertNoThrow(try recipeV14.validateVersion(), "配方版本 14 正常支持增强妆容")
+
+        // 3. PhotoEngine.requiredRecipeVersion
+        var adjEnhanced = AdjustmentSettings()
+        adjEnhanced.makeup = enhanced
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: adjEnhanced, automatic: nil), 14)
+
+        var adjBasic = AdjustmentSettings()
+        adjBasic.makeup = basic
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: adjBasic, automatic: nil), 13)
+
+        var adjNeutral = AdjustmentSettings()
+        adjNeutral.makeup = MakeupSettings()
+        XCTAssertEqual(PhotoEngine.requiredRecipeVersion(adjustments: adjNeutral, automatic: nil), 9)
+    }
+
+    func testBackwardCompatibilityOfDecodedJSON() throws {
+        // Legacy v13 JSON with only lip and brow
+        let legacyJSON = """
+        {
+          "lipColor": {"red": 0.8, "green": 0.2, "blue": 0.3},
+          "lipIntensity": 0.5,
+          "browColor": {"red": 0.2, "green": 0.1, "blue": 0.1},
+          "browDensity": 0.4,
+          "cheekColor": {"red": 0.9, "green": 0.4, "blue": 0.4},
+          "cheekIntensity": 0.0,
+          "cheekRadius": 0.5,
+          "eyeshadowColor": {"red": 0.5, "green": 0.3, "blue": 0.4},
+          "eyeshadowIntensity": 0.0
+        }
+        """
+        let data = Data(legacyJSON.utf8)
+        let decoded = try JSONDecoder().decode(MakeupSettings.self, from: data)
+        XCTAssertEqual(decoded.lipIntensity, 0.5)
+        XCTAssertEqual(decoded.browDensity, 0.4)
+        XCTAssertEqual(decoded.eyelinerIntensity, 0)
+        XCTAssertEqual(decoded.eyelashIntensity, 0)
+        XCTAssertEqual(decoded.irisIntensity, 0)
+        XCTAssertEqual(decoded.catchlightIntensity, 0)
+        XCTAssertEqual(decoded.highlightIntensity, 0)
+        XCTAssertEqual(decoded.contourIntensity, 0)
+        XCTAssertFalse(decoded.requiresVersion14)
+    }
 }

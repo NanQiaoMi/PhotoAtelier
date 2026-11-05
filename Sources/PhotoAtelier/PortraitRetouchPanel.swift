@@ -155,7 +155,7 @@ struct PortraitRetouchPanel: View {
     private var makeupSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Label("妆容 v1（启发式）", systemImage: "paintpalette")
+                Label("妆容与面部微调 v2", systemImage: "paintpalette")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white.opacity(0.9))
                 Spacer(minLength: 0)
@@ -166,7 +166,7 @@ struct PortraitRetouchPanel: View {
                         .disabled(model.batchRunning)
                 }
             }
-            Text("唇/眉/腮红/眼影是颜色规则 + 地标蒙版的启发式着色（非专业妆容），真实照片审美未验收；无脸时整段禁用。")
+            Text("唇/眉/腮红/眼影/眼线/睫毛/美瞳/眼神光/修容高光为启发式面部精修；增强妆容需要配方 v14；无脸时整段禁用。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 5).padding(.bottom, 8)
@@ -177,20 +177,38 @@ struct PortraitRetouchPanel: View {
                 .padding(.bottom, 8)
 
             VStack(alignment: .leading, spacing: 0) {
-                makeupColorRow(title: "唇色", color: makeupColorBinding(\.lipColor))
-                AdjustmentSlider(title: "唇色强度", value: makeupSliderBinding(\.lipIntensity),
-                                 range: 0...1, percent: true)
                 Group {
-                    makeupColorRow(title: "眉色", color: makeupColorBinding(\.browColor))
-                    AdjustmentSlider(title: "眉色密度", value: makeupSliderBinding(\.browDensity),
+                    makeupColorRow(title: "唇色", color: makeupColorBinding(\.lipColor))
+                    AdjustmentSlider(title: "唇色强度", value: makeupSliderBinding(\.lipIntensity),
                                      range: 0...1, percent: true)
                     makeupColorRow(title: "腮红色", color: makeupColorBinding(\.cheekColor))
                     AdjustmentSlider(title: "腮红强度", value: makeupSliderBinding(\.cheekIntensity),
                                      range: 0...1, percent: true)
                     AdjustmentSlider(title: "腮红半径", value: makeupSliderBinding(\.cheekRadius),
                                      range: 0.2...1.0, percent: true)
+                }
+                Group {
+                    makeupColorRow(title: "眉色", color: makeupColorBinding(\.browColor))
+                    AdjustmentSlider(title: "眉色密度", value: makeupSliderBinding(\.browDensity),
+                                     range: 0...1, percent: true)
                     makeupColorRow(title: "眼影色", color: makeupColorBinding(\.eyeshadowColor))
                     AdjustmentSlider(title: "眼影强度", value: makeupSliderBinding(\.eyeshadowIntensity),
+                                     range: 0...1, percent: true)
+                    makeupColorRow(title: "眼线色", color: makeupColorBinding(\.eyelinerColor))
+                    AdjustmentSlider(title: "眼线描绘", value: makeupSliderBinding(\.eyelinerIntensity),
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "睫毛浓密", value: makeupSliderBinding(\.eyelashIntensity),
+                                     range: 0...1, percent: true)
+                }
+                Group {
+                    makeupColorRow(title: "美瞳色", color: makeupColorBinding(\.irisColor))
+                    AdjustmentSlider(title: "美瞳润色", value: makeupSliderBinding(\.irisIntensity),
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "眼神光提亮", value: makeupSliderBinding(\.catchlightIntensity),
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "面部高光（T区/苹果肌）", value: makeupSliderBinding(\.highlightIntensity),
+                                     range: 0...1, percent: true)
+                    AdjustmentSlider(title: "暗部修容（下颌/侧颊）", value: makeupSliderBinding(\.contourIntensity),
                                      range: 0...1, percent: true)
                 }
             }
