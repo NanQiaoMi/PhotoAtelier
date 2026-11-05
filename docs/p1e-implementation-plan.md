@@ -2,7 +2,7 @@
 
 > 分支: `feat/p1e-delivery-enhancement`  
 > 基线: `fd9225b`  
-> 状态: 进行中 (P1-E)
+> 状态: 已完成 (P1-E)
 
 ---
 
@@ -15,7 +15,7 @@
    - 支持指定精选封面大图 (`coverPhotoIndex`) 顶部 Hero 展陈。
    - 响应式自适应网格（桌面/平板/手机）。
 2. **轻量本机 HTTP 局域网预览 (`DeliveryServer`)**:
-   - 基于系统原生 `Network.framework` (`NWListener`) 实现零外部依赖的极简本地 HTTP 服务器。
+   - 基于系统原生 BSD POSIX Socket 与 GCD `DispatchSourceRead` 实现零外部依赖的极简本地 HTTP 服务器。
    - 纯离线静态服务，支持电脑本地 (`http://127.0.0.1:port`) 与同 WiFi 手机/平板 (`http://192.168.x.x:port`) 直连浏览。
    - 严禁任何公网上传、零云端账号、退出或切换时安全销毁，坚决恪守离线隐私底线。
    - 防路径穿越（Path Traversal）安全保护。
@@ -25,13 +25,13 @@
    - 在「导出」面板集成交付模板配置（主题、署名、封面图）与一键本地预览控制。
 
 ### 1.2 验收项清单
-- [ ] `DeliveryTheme` 支持 3 种主题，HTML 样式、字体及配色正确渲染。
-- [ ] 封面大图 Hero 区域在设置了 `coverPhotoIndex` 时正常生成，未设置时不占位。
-- [ ] `privacy-audit.json` 自动写入，记录剥离元数据分类。
-- [ ] `DeliveryServer` 能正常启动/停止，HTTP GET 静态资源正确返回对应 MIME 类型。
-- [ ] 路径穿越请求（包含 `..`）被安全拒绝或拦截。
-- [ ] 全量 `make check` 测试套件全绿，单元测试新增覆盖全部新功能。
-- [ ] `bash Scripts/build_app.sh` 独立 Release 包签名与验证通过。
+- [x] `DeliveryTheme` 支持 3 种主题，HTML 样式、字体及配色正确渲染。
+- [x] 封面大图 Hero 区域在设置了 `coverPhotoIndex` 时正常生成，未设置时不占位。
+- [x] `privacy-audit.json` 自动写入，记录剥离元数据分类。
+- [x] `DeliveryServer` 能正常启动/停止，HTTP GET 静态资源正确返回对应 MIME 类型。
+- [x] 路径穿越请求（包含 `..`）被安全拒绝或拦截。
+- [x] 全量 `make check` 测试套件全绿，单元测试新增覆盖全部新功能。
+- [x] `bash Scripts/build_app.sh` 独立 Release 包签名与验证通过。
 
 ---
 

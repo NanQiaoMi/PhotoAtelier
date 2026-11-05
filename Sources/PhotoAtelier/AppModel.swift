@@ -189,6 +189,11 @@ final class AppModel: ObservableObject {
     /// "导出客户交付页" action succeeds once.
     @Published var lastDeliveryPage: URL?
     @Published private(set) var deliveryPageBusy = false
+    // P1-E: Embedded local & LAN delivery HTTP server
+    let deliveryServer = DeliveryServer()
+    @Published var deliveryServerRunning: Bool = false
+    @Published var deliveryServerLocalURL: String?
+    @Published var deliveryServerLANURL: String?
     @Published var analysis: PhotoAnalysis?
     @Published var analysisBusy = false
     @Published var analysisError: String?
@@ -434,6 +439,7 @@ final class AppModel: ObservableObject {
         autoCullBusy = false
         autoCullProgress = 0
         cullFilter = .all
+        stopDeliveryServer()
     }
 
     /// Imports explicitly opened or dropped files and folders off the main thread.
@@ -1344,9 +1350,23 @@ final class AppModel: ObservableObject {
     /// runs on the shared preview queue, so the UI stays responsive; the file
     /// format itself is the B3 `DeliveryGalleryWriter` (no network, metadata-free
     /// JPEGs, relative paths only).
+    /// Export the customer delivery page for currently selected photos (or single selected photo).
+    /// The page format itself is the B3 `DeliveryGalleryWriter` (no network, metadata-free
+    /// JPEGs, relative paths only).
     func exportDeliveryPage() {
         guard !batchRunning, !deliveryPageBusy, lutContractReady,
-              let photo = selectedPhoto, let delivery = exportSettings.deliveryPage else { return }
+              let delivery = exportSettings.deliveryPage else { return }
+
+        let targetPhotos: [PhotoItem]
+        if selectedIDs.count > 1 {
+            targetPhotos = photos.filter { selectedIDs.contains($0.id) }
+        } else if let photo = selectedPhoto {
+            targetPhotos = [photo]
+        } else {
+            return
+        }
+        guard !targetPhotos.isEmpty else { return }
+
         // Validate before the folder picker and before any background render: an
         // invalid title/range must never create an empty "客户交付-*" folder or
         // spend time rendering a page that cannot be written.
@@ -1367,35 +1387,44 @@ final class AppModel: ObservableObject {
         let snapshot = recipe
         let cube = selectedOption?.cube
         deliveryPageBusy = true
-        status = "正在生成客户交付页…"
+        status = targetPhotos.count > 1
+            ? "正在生成客户交付页（共 \(targetPhotos.count) 张照片）…"
+            : "正在生成客户交付页…"
         errorMessage = nil
         previewQueue.async { [weak self] in
             guard let self = self else { return }
             do {
                 let token = CancellationToken()
-                let loaded = try PhotoLoader.load(url: photo.url,
-                                                  lensCorrection: snapshot.adjustments.lensCorrection,
-                                                  lensProfileID: snapshot.adjustments.lensProfileID,
-                                                  lensCropFactor: snapshot.adjustments.lensCropFactor,
-                                                  lensFocalLength: snapshot.adjustments.lensFocalLength)
-                let processed = try self.engine.process(loaded.image,
-                                                        settings: snapshot.adjustments,
-                                                        lut: cube,
-                                                        initialReport: loaded.report,
-                                                        outputColorSpace: snapshot.export.colorSpace,
-                                                        cancellation: token)
-                var image = processed.image
+                var deliveryPhotos: [DeliveryPhoto] = []
+                for photo in targetPhotos {
+                    let loaded = try PhotoLoader.load(url: photo.url,
+                                                      lensCorrection: snapshot.adjustments.lensCorrection,
+                                                      lensProfileID: snapshot.adjustments.lensProfileID,
+                                                      lensCropFactor: snapshot.adjustments.lensCropFactor,
+                                                      lensFocalLength: snapshot.adjustments.lensFocalLength)
+                    let processed = try self.engine.process(loaded.image,
+                                                            settings: snapshot.adjustments,
+                                                            lut: cube,
+                                                            initialReport: loaded.report,
+                                                            outputColorSpace: snapshot.export.colorSpace,
+                                                            cancellation: token)
+                    var image = processed.image
+                    if let watermark = snapshot.export.watermark, !watermark.isNeutral {
+                        image = try WatermarkRenderer.render(on: image, canvasExtent: image.extent,
+                                                            settings: watermark)
+                    }
+                    let stem = (photo.url.lastPathComponent as NSString).deletingPathExtension
+                    deliveryPhotos.append(DeliveryPhoto(image: image, caption: stem))
+                }
                 var effective = delivery
                 if let watermark = snapshot.export.watermark, !watermark.isNeutral {
-                    image = try WatermarkRenderer.render(on: image, canvasExtent: image.extent,
-                                                        settings: watermark)
                     // The preview file itself is watermarked; keep the notice honest.
                     effective.watermarkedPreviews = true
                 }
-                let directory = try Self.createDeliveryDirectory(in: parent, photo: photo)
+                let directory = try Self.createDeliveryDirectory(in: parent, photos: targetPhotos)
                 let result: DeliveryGalleryResult
                 do {
-                    result = try DeliveryGalleryWriter.write(images: [image], settings: effective,
+                    result = try DeliveryGalleryWriter.write(photos: deliveryPhotos, settings: effective,
                                                              outputDirectory: directory,
                                                              context: self.engine.context)
                 } catch {
@@ -1417,11 +1446,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Creates a fresh `客户交付-<photo stem>` folder. Existing folders are never
+    /// Creates a fresh `客户交付-<photo stem>` or `客户交付-精选N张` folder. Existing folders are never
     /// reused, so a delivery page can never overwrite an earlier delivery.
-    private static func createDeliveryDirectory(in parent: URL, photo: PhotoItem) throws -> URL {
-        let stem = (photo.url.lastPathComponent as NSString).deletingPathExtension
-        let base = "客户交付-\(stem.isEmpty ? "照片" : stem)"
+    private static func createDeliveryDirectory(in parent: URL, photos: [PhotoItem]) throws -> URL {
+        let base: String
+        if photos.count == 1, let first = photos.first {
+            let stem = (first.url.lastPathComponent as NSString).deletingPathExtension
+            base = "客户交付-\(stem.isEmpty ? "照片" : stem)"
+        } else {
+            base = "客户交付-精选\(photos.count)张"
+        }
         for index in 1...10_000 {
             let name = index == 1 ? base : "\(base)-\(index)"
             let candidate = parent.appendingPathComponent(name, isDirectory: true)
@@ -1434,6 +1468,47 @@ final class AppModel: ObservableObject {
             }
         }
         throw AtelierError.imageWrite("无法找到未占用的客户交付页目录名")
+    }
+
+    // MARK: - Delivery Preview Server (P1-E)
+
+    func startDeliveryServer(for directory: URL? = nil) {
+        let targetDir = directory ?? lastDeliveryPage?.deletingLastPathComponent()
+        guard let folder = targetDir else {
+            status = "请先生成或选择客户交付页文件夹再启动预览服务。"
+            return
+        }
+        do {
+            try deliveryServer.start(directory: folder)
+            deliveryServerRunning = deliveryServer.isRunning
+            deliveryServerLocalURL = deliveryServer.localURL?.absoluteString
+            deliveryServerLANURL = deliveryServer.lanURL?.absoluteString
+            let lanNotice = deliveryServerLANURL.map { " · 手机局域网: \($0)" } ?? ""
+            status = "本地交付服务已启动 · 本机: \(deliveryServerLocalURL ?? "")\(lanNotice)"
+        } catch {
+            deliveryServerRunning = false
+            deliveryServerLocalURL = nil
+            deliveryServerLANURL = nil
+            present(error)
+        }
+    }
+
+    func stopDeliveryServer() {
+        if deliveryServer.isRunning {
+            deliveryServer.stop()
+            deliveryServerRunning = false
+            deliveryServerLocalURL = nil
+            deliveryServerLANURL = nil
+            status = "本地交付预览服务已停止。"
+        }
+    }
+
+    func toggleDeliveryServer() {
+        if deliveryServer.isRunning {
+            stopDeliveryServer()
+        } else {
+            startDeliveryServer()
+        }
     }
 
     func openNativeInspection() {

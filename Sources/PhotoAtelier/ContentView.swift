@@ -831,45 +831,139 @@ struct ContentView: View {
                 }))
                 .toggleStyle(.checkbox).font(.system(size: 11))
             if let delivery = model.exportSettings.deliveryPage {
-                HStack {
-                    Text("标题").font(.system(size: 11))
-                    TextField("客户交付", text: Binding(
-                        get: { delivery.title },
-                        set: { model.exportSettings.deliveryPage?.title = $0 }))
-                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                Group {
+                    Picker("配色风格", selection: Binding(
+                        get: { delivery.theme },
+                        set: { model.exportSettings.deliveryPage?.theme = $0 })) {
+                        ForEach(DeliveryTheme.allCases, id: \.self) { theme in
+                            Text(theme.title).tag(theme)
+                        }
+                    }.font(.system(size: 11))
+                    HStack {
+                        Text("标题").font(.system(size: 11))
+                        TextField("客户交付", text: Binding(
+                            get: { delivery.title },
+                            set: { model.exportSettings.deliveryPage?.title = $0 }))
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                    HStack {
+                        Text("副标题").font(.system(size: 11))
+                        TextField("可选（如：2026 春季写真）", text: Binding(
+                            get: { delivery.subtitle ?? "" },
+                            set: { model.exportSettings.deliveryPage?.subtitle = $0.isEmpty ? nil : $0 }))
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                    HStack {
+                        Text("摄影师/机构").font(.system(size: 11))
+                        TextField("可选署名（如：Studio Atelier）", text: Binding(
+                            get: { delivery.photographer ?? "" },
+                            set: { model.exportSettings.deliveryPage?.photographer = $0.isEmpty ? nil : $0 }))
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                    Stepper("缩略图列数：\(delivery.columnCount)", value: Binding(
+                        get: { delivery.columnCount },
+                        set: { model.exportSettings.deliveryPage?.columnCount = min(8, max(1, $0)) }),
+                        in: 1...8).font(.system(size: 11))
+                    Picker("缩略图长边", selection: Binding(
+                        get: { delivery.thumbnailMaxDimension },
+                        set: { value in
+                            guard let current = model.exportSettings.deliveryPage else { return }
+                            model.exportSettings.deliveryPage?.thumbnailMaxDimension = value
+                            model.exportSettings.deliveryPage?.previewMaxDimension = max(current.previewMaxDimension, value)
+                        })) {
+                        Text("480 px").tag(480)
+                        Text("640 px").tag(640)
+                        Text("960 px").tag(960)
+                        Text("1440 px").tag(1440)
+                    }.font(.system(size: 11))
                 }
-                Stepper("缩略图列数：\(delivery.columnCount)", value: Binding(
-                    get: { delivery.columnCount },
-                    set: { model.exportSettings.deliveryPage?.columnCount = min(8, max(1, $0)) }),
-                    in: 1...8).font(.system(size: 11))
-                Picker("缩略图长边", selection: Binding(
-                    get: { delivery.thumbnailMaxDimension },
-                    set: { value in
-                        guard let current = model.exportSettings.deliveryPage else { return }
-                        model.exportSettings.deliveryPage?.thumbnailMaxDimension = value
-                        model.exportSettings.deliveryPage?.previewMaxDimension = max(current.previewMaxDimension, value)
-                    })) {
-                    Text("480 px").tag(480)
-                    Text("640 px").tag(640)
-                    Text("960 px").tag(960)
-                    Text("1440 px").tag(1440)
-                }.font(.system(size: 11))
-                Toggle("生成接触表 PDF", isOn: Binding(
-                    get: { delivery.includeContactSheet },
-                    set: { model.exportSettings.deliveryPage?.includeContactSheet = $0 }))
-                    .toggleStyle(.checkbox).font(.system(size: 10))
-                Toggle("预览图含水印提示", isOn: Binding(
-                    get: { delivery.watermarkedPreviews },
-                    set: { model.exportSettings.deliveryPage?.watermarkedPreviews = $0 }))
-                    .toggleStyle(.checkbox).font(.system(size: 10))
-                Button(model.deliveryPageBusy ? "正在生成客户交付页…" : "导出客户交付页（当前照片）…") {
-                    model.exportDeliveryPage()
+                Group {
+                    Toggle("设首张为顶部精选封面大图", isOn: Binding(
+                        get: { delivery.coverPhotoIndex != nil },
+                        set: { enabled in
+                            model.exportSettings.deliveryPage?.coverPhotoIndex = enabled ? 0 : nil
+                        }))
+                        .toggleStyle(.checkbox).font(.system(size: 10))
+                    Toggle("离线隐私审计报告 (privacy-audit.json)", isOn: Binding(
+                        get: { delivery.includePrivacyAudit },
+                        set: { model.exportSettings.deliveryPage?.includePrivacyAudit = $0 }))
+                        .toggleStyle(.checkbox).font(.system(size: 10))
+                    Toggle("生成接触表 PDF", isOn: Binding(
+                        get: { delivery.includeContactSheet },
+                        set: { model.exportSettings.deliveryPage?.includeContactSheet = $0 }))
+                        .toggleStyle(.checkbox).font(.system(size: 10))
+                    Toggle("预览图含水印提示", isOn: Binding(
+                        get: { delivery.watermarkedPreviews },
+                        set: { model.exportSettings.deliveryPage?.watermarkedPreviews = $0 }))
+                        .toggleStyle(.checkbox).font(.system(size: 10))
                 }
-                .buttonStyle(.bordered)
-                .font(.system(size: 10))
-                .disabled(model.batchRunning || model.deliveryPageBusy || model.selectedPhoto == nil)
-                Text("生成独立文件夹（不覆盖既有交付页）：index.html 内嵌样式、只用相对路径缩略图/预览图，无外链/无网络请求；图片重新编码并剥离 GPS/相机序列号等元数据；接触表 PDF 为 A4 网格。GUI 点选未自动化，实际按钮交互需人工验证。")
-                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+                Group {
+                    let canExportDelivery = !model.batchRunning && !model.deliveryPageBusy && (model.selectedPhoto != nil || !model.selectedIDs.isEmpty)
+                    let exportTitle: String = {
+                        if model.deliveryPageBusy { return "正在生成客户交付页…" }
+                        if model.selectedIDs.count > 1 {
+                            return "导出客户交付页（已选 \(model.selectedIDs.count) 张照片）…"
+                        } else {
+                            return "导出客户交付页（当前照片）…"
+                        }
+                    }()
+                    Button(exportTitle) {
+                        model.exportDeliveryPage()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.system(size: 10))
+                    .disabled(!canExportDelivery)
+
+                    Text("生成独立文件夹（不覆盖既有交付页）：index.html 内嵌样式、只用相对路径缩略图/预览图，无外链/无网络请求；图片重新编码并剥离 GPS/相机序列号等元数据；接触表 PDF 为 A4 网格。")
+                        .font(.system(size: 9)).foregroundColor(AtelierPalette.muted).lineSpacing(4)
+                }
+                if let deliveryURL = model.lastDeliveryPage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("局域网客户预览服务")
+                                .font(.system(size: 11, weight: .semibold))
+                            Spacer()
+                            Circle()
+                                .fill(model.deliveryServerRunning ? Color.green : Color.gray)
+                                .frame(width: 8, height: 8)
+                            Text(model.deliveryServerRunning ? "运行中" : "已停止")
+                                .font(.system(size: 10))
+                                .foregroundColor(model.deliveryServerRunning ? .green : AtelierPalette.muted)
+                        }
+                        if model.deliveryServerRunning {
+                            if let local = model.deliveryServerLocalURL {
+                                HStack {
+                                    Text("本机:").font(.system(size: 10)).foregroundColor(AtelierPalette.muted)
+                                    Text(local).font(.system(size: 10)).textSelection(.enabled)
+                                    Button("打开") {
+                                        if let u = URL(string: local) { NSWorkspace.shared.open(u) }
+                                    }.font(.system(size: 9))
+                                }
+                            }
+                            if let lan = model.deliveryServerLANURL {
+                                HStack {
+                                    Text("手机:").font(.system(size: 10)).foregroundColor(AtelierPalette.muted)
+                                    Text(lan).font(.system(size: 10)).textSelection(.enabled)
+                                }
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Button(model.deliveryServerRunning ? "停止服务" : "启动本地预览服务") {
+                                model.toggleDeliveryServer()
+                            }
+                            .buttonStyle(.bordered)
+                            .font(.system(size: 10))
+
+                            Button("在 Finder 中显示") {
+                                NSWorkspace.shared.activateFileViewerSelecting([deliveryURL])
+                            }
+                            .font(.system(size: 10))
+                        }
+                    }
+                    .padding(8)
+                    .background(Color.black.opacity(0.2))
+                    .cornerRadius(6)
+                }
             }
         }
     }
