@@ -106,92 +106,216 @@ public struct LUTCube {
         var rowCount = 0
         var hasStartedData = false
 
-        for (zeroBasedLine, originalLine) in text.split(omittingEmptySubsequences: false,
-                                                          whereSeparator: \.isNewline).enumerated() {
-            var line = String(originalLine)
-            if zeroBasedLine == 0, line.first == "\u{FEFF}" {
-                line.removeFirst()
-            }
-            line = removingInlineComment(from: line).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
+        let cString = text.utf8CString
+        try cString.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            var ptr = base
+            var lineNumber = 1
 
-            let lineNumber = zeroBasedLine + 1
-            let tokens = line.split(whereSeparator: \.isWhitespace)
-            guard let first = tokens.first else { continue }
-            let directive = first.uppercased()
-
-            switch directive {
-            case "TITLE":
-                guard !hasStartedData else {
-                    throw invalid(lineNumber, "TITLE 必须位于 LUT 数据之前。")
-                }
-                let remainder = line.dropFirst(first.count).trimmingCharacters(in: .whitespaces)
-                guard !remainder.isEmpty else {
-                    throw invalid(lineNumber, "TITLE 缺少名称。")
-                }
-                title = parseTitle(remainder)
-
-            case "LUT_3D_SIZE":
-                guard !hasStartedData, dimension == nil, tokens.count == 2,
-                      let parsed = Int(tokens[1]) else {
-                    throw invalid(lineNumber, "LUT_3D_SIZE 格式无效或重复。")
-                }
-                guard (2...maximumDimension).contains(parsed) else {
-                    throw invalid(lineNumber, "LUT_3D_SIZE 必须在 2 到 \(maximumDimension) 之间。")
-                }
-                dimension = parsed
-                let expectedRows = parsed * parsed * parsed
-                rows.reserveCapacity(expectedRows * 4)
-
-            case "DOMAIN_MIN", "DOMAIN_MAX":
-                guard !hasStartedData, tokens.count == 4, !sawInputRange else {
-                    throw invalid(lineNumber, "\(directive) 需要三个数值，且必须位于 LUT 数据之前。")
-                }
-                let values = try parseFiniteVector(tokens.dropFirst(), line: lineNumber)
-                if directive == "DOMAIN_MIN" {
-                    guard !sawDomainMin else { throw invalid(lineNumber, "DOMAIN_MIN 重复。") }
-                    domainMin = values
-                    sawDomainMin = true
-                } else {
-                    guard !sawDomainMax else { throw invalid(lineNumber, "DOMAIN_MAX 重复。") }
-                    domainMax = values
-                    sawDomainMax = true
+            while ptr.pointee != 0 {
+                // Check BOM on line 1
+                if lineNumber == 1 && ptr.pointee == -17 /* 0xEF */ {
+                    if (ptr + 1).pointee == -69 /* 0xBB */ && (ptr + 2).pointee == -65 /* 0xBF */ {
+                        ptr += 3
+                    }
                 }
 
-            case "LUT_3D_INPUT_RANGE":
-                guard !hasStartedData, tokens.count == 3, !sawInputRange,
-                      !sawDomainMin, !sawDomainMax,
-                      let minimum = Float(tokens[1]), let maximum = Float(tokens[2]),
-                      minimum.isFinite, maximum.isFinite else {
-                    throw invalid(lineNumber, "LUT_3D_INPUT_RANGE 需要两个有限数值，且不能与 DOMAIN_MIN/MAX 混用或重复。")
+                // Skip leading spaces / tabs
+                while ptr.pointee == 32 || ptr.pointee == 9 {
+                    ptr += 1
                 }
-                domainMin = SIMD3<Float>(repeating: minimum)
-                domainMax = SIMD3<Float>(repeating: maximum)
-                sawInputRange = true
 
-            case "LUT_1D_SIZE", "LUT_1D_INPUT_RANGE":
-                throw invalid(lineNumber, "只支持带 DOMAIN_MIN/MAX 的 3D LUT；不支持 \(directive)。")
+                // Check empty line or newline
+                if ptr.pointee == 10 { // LF
+                    ptr += 1
+                    lineNumber += 1
+                    continue
+                }
+                if ptr.pointee == 13 { // CR
+                    ptr += 1
+                    if ptr.pointee == 10 { ptr += 1 }
+                    lineNumber += 1
+                    continue
+                }
+                if ptr.pointee == 0 {
+                    break
+                }
 
-            default:
+                // Check comment line
+                if ptr.pointee == 35 /* # */ {
+                    while ptr.pointee != 0 && ptr.pointee != 10 && ptr.pointee != 13 {
+                        ptr += 1
+                    }
+                    if ptr.pointee == 10 { ptr += 1 }
+                    else if ptr.pointee == 13 {
+                        ptr += 1
+                        if ptr.pointee == 10 { ptr += 1 }
+                    }
+                    lineNumber += 1
+                    continue
+                }
+
+                // Check if directive line (TITLE, LUT_, DOMAIN_)
+                let c = ptr.pointee
+                let isDirectiveCandidate = !hasStartedData && (c == 84 /* T */ || c == 116 /* t */ ||
+                                                               c == 76 /* L */ || c == 108 /* l */ ||
+                                                               c == 68 /* D */ || c == 100 /* d */)
+
+                if isDirectiveCandidate {
+                    let lineStart = ptr
+                    while ptr.pointee != 0 && ptr.pointee != 10 && ptr.pointee != 13 {
+                        ptr += 1
+                    }
+                    let len = ptr - lineStart
+                    let lineBytes = UnsafeBufferPointer(start: lineStart, count: len)
+                    let rawLine = String(decoding: lineBytes.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+
+                    if ptr.pointee == 10 { ptr += 1 }
+                    else if ptr.pointee == 13 {
+                        ptr += 1
+                        if ptr.pointee == 10 { ptr += 1 }
+                    }
+
+                    let line = removingInlineComment(from: rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if line.isEmpty {
+                        lineNumber += 1
+                        continue
+                    }
+
+                    let tokens = line.split(whereSeparator: \.isWhitespace)
+                    guard let first = tokens.first else {
+                        lineNumber += 1
+                        continue
+                    }
+                    let directive = first.uppercased()
+
+                    switch directive {
+                    case "TITLE":
+                        guard !hasStartedData else {
+                            throw invalid(lineNumber, "TITLE 必须位于 LUT 数据之前。")
+                        }
+                        let remainder = line.dropFirst(first.count).trimmingCharacters(in: .whitespaces)
+                        guard !remainder.isEmpty else {
+                            throw invalid(lineNumber, "TITLE 缺少名称。")
+                        }
+                        title = parseTitle(remainder)
+                        lineNumber += 1
+                        continue
+
+                    case "LUT_3D_SIZE":
+                        guard !hasStartedData, dimension == nil, tokens.count == 2,
+                              let parsed = Int(tokens[1]) else {
+                            throw invalid(lineNumber, "LUT_3D_SIZE 格式无效或重复。")
+                        }
+                        guard (2...maximumDimension).contains(parsed) else {
+                            throw invalid(lineNumber, "LUT_3D_SIZE 必须在 2 到 \(maximumDimension) 之间。")
+                        }
+                        dimension = parsed
+                        let expectedRows = parsed * parsed * parsed
+                        rows.reserveCapacity(expectedRows * 4)
+                        lineNumber += 1
+                        continue
+
+                    case "DOMAIN_MIN", "DOMAIN_MAX":
+                        guard !hasStartedData, tokens.count == 4, !sawInputRange else {
+                            throw invalid(lineNumber, "\(directive) 需要三个数值，且必须位于 LUT 数据之前。")
+                        }
+                        let values = try parseFiniteVector(tokens.dropFirst(), line: lineNumber)
+                        if directive == "DOMAIN_MIN" {
+                            guard !sawDomainMin else { throw invalid(lineNumber, "DOMAIN_MIN 重复。") }
+                            domainMin = values
+                            sawDomainMin = true
+                        } else {
+                            guard !sawDomainMax else { throw invalid(lineNumber, "DOMAIN_MAX 重复。") }
+                            domainMax = values
+                            sawDomainMax = true
+                        }
+                        lineNumber += 1
+                        continue
+
+                    case "LUT_3D_INPUT_RANGE":
+                        guard !hasStartedData, tokens.count == 3, !sawInputRange,
+                              !sawDomainMin, !sawDomainMax,
+                              let minimum = Float(tokens[1]), let maximum = Float(tokens[2]),
+                              minimum.isFinite, maximum.isFinite else {
+                            throw invalid(lineNumber, "LUT_3D_INPUT_RANGE 需要两个有限数值，且不能与 DOMAIN_MIN/MAX 混用或重复。")
+                        }
+                        domainMin = SIMD3<Float>(repeating: minimum)
+                        domainMax = SIMD3<Float>(repeating: maximum)
+                        sawInputRange = true
+                        lineNumber += 1
+                        continue
+
+                    case "LUT_1D_SIZE", "LUT_1D_INPUT_RANGE":
+                        throw invalid(lineNumber, "只支持带 DOMAIN_MIN/MAX 的 3D LUT；不支持 \(directive)。")
+
+                    default:
+                        // Not a recognized directive, rewind ptr and fall through to data parsing
+                        ptr = lineStart
+                    }
+                }
+
+                // Data row
                 guard dimension != nil else {
                     throw invalid(lineNumber, "请先声明 LUT_3D_SIZE。")
                 }
-                guard tokens.count == 3 else {
+
+                var endPtr: UnsafeMutablePointer<CChar>? = nil
+                var values: [Float] = []
+                values.reserveCapacity(3)
+
+                for _ in 0..<3 {
+                    while ptr.pointee == 32 || ptr.pointee == 9 { ptr += 1 }
+                    if ptr.pointee == 0 || ptr.pointee == 10 || ptr.pointee == 13 || ptr.pointee == 35 {
+                        break
+                    }
+                    let val = strtof(ptr, &endPtr)
+                    guard let ep = endPtr, ep != ptr else {
+                        throw invalid(lineNumber, "标准 3D .cube LUT 每行必须正好包含 3 个 RGB 分量；不支持非标准 alpha 列。")
+                    }
+                    guard val.isFinite else {
+                        throw invalid(lineNumber, "包含非数值或 NaN/Infinity。")
+                    }
+                    guard (-16...16).contains(val) else {
+                        throw invalid(lineNumber, "RGB LUT 输出必须在 -16...16 之间。")
+                    }
+                    values.append(val)
+                    ptr = UnsafePointer(ep)
+                }
+
+                guard values.count == 3 else {
                     throw invalid(lineNumber, "标准 3D .cube LUT 每行必须正好包含 3 个 RGB 分量；不支持非标准 alpha 列。")
                 }
-                let values = try parseFiniteScalars(tokens, line: lineNumber)
-                guard values.allSatisfy({ (-16...16).contains($0) }) else {
-                    throw invalid(lineNumber, "RGB LUT 输出必须在 -16...16 之间。")
+
+                // Check trailing characters on line
+                while ptr.pointee == 32 || ptr.pointee == 9 { ptr += 1 }
+                if ptr.pointee != 0 && ptr.pointee != 10 && ptr.pointee != 13 && ptr.pointee != 35 {
+                    // Extra content (e.g. 4th alpha value)
+                    throw invalid(lineNumber, "标准 3D .cube LUT 每行必须正好包含 3 个 RGB 分量；不支持非标准 alpha 列。")
                 }
+
+                // Skip comment to end of line
+                while ptr.pointee != 0 && ptr.pointee != 10 && ptr.pointee != 13 {
+                    ptr += 1
+                }
+                if ptr.pointee == 10 { ptr += 1 }
+                else if ptr.pointee == 13 {
+                    ptr += 1
+                    if ptr.pointee == 10 { ptr += 1 }
+                }
+
                 rows.append(values[0])
                 rows.append(values[1])
                 rows.append(values[2])
                 rows.append(1)
                 rowCount += 1
                 hasStartedData = true
+
                 if let dimension, rowCount > dimension * dimension * dimension {
                     throw invalid(lineNumber, "LUT 数据行数超过 \(dimension)^3。")
                 }
+
+                lineNumber += 1
             }
         }
 

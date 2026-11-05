@@ -263,11 +263,13 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 - 失败点可能随机（`NOT_VISIBLE`、`SCROLL_ERROR`、`-1719`）；先看 `run.log`，区分脚本误判 vs UI 缺失，再决定是否修脚本或重跑。
 - 证据 JSON 已绑定 app `mtime/SHA256/commit`；最终验收建议用**新输出目录**，避免失败尝试截图混入。
 
-### 7.3 既有慢测（128³ LUT 解析）
+### 7.3 慢测治理完成（128³ LUT 解析）
 
-- `ColorCompatibilityTests.testMaximumDimensionLUTAddressesLastNode` 构造 128³=2,097,152 行 LUT 文本再解析；在正常机器上秒级，但在本机当前高负载/长时间运行后会进入极慢路径（实测单测 >18min 不结束，sample 停在 `LUTCube.parse` 的 `Character.isWhitespace`/KeyPath 投影）。
-- 该测试**与布局改动无关**（PhotoCore 未改）；但会阻塞 `make check`。
-- 处理：优先在空闲机器重跑；急用可用 `swift test --skip` 跳过该测试，并在报告中如实标注「跳过原因/命令/影响」。后续可考虑优化 `LUTCube.parse`（按字节/Scanner 解析）或缩减该测试规模。
+- **原现象**：`ColorCompatibilityTests.testMaximumDimensionLUTAddressesLastNode` 构造 128³=2,097,152 行 LUT 文本再解析；原 Swift `text.split` + Unicode 字符扫描在调试构建下产生数百万次堆分配，高负载下曾出现 >18min 挂起。
+- **治理方案**（已完成并纳入代码库）：
+  - `LUTCube.parse` 重构为基于 `text.utf8CString` 字节缓冲区扫描，使用 `strtof` 直接解析数据行数值，避免 210 万行 String 堆分配与 Unicode 索引计算。
+  - 在 `testMaximumDimensionLUTAddressesLastNode` 中增加 15s 解析耗时断言（实测 ~9.7s 通过），防止性能劣化回归。
+  - 全量 `make check`（521 tests / 0 failures）已在 ~123s 内全绿通过，不再阻塞构建流程。
 
 ### 7.4 其他
 
@@ -287,7 +289,7 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
    UI_SMOKE_FORCE_FAIL_ATTEMPTS=2 bash Scripts/ui_smoke.sh artifacts/p1c-final/ui-smoke
    ```
    预期 exit 0、8 页签、约 18 张截图、7 个 scrolled 区段、JSON 含 app 哈希/commit。
-3. **既有慢测治理**：`ColorCompatibilityTests.testMaximumDimensionLUTAddressesLastNode` 构造 128³ LUT 文本再解析，在本机高负载下会挂起（单测 >18min）。建议改为按字节/Scanner 解析或缩小测试规模，并把耗时纳入上限断言，避免再次阻塞 `make check`。
+3. **慢测治理**：✅ 已完成（2026-11-05）：`LUTCube.parse` 重构为快速字节扫描，`testMaximumDimensionLUTAddressesLastNode` 实测 ~9.7s 通过（加设 15s 上限断言），全量 `make check` 521 项测试全绿通过。
 4. **ARM / universal 构建**：当前依赖（Lensfun/GLib/PCRE2/libintl）仍为 x86_64，未产出 universal app；Apple Silicon 未实测（见 §7.4）。列为技术债，建议在 P1 收尾前处理（见 §9 P1-G）。
 
 ---
