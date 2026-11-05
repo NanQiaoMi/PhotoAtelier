@@ -58,6 +58,81 @@ private struct InspectorTabBar: View {
     }
 }
 
+private struct HistoryPopoverView: View {
+    @ObservedObject var model: AppModel
+    @Binding var isPresented: Bool
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("编辑历史记录", systemImage: "clock.arrow.circlepath")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                Text("\(model.historyEntries.count) 步")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(AtelierPalette.muted)
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+
+            Divider().background(AtelierPalette.line)
+
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(Array(model.historyEntries.enumerated().reversed()), id: \.offset) { index, entry in
+                        let isCurrent = index == model.currentHistoryIndex
+                        Button {
+                            model.jumpToHistory(at: index)
+                            isPresented = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(isCurrent ? AtelierPalette.accent : Color.clear)
+                                    .frame(width: 5, height: 5)
+                                Text("#\(index)")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(AtelierPalette.muted)
+                                Text(entry.title)
+                                    .font(.system(size: 10.5, weight: isCurrent ? .semibold : .regular))
+                                    .foregroundColor(isCurrent ? AtelierPalette.accent : .white.opacity(0.85))
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(Self.timeFormatter.string(from: entry.timestamp))
+                                    .font(.system(size: 8, design: .monospaced))
+                                    .foregroundColor(AtelierPalette.muted)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(isCurrent ? AtelierPalette.accent.opacity(0.12) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+            }
+            .frame(maxHeight: 260)
+
+            Divider().background(AtelierPalette.line)
+
+            Text("点击任意步骤可直接跳转状态 · 原片完全不变")
+                .font(.system(size: 8.5))
+                .foregroundColor(AtelierPalette.muted)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+        }
+        .frame(width: 250)
+        .background(AtelierPalette.panel)
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: AppModel
     @State private var inspectorTab = 0
@@ -66,6 +141,7 @@ struct ContentView: View {
     @State private var showLog = false
     @State private var showLensPicker = false
     @State private var dropTargeted = false
+    @State private var showHistoryPopover = false
     /// Test/verification hook: `--initial-tab <0...7>` opens the inspector on a
     /// specific tab so layout screenshots do not depend on accessibility clicks.
     private static var defaultInspectorTab: Int {
@@ -267,7 +343,7 @@ struct ContentView: View {
                     Text(filter.title).tag(filter)
                 }
             }.pickerStyle(.segmented).labelsHidden().controlSize(.small)
-                .help("按会话内的评级/废片/自动挑图建议筛选列表（不写配方、不持久化）")
+                .help("按本地索引内的评级/废片/自动挑图建议筛选列表（不写配方，原片完全不变）")
             HStack(spacing: 8) {
                 if model.autoCullBusy {
                     Button("取消自动挑图") { model.cancelAutoCull() }
@@ -279,7 +355,7 @@ struct ContentView: View {
                     Button("自动挑图") { model.runAutoCull() }
                         .font(.system(size: 10)).buttonStyle(.bordered)
                         .disabled(model.photos.isEmpty || model.scanning || model.batchRunning)
-                        .help("启发式分析清晰度/曝光/闭眼并填入星级与废片建议；结果仅本会话，不写配方。")
+                        .help("启发式分析清晰度/曝光/闭眼并填入星级与废片建议；持久化至本地索引，原片完全不变。")
                 }
                 Spacer(minLength: 0)
             }
@@ -287,11 +363,18 @@ struct ContentView: View {
     }
 
     /// Preview-toolbar rating controls (keyboard shortcuts Option+1–5 / Option+X,
-    /// deliberately modified so plain digits/x still type into text fields). They
-    /// edit session culling state only.
+    /// deliberately modified so plain digits/x still type into text fields).
     private var ratingControls: some View {
         HStack(spacing: 4) {
             Rectangle().fill(AtelierPalette.line).frame(width: 1, height: 12)
+            if model.selectedIDs.count > 1 {
+                Text("\(model.selectedIDs.count)项")
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(AtelierPalette.accent)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(AtelierPalette.accent.opacity(0.15))
+                    .clipShape(Capsule())
+            }
             ForEach(1...5, id: \.self) { star in
                 Button {
                     model.rateSelectedPhoto(star)
@@ -302,8 +385,8 @@ struct ContentView: View {
                                          ? .yellow.opacity(0.9) : AtelierPalette.muted)
                 }.buttonStyle(.plain)
                     .keyboardShortcut(KeyEquivalent(Character("\(star)")), modifiers: [.option])
-                    .disabled(model.selectedPhoto == nil)
-                    .help("\(star) 星（快捷键 Option+\(star)；会话状态，不写配方）")
+                    .disabled(model.selectedPhoto == nil && model.selectedIDs.isEmpty)
+                    .help("\(star) 星（快捷键 Option+\(star)；持久化至本地索引，原片完全不变）")
             }
             Button {
                 model.toggleSelectedRejection()
@@ -315,15 +398,23 @@ struct ContentView: View {
                                      ? .red.opacity(0.9) : AtelierPalette.muted)
             }.buttonStyle(.plain)
                 .keyboardShortcut("x", modifiers: [.option])
-                .disabled(model.selectedPhoto == nil)
-                .help("切换废片标记（快捷键 Option+X；导出可跳过废片）")
+                .disabled(model.selectedPhoto == nil && model.selectedIDs.isEmpty)
+                .help("切换废片标记（快捷键 Option+X；持久化至本地索引，导出可跳过废片）")
         }
     }
 
     /// Sidebar row with culling badges: star rating, waste mark and the heuristic
-    /// quality recommendation. Purely session state.
+    /// quality recommendation.
     private func photoRow(_ item: PhotoItem, index: Int) -> some View {
-        Button { model.selectPhoto(item) } label: {
+        let isPrimary = model.selectedID == item.id
+        let isSelected = model.selectedIDs.contains(item.id) || isPrimary
+        return Button {
+            if NSEvent.modifierFlags.contains(.command) {
+                model.togglePhotoSelection(item)
+            } else {
+                model.selectPhoto(item)
+            }
+        } label: {
             HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.3))
@@ -363,11 +454,13 @@ struct ContentView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if model.selectedID == item.id {
+                if isPrimary {
                     Circle().fill(AtelierPalette.accent).frame(width: 5, height: 5)
+                } else if isSelected {
+                    Circle().strokeBorder(AtelierPalette.accent, lineWidth: 1.5).frame(width: 5, height: 5)
                 }
             }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(model.selectedID == item.id ? AtelierPalette.raised : .clear)
+                .background(isSelected ? AtelierPalette.raised : .clear)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }.buttonStyle(.plain).onAppear { model.loadThumbnail(item) }
     }
@@ -391,16 +484,28 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: .medium)).lineLimit(1)
             Spacer(minLength: 0)
             if model.previewBusy { ProgressView().controlSize(.mini) }
-            Button { model.undo() } label: {
-                Label("撤销", systemImage: "arrow.uturn.backward")
-                    .font(.system(size: 10))
-                    .foregroundColor(model.canUndo ? AtelierPalette.accent : AtelierPalette.muted)
-            }.buttonStyle(.plain).disabled(!model.canUndo || model.batchRunning).help("撤销 ⌘Z")
-            Button { model.redo() } label: {
-                Label("重做", systemImage: "arrow.uturn.forward")
-                    .font(.system(size: 10))
-                    .foregroundColor(model.canRedo ? AtelierPalette.accent : AtelierPalette.muted)
-            }.buttonStyle(.plain).disabled(!model.canRedo || model.batchRunning).help("重做 ⇧⌘Z")
+            Group {
+                Button { model.undo() } label: {
+                    Label("撤销", systemImage: "arrow.uturn.backward")
+                        .font(.system(size: 10))
+                        .foregroundColor(model.canUndo ? AtelierPalette.accent : AtelierPalette.muted)
+                }.buttonStyle(.plain).disabled(!model.canUndo || model.batchRunning).help("撤销 ⌘Z")
+                Button { model.redo() } label: {
+                    Label("重做", systemImage: "arrow.uturn.forward")
+                        .font(.system(size: 10))
+                        .foregroundColor(model.canRedo ? AtelierPalette.accent : AtelierPalette.muted)
+                }.buttonStyle(.plain).disabled(!model.canRedo || model.batchRunning).help("重做 ⇧⌘Z")
+                Button { showHistoryPopover.toggle() } label: {
+                    Label("历史", systemImage: "clock.arrow.circlepath")
+                        .font(.system(size: 10))
+                        .foregroundColor(model.historyEntries.count > 1 ? AtelierPalette.accent : AtelierPalette.muted)
+                }.buttonStyle(.plain)
+                    .disabled(model.historyEntries.isEmpty || model.batchRunning)
+                    .help("查看与跳转历史记录")
+                    .popover(isPresented: $showHistoryPopover, arrowEdge: .bottom) {
+                        HistoryPopoverView(model: model, isPresented: $showHistoryPopover)
+                    }
+            }
             Button { model.openNativeInspection() } label: {
                 Label("原尺寸检查", systemImage: "viewfinder")
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
