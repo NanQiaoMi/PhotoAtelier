@@ -57,12 +57,17 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     public var hairGloss: Double = 0
     /// Hair tone depth and brassiness suppression 0...1 (0 = disabled).
     public var hairDarkening: Double = 0
+    /// Hair anti-frizz smoothing strength 0...1 (0 = disabled).
+    public var hairSmoothing: Double = 0
+    /// Flyaway and stray hair removal along head silhouette 0...1 (0 = disabled).
+    public var flyawayRemoval: Double = 0
 
     public init(blemishStrength: Double = 0, keepSpots: Bool = false,
                 dodgeBurn: Double = 0, structure: Double = 0, texture: Double = 0,
                 gloss: Double = 0, teethWhiten: Double = 0, eyeBrighten: Double = 0,
                 skinToneUnify: Double = 0, skinToneReference: PortraitToneReference = .auto,
-                hairGapFilling: Double = 0, hairGloss: Double = 0, hairDarkening: Double = 0) {
+                hairGapFilling: Double = 0, hairGloss: Double = 0, hairDarkening: Double = 0,
+                hairSmoothing: Double = 0, flyawayRemoval: Double = 0) {
         self.blemishStrength = blemishStrength
         self.keepSpots = keepSpots
         self.dodgeBurn = dodgeBurn
@@ -76,12 +81,15 @@ public struct PortraitRefinementSettings: Codable, Equatable {
         self.hairGapFilling = hairGapFilling
         self.hairGloss = hairGloss
         self.hairDarkening = hairDarkening
+        self.hairSmoothing = hairSmoothing
+        self.flyawayRemoval = flyawayRemoval
     }
 
     private enum CodingKeys: String, CodingKey {
         case blemishStrength, keepSpots, dodgeBurn, structure, texture, gloss
         case teethWhiten, eyeBrighten, skinToneUnify, skinToneReference
         case hairGapFilling, hairGloss, hairDarkening
+        case hairSmoothing, flyawayRemoval
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +107,8 @@ public struct PortraitRefinementSettings: Codable, Equatable {
         hairGapFilling = try container.decodeIfPresent(Double.self, forKey: .hairGapFilling) ?? 0
         hairGloss = try container.decodeIfPresent(Double.self, forKey: .hairGloss) ?? 0
         hairDarkening = try container.decodeIfPresent(Double.self, forKey: .hairDarkening) ?? 0
+        hairSmoothing = try container.decodeIfPresent(Double.self, forKey: .hairSmoothing) ?? 0
+        flyawayRemoval = try container.decodeIfPresent(Double.self, forKey: .flyawayRemoval) ?? 0
     }
 
     /// True when every masked control is at its neutral value. The tone reference
@@ -107,6 +117,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
         blemishStrength == 0 && dodgeBurn == 0 && structure == 0 && texture == 0
             && gloss == 0 && teethWhiten == 0 && eyeBrighten == 0 && skinToneUnify == 0
             && hairGapFilling == 0 && hairGloss == 0 && hairDarkening == 0
+            && hairSmoothing == 0 && flyawayRemoval == 0
     }
 }
 
@@ -186,6 +197,8 @@ public enum PortraitRefinementEngine {
         try require(settings.hairGapFilling, named: "发缝填充强度")
         try require(settings.hairGloss, named: "秀发光泽强度")
         try require(settings.hairDarkening, named: "发色深邃强度")
+        try require(settings.hairSmoothing, named: "秀发柔顺强度")
+        try require(settings.flyawayRemoval, named: "边缘去碎发强度")
     }
 
     public static func apply(_ image: CIImage,
@@ -282,8 +295,9 @@ public enum PortraitRefinementEngine {
         }
         try cancellation?.check()
 
-        // Hair refinement: gap filling, gloss sheen, tone depth
-        if settings.hairGapFilling > 0 || settings.hairGloss > 0 || settings.hairDarkening > 0 {
+        // Hair refinement: gap filling, gloss sheen, tone depth, smoothing, flyaway removal
+        if settings.hairGapFilling > 0 || settings.hairGloss > 0 || settings.hairDarkening > 0
+            || settings.hairSmoothing > 0 || settings.flyawayRemoval > 0 {
             current = try HairRefinementEngine.apply(
                 current, settings: settings, faceMasks: faceMasks,
                 landmarks: landmarks, context: context, cancellation: cancellation
@@ -291,6 +305,8 @@ public enum PortraitRefinementEngine {
             if settings.hairGapFilling > 0 { steps.append("hairGap") }
             if settings.hairGloss > 0 { steps.append("hairGloss") }
             if settings.hairDarkening > 0 { steps.append("hairDarkening") }
+            if settings.hairSmoothing > 0 { steps.append("hairSmoothing") }
+            if settings.flyawayRemoval > 0 { steps.append("flyawayRemoval") }
         }
 
         let note = notes.isEmpty ? nil : notes.joined(separator: " ")
