@@ -83,6 +83,8 @@ struct PortraitRetouchPanel: View {
                     portraitSlider("发缝填充", \.hairGapFilling)
                     portraitSlider("秀发光泽", \.hairGloss)
                     portraitSlider("发色深邃", \.hairDarkening)
+                    portraitSlider("秀发柔顺", \.hairSmoothing)
+                    portraitSlider("边缘去碎发", \.flyawayRemoval)
                 }
             }
             .padding(.top, 16)

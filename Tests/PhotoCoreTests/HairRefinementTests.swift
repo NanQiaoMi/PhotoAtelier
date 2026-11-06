@@ -33,6 +33,14 @@ final class HairRefinementTests: XCTestCase {
         XCTAssertFalse(settings.isNeutral)
         settings.hairDarkening = 0
 
+        settings.hairSmoothing = 0.6
+        XCTAssertFalse(settings.isNeutral)
+        settings.hairSmoothing = 0
+
+        settings.flyawayRemoval = 0.7
+        XCTAssertFalse(settings.isNeutral)
+        settings.flyawayRemoval = 0
+
         XCTAssertTrue(settings.isNeutral)
 
         // Validation bounds
@@ -47,10 +55,18 @@ final class HairRefinementTests: XCTestCase {
         invalid = PortraitRefinementSettings()
         invalid.hairDarkening = Double.nan
         XCTAssertThrowsError(try PortraitRefinementEngine.validate(invalid))
+
+        invalid = PortraitRefinementSettings()
+        invalid.hairSmoothing = 1.2
+        XCTAssertThrowsError(try PortraitRefinementEngine.validate(invalid))
+
+        invalid = PortraitRefinementSettings()
+        invalid.flyawayRemoval = -0.5
+        XCTAssertThrowsError(try PortraitRefinementEngine.validate(invalid))
     }
 
     func testLegacyRecipeDecodingWithoutHairFields() throws {
-        // Legacy JSON produced before P2-B without hair fields
+        // Legacy JSON produced before P2-B/P2-C without hair fields
         let legacyJSON = """
         {
             "blemishStrength": 0.2,
@@ -72,12 +88,16 @@ final class HairRefinementTests: XCTestCase {
         XCTAssertEqual(decoded.hairGapFilling, 0.0, "缺失的发缝填充必须默认解码为 0")
         XCTAssertEqual(decoded.hairGloss, 0.0, "缺失的秀发光泽必须默认解码为 0")
         XCTAssertEqual(decoded.hairDarkening, 0.0, "缺失的发色深邃必须默认解码为 0")
+        XCTAssertEqual(decoded.hairSmoothing, 0.0, "缺失的秀发柔顺必须默认解码为 0")
+        XCTAssertEqual(decoded.flyawayRemoval, 0.0, "缺失的去碎发必须默认解码为 0")
 
-        // Full round-trip with hair fields
+        // Full round-trip with all hair fields
         var full = decoded
         full.hairGapFilling = 0.6
         full.hairGloss = 0.45
         full.hairDarkening = 0.35
+        full.hairSmoothing = 0.50
+        full.flyawayRemoval = 0.65
         let encoded = try JSONEncoder().encode(full)
         let restored = try JSONDecoder().decode(PortraitRefinementSettings.self, from: encoded)
         XCTAssertEqual(full, restored)
@@ -89,11 +109,6 @@ final class HairRefinementTests: XCTestCase {
         let width = 120, height = 120
         let extent = CGRect(x: 0, y: 0, width: width, height: height)
 
-        // Synthetic image:
-        // Face occupies bottom-center [30...90, 10...60] (normalized [0.25...0.75, 0.08...0.50])
-        // Hair region is [20...100, 60...115]
-        // Scalp parting is along x in [56...64], y in [65...105] (bright warm skin tone)
-        // Dark hair is in [20...55, 60...115] and [65...100, 60...115] (dark brown/black)
         let bitmap = renderImage(width: width, height: height) { x, y in
             if y >= 65 && y <= 105 && abs(x - 60) <= 3 {
                 // Exposed scalp in parting: bright warm skin tone (R=0.65, G=0.52, B=0.45)
@@ -252,6 +267,108 @@ final class HairRefinementTests: XCTestCase {
         XCTAssertLessThan(afterBrassiness, beforeBrassiness, "枯黄杂色应被有效抑制")
     }
 
+    func testHairSmoothingSoftensFrizzyHairTexture() throws {
+        let width = 120, height = 120
+        let extent = CGRect(x: 0, y: 0, width: width, height: height)
+
+        // Synthetic hair with high-frequency alternating frizz pattern
+        let bitmap = renderImage(width: width, height: height) { x, y in
+            if y >= 60 && y <= 115 && x >= 20 && x <= 100 {
+                let isFrizzyPixel = (x + y) % 2 == 0
+                let base: Float = 0.22
+                let val: Float = isFrizzyPixel ? (base + 0.08) : (base - 0.08)
+                return (r: val, g: val * 0.9, b: val * 0.8, a: 1.0)
+            } else {
+                return (r: 0.50, g: 0.50, b: 0.50, a: 1.0)
+            }
+        }
+
+        let faceBounds = CGRect(x: 0.25, y: 0.08, width: 0.50, height: 0.42)
+        let maskSet = FaceSemanticMaskSet(
+            extent: extent,
+            resolution: CGSize(width: width, height: height),
+            faceBounds: faceBounds,
+            confidence: 0.95,
+            faceCount: 1,
+            skin: nil,
+            teeth: nil,
+            sclera: nil,
+            iris: nil,
+            lips: nil,
+            brows: nil
+        )
+
+        var settings = PortraitRefinementSettings()
+        settings.hairSmoothing = 0.85
+        let result = try HairRefinementEngine.apply(bitmap, settings: settings,
+                                                   faceMasks: [maskSet], context: context)
+
+        let before = pixelData(bitmap)
+        let after = pixelData(result)
+
+        // Compare contrast between adjacent pixels (40, 75) and (41, 75) in frizzy hair
+        let idx1 = (75 * width + 40) * 4
+        let idx2 = (75 * width + 41) * 4
+        let contrastBefore = abs(before[idx1] - before[idx2])
+        let contrastAfter = abs(after[idx1] - after[idx2])
+
+        XCTAssertLessThan(contrastAfter, contrastBefore * 0.70,
+                          "秀发柔顺应显著降低相邻微观毛躁像素之间的对比度")
+    }
+
+    func testFlyawayRemovalSuppressesProtrudingStrayHairsInHaloBand() throws {
+        let width = 120, height = 120
+        let extent = CGRect(x: 0, y: 0, width: width, height: height)
+
+        // Head is centered at x=60. Face top ~60. Crown top ~100.
+        // Crown halo band is around y in [95...115].
+        // Background is light studio gray (R=0.70, G=0.70, B=0.70).
+        // A single protruding stray hair strand sticks out at (x=60, y=105).
+        let bitmap = renderImage(width: width, height: height) { x, y in
+            if y >= 60 && y <= 95 && x >= 25 && x <= 95 {
+                // Main hair body (dark brown)
+                return (r: 0.12, g: 0.10, b: 0.08, a: 1.0)
+            } else if x == 60 && y >= 96 && y <= 108 {
+                // Thin protruding dark stray hair strand sticking into light background
+                return (r: 0.12, g: 0.10, b: 0.08, a: 1.0)
+            } else {
+                // Background
+                return (r: 0.70, g: 0.70, b: 0.70, a: 1.0)
+            }
+        }
+
+        let faceBounds = CGRect(x: 0.25, y: 0.08, width: 0.50, height: 0.42)
+        let maskSet = FaceSemanticMaskSet(
+            extent: extent,
+            resolution: CGSize(width: width, height: height),
+            faceBounds: faceBounds,
+            confidence: 0.95,
+            faceCount: 1,
+            skin: nil,
+            teeth: nil,
+            sclera: nil,
+            iris: nil,
+            lips: nil,
+            brows: nil
+        )
+
+        var settings = PortraitRefinementSettings()
+        settings.flyawayRemoval = 0.90
+        let result = try HairRefinementEngine.apply(bitmap, settings: settings,
+                                                   faceMasks: [maskSet], context: context)
+
+        let before = pixelData(bitmap)
+        let after = pixelData(result)
+
+        // Measure stray hair pixel at (60, 102)
+        let strayOffset = (102 * width + 60) * 4
+        let strayBefore = before[strayOffset]
+        let strayAfter = after[strayOffset]
+
+        XCTAssertGreaterThan(strayAfter, strayBefore + 0.15,
+                             "外轮廓光晕带内的突出碎发应被邻域浅色背景有效消除抚平")
+    }
+
     func testPortraitPipelineIntegratesHairSteps() throws {
         let width = 120, height = 120
         let extent = CGRect(x: 0, y: 0, width: width, height: height)
@@ -278,6 +395,8 @@ final class HairRefinementTests: XCTestCase {
         settings.hairGapFilling = 0.5
         settings.hairGloss = 0.5
         settings.hairDarkening = 0.5
+        settings.hairSmoothing = 0.5
+        settings.flyawayRemoval = 0.5
 
         let res = try PortraitRefinementEngine.apply(bitmap, settings: settings,
                                                     faceMasks: [maskSet], context: context)
@@ -285,6 +404,8 @@ final class HairRefinementTests: XCTestCase {
         XCTAssertTrue(res.report.appliedSteps.contains("hairGap"))
         XCTAssertTrue(res.report.appliedSteps.contains("hairGloss"))
         XCTAssertTrue(res.report.appliedSteps.contains("hairDarkening"))
+        XCTAssertTrue(res.report.appliedSteps.contains("hairSmoothing"))
+        XCTAssertTrue(res.report.appliedSteps.contains("flyawayRemoval"))
     }
 
     // MARK: - Helpers
