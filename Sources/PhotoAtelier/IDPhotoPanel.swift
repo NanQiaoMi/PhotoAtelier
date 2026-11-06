@@ -157,6 +157,10 @@ struct IDPhotoPanel: View {
             separator
             printSection
             }
+
+            separator
+            backdropSection
+
             separator
             HStack(spacing: 8) {
                 Button("重置证件照设置") { model.resetCertificatePhoto() }
@@ -164,6 +168,10 @@ struct IDPhotoPanel: View {
                     .foregroundColor(isActive ? AtelierPalette.accent : AtelierPalette.muted)
                     .disabled(!canEdit || model.adjustments.certificatePhoto == nil)
                 Spacer(minLength: 0)
+                Button("重置背景修复") { model.resetBackdrop() }
+                    .font(.system(size: 10)).buttonStyle(.plain)
+                    .foregroundColor(model.backdropIsActive ? AtelierPalette.accent : AtelierPalette.muted)
+                    .disabled(!canEdit || model.adjustments.backdrop == nil)
             }
         }
         .onAppear {
@@ -427,5 +435,52 @@ struct IDPhotoPanel: View {
         let size = settings.size ?? settings.print.photoSize
         let pixels = IDPhotoLayout.pixelSize(for: size, dpi: settings.crop.dpi)
         return "\(Int(pixels.width))×\(Int(pixels.height)) px"
+    }
+
+    // MARK: - Studio Backdrop Refinement (P2-D)
+
+    private var backdropSection: some View {
+        Group {
+            panelHeading("影棚纯色背景修复")
+            Toggle("启用影棚背景修复", isOn: backdropEnabledBinding)
+                .toggleStyle(.switch).controlSize(.mini)
+                .font(.system(size: 10))
+            AdjustmentSlider(title: "背景平整", value: backdropSmoothingBinding, range: 0...1, percent: true)
+                .help("平滑无缝背景纸折痕、幕布褶皱、接缝与不均光影，保护主体与地面自然阴影。")
+            AdjustmentSlider(title: "瑕疵去污", value: backdropCleanupBinding, range: 0...1, percent: true)
+                .help("自动识别并消除背景纸上的脚印、灰尘点、胶带印与污渍。")
+            AdjustmentSlider(title: "色调统一", value: backdropUniformityBinding, range: 0...1, percent: true)
+                .help("消除背景杂色偏色，使纯色幕布色相均匀一致。")
+        }
+        .disabled(!canEdit)
+        .opacity(canEdit ? 1 : 0.5)
+    }
+
+    private var backdropEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { model.backdropSettings.enabled },
+            set: { model.setBackdropEnabled($0) }
+        )
+    }
+
+    private var backdropSmoothingBinding: Binding<Double> {
+        Binding(
+            get: { model.backdropSettings.smoothing },
+            set: { v in model.updateBackdrop { $0.smoothing = v } }
+        )
+    }
+
+    private var backdropCleanupBinding: Binding<Double> {
+        Binding(
+            get: { model.backdropSettings.cleanup },
+            set: { v in model.updateBackdrop { $0.cleanup = v } }
+        )
+    }
+
+    private var backdropUniformityBinding: Binding<Double> {
+        Binding(
+            get: { model.backdropSettings.uniformity },
+            set: { v in model.updateBackdrop { $0.uniformity = v } }
+        )
     }
 }

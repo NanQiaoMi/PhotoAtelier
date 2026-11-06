@@ -2330,6 +2330,36 @@ final class AppModel: ObservableObject {
         status = "已选择本地背景图片：\(url.lastPathComponent)；预览按比例裁切填满画面。"
     }
 
+    // MARK: Studio backdrop refinement (P2-D)
+
+    var backdropSettings: BackdropRefinementSettings {
+        adjustments.backdrop ?? BackdropRefinementSettings()
+    }
+
+    var backdropIsActive: Bool {
+        adjustments.backdrop.map { !$0.isNeutral } ?? false
+    }
+
+    func updateBackdrop(_ mutate: (inout BackdropRefinementSettings) -> Void) {
+        var settings = adjustments.backdrop ?? BackdropRefinementSettings()
+        mutate(&settings)
+        adjustments.backdrop = settings
+    }
+
+    func setBackdropEnabled(_ enabled: Bool) {
+        updateBackdrop { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "影棚背景修复已启用：智能平整背景纸折痕并清除污斑，保护人物边缘与自然接触阴影。"
+            : "影棚背景修复已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetBackdrop() {
+        adjustments.backdrop = nil
+        status = "已重置影棚背景修复设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`

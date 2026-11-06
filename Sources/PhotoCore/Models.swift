@@ -291,6 +291,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v13.
     /// Absent or fully neutral (all strengths zero) make-up keeps the pre-v13 path.
     public var makeup: MakeupSettings? = nil
+    /// Optional for exact compatibility with recipes written before v14.
+    /// Absent or disabled studio backdrop refinement keeps the pre-v14 path.
+    public var backdrop: BackdropRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -417,6 +420,58 @@ public struct CertificatePhotoReport: Codable, Equatable {
         self.background = background
         self.coverage = coverage
         self.outputPixelSize = outputPixelSize
+        self.note = note
+    }
+}
+
+/// Studio backdrop smoothing & defect removal settings (recipe v14).
+public struct BackdropRefinementSettings: Codable, Equatable {
+    /// Master toggle for backdrop refinement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Smoothing strength for backdrop paper wrinkles, seams, and lighting gradients (0...1).
+    public var smoothing: Double = 0
+    /// Cleanup strength for isolated dust spots, footprints, scuffs and tape on backdrop (0...1).
+    public var cleanup: Double = 0
+    /// Neutralize color casts across the backdrop (0...1).
+    public var uniformity: Double = 0
+
+    public init(enabled: Bool = false,
+                smoothing: Double = 0,
+                cleanup: Double = 0,
+                uniformity: Double = 0) {
+        self.enabled = enabled
+        self.smoothing = smoothing
+        self.cleanup = cleanup
+        self.uniformity = uniformity
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (smoothing == 0 && cleanup == 0 && uniformity == 0)
+    }
+
+    public func validated() throws -> BackdropRefinementSettings {
+        guard smoothing.isFinite, (0...1).contains(smoothing) else {
+            throw AtelierError.invalidConfiguration("背景平整强度必须在 0...1 之间。")
+        }
+        guard cleanup.isFinite, (0...1).contains(cleanup) else {
+            throw AtelierError.invalidConfiguration("背景去污强度必须在 0...1 之间。")
+        }
+        guard uniformity.isFinite, (0...1).contains(uniformity) else {
+            throw AtelierError.invalidConfiguration("背景色调统一必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-D studio backdrop refinement stage.
+public struct BackdropRefinementReport: Codable, Equatable {
+    public var applied: Bool
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.appliedSteps = appliedSteps
         self.note = note
     }
 }
@@ -737,6 +792,12 @@ public struct Recipe: Codable, Equatable {
         guard version >= 14 || makeupGroups.allSatisfy({ $0 == nil || !$0!.requiresVersion14 }) else {
             throw AtelierError.invalidConfiguration("眼线/睫毛/美瞳/眼神光/高光修容等增强妆容需要配方版本 14，不能静默降级。")
         }
+        let backdropGroups = [adjustments.backdrop,
+                              automatic?.baseline.backdrop,
+                              automatic?.referenceSettings.backdrop]
+        guard version >= 14 || backdropGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的影棚背景修复需要配方版本 14，不能静默降级。")
+        }
         guard version >= 13 || makeupGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
             throw AtelierError.invalidConfiguration("非中性的妆容需要配方版本 13，不能静默降级。")
         }
@@ -934,6 +995,8 @@ public struct ProcessingReport: Codable, Equatable {
     /// Per-photo P1-C make-up status. `nil` when the recipe has no active make-up;
     /// `applied == false` records an explicit no-face skip for batch manifests.
     public var makeup: MakeupReport?
+    /// Per-photo P2-D studio backdrop refinement status. `nil` when absent or disabled.
+    public var backdrop: BackdropRefinementReport?
     public init() {}
 }
 

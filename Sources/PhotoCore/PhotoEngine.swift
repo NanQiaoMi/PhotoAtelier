@@ -572,6 +572,17 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
+        // P2-D: Studio backdrop smoothing, wrinkle elimination & defect cleanup.
+        if let backdrop = settings.backdrop, !backdrop.isNeutral {
+            let backdropResult = try BackdropRefinementEngine.apply(
+                working, settings: backdrop, personMatte: preparedPersonMatte,
+                context: context, cancellation: cancellation
+            )
+            working = backdropResult.image
+            report.backdrop = backdropResult.report
+        }
+        try cancellation?.check()
+
         // P1-B: background replacement / certificate photo runs after reference
         // color and before local masks. A size preset changes the canvas extent;
         // the local-mask reference below therefore uses the cropped image and mask
