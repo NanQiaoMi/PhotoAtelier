@@ -309,7 +309,7 @@ public enum PhotoLoader {
     /// Whether a filename is even a candidate input, by extension only
     /// (raster formats plus RAW decoder candidates). A filename extension does not
     /// prove the file decodes; `load` still reports the real decode error.
-    static func isSupportedCandidate(_ url: URL) -> Bool {
+    public static func isSupportedCandidate(_ url: URL) -> Bool {
         let fileExtension = url.pathExtension.lowercased()
         return rasterExtensions.contains(fileExtension) || isRawCandidate(url)
     }

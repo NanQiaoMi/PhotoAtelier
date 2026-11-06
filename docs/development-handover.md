@@ -330,9 +330,10 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **P2-B：发缝填充 / 秀发光泽 / 发色深邃** | ✅ 已交付 (`feat/p2b-hair-refinement`) | 基于 Core Image 着色器与人脸中轴走廊的发缝/头皮自动识别遮蔽、发冠天使光环光泽增强、去枯黄深邃发色；严格向后兼容 | 原生 CIColorKernel，单帧 < 4ms，测试全绿 |
 | **P2-C：秀发柔顺 / 边缘去碎发** | ✅ 已交付 (`feat/p2c-hair-flyaway-smoothing`) | 基于几何光晕带与边缘保护微观滤波的头顶外轮廓碎发消除、发丝防毛躁柔顺；严格向后兼容 | 原生 CIColorKernel + 自适应高斯核，单帧 < 5ms，测试全绿 |
 | **P2-D：影棚纯色背景平整与修复** | ✅ 已交付 (`feat/p2d-studio-backdrop-refinement`) | 基于 Vision 人物抠图与频域差分滤波的背景纸折痕抚平、脚印污斑清除与色调统一；严格向后兼容 | 原生 CIColorKernel + 自适应高斯核，单帧 < 6ms，测试全绿 |
+| **P2-E：联机拍摄热文件夹实时监视与自动调色** | ✅ 已交付 (`feat/p2e-tethered-watch-folder`) | 基于 macOS DispatchSource 系统级热文件夹监视、文件落盘稳定性检测（Settle Check）、自动配方调色与全屏直出预览 | 原生 POSIX 描述符事件 + Timer 巡检，全厂相机联机软件兼容，563 测试全绿 |
 | 衣物 / 宠物 | 规划中 | 衣物祛皱；衣物平整；宠物毛发美化 | 需许可评估；优先用自研经典算法 |
 | 天空替换 | 规划中 | 天空分割 + 光照匹配 | 分割质量与边缘；真实照片评审 |
-| 联机拍摄 | `ImageCaptureCore` 或「监视文件夹热导入」；设备兼容复杂 | 先做通用热文件夹；相机型号兼容矩阵 |
+| 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
 | RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |
 | 多端 / 云协作 | 优先 Windows 端 + 简单共享（WebDAV/iCloud Drive 配方同步），不做账号计费 | 独立产品与验收面，投入大 |

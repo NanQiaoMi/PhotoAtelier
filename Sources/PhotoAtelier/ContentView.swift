@@ -242,6 +242,9 @@ struct ContentView: View {
         }) {
             NativeInspectionView(model: model, controller: model.nativeInspection)
         }
+        .sheet(isPresented: $model.showTetheredSheet) {
+            TetheredWatchSheet(model: model)
+        }
     }
 
     private var header: some View {
@@ -259,6 +262,23 @@ struct ContentView: View {
             toolButton("载入配方", icon: "slider.horizontal.3") { model.loadRecipe() }.disabled(model.batchRunning)
             toolButton("风格库", icon: "square.grid.2x2") { model.showStyleBrowser = true }
             toolButton("导入 LUT", icon: "plus") { model.importLUT() }.disabled(model.batchRunning || model.lutLibraryBusy)
+            Button {
+                model.showTetheredSheet = true
+            } label: {
+                HStack(spacing: 5) {
+                    if model.tetheredState.isWatching {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                    }
+                    Image(systemName: "camera.viewfinder")
+                    Text(model.tetheredState.isWatching ? "联机中" : "联机拍摄")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(model.tetheredState.isWatching ? AtelierPalette.accent : .white.opacity(0.65))
+            }
+            .buttonStyle(.plain)
+            .help("摄影棚联机拍摄热文件夹实时监视与自动调色")
             Button(action: { model.chooseInput() }) {
                 Label("打开照片", systemImage: "photo.on.rectangle").font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 15).padding(.vertical, 10)
@@ -281,12 +301,25 @@ struct ContentView: View {
             }.padding(.horizontal, 18).padding(.top, 23)
             cullingControls
             if let root = model.inputRoot {
-                Label(root.lastPathComponent, systemImage: "folder.fill")
-                    .font(.system(size: 12)).lineLimit(1).help(root.path)
-                    .foregroundColor(.white.opacity(0.85)).padding(.horizontal, 18).padding(.top, 17)
+                HStack(spacing: 6) {
+                    Label(root.lastPathComponent, systemImage: "folder.fill")
+                        .font(.system(size: 12)).lineLimit(1).help(root.path)
+                        .foregroundColor(.white.opacity(0.85))
+                    if model.tetheredState.isWatching {
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                        Text("联机").font(.system(size: 9, weight: .bold)).foregroundColor(.green)
+                    }
+                }
+                .padding(.horizontal, 18).padding(.top, 17)
             } else {
-                Text("尚未选择文件夹").font(.system(size: 11)).foregroundColor(AtelierPalette.muted)
-                    .padding(.horizontal, 18).padding(.top, 17)
+                HStack(spacing: 6) {
+                    Text("尚未选择文件夹").font(.system(size: 11)).foregroundColor(AtelierPalette.muted)
+                    if model.tetheredState.isWatching {
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                        Text("联机中").font(.system(size: 9, weight: .bold)).foregroundColor(.green)
+                    }
+                }
+                .padding(.horizontal, 18).padding(.top, 17)
             }
             if !model.importIssues.isEmpty {
                 Button { model.reviewImportIssues() } label: {
