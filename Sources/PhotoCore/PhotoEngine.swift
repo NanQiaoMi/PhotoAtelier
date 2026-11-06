@@ -494,6 +494,7 @@ public final class PhotoEngine {
             } else {
                 let portraitResult = try PortraitRefinementEngine.apply(
                     working, settings: portrait, faceMasks: faces,
+                    landmarks: preparedLandmarks,
                     context: context, cancellation: cancellation)
                 working = portraitResult.image
                 report.portrait = portraitResult.report

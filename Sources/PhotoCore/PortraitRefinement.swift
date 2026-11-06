@@ -51,11 +51,18 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     public var skinToneUnify: Double = 0
     /// Which face supplies the reference tone for unification.
     public var skinToneReference: PortraitToneReference = .auto
+    /// Hair parting and scalp gap filling strength 0...1 (0 = disabled).
+    public var hairGapFilling: Double = 0
+    /// Hair sheen and angel ring highlight strength 0...1 (0 = disabled).
+    public var hairGloss: Double = 0
+    /// Hair tone depth and brassiness suppression 0...1 (0 = disabled).
+    public var hairDarkening: Double = 0
 
     public init(blemishStrength: Double = 0, keepSpots: Bool = false,
                 dodgeBurn: Double = 0, structure: Double = 0, texture: Double = 0,
                 gloss: Double = 0, teethWhiten: Double = 0, eyeBrighten: Double = 0,
-                skinToneUnify: Double = 0, skinToneReference: PortraitToneReference = .auto) {
+                skinToneUnify: Double = 0, skinToneReference: PortraitToneReference = .auto,
+                hairGapFilling: Double = 0, hairGloss: Double = 0, hairDarkening: Double = 0) {
         self.blemishStrength = blemishStrength
         self.keepSpots = keepSpots
         self.dodgeBurn = dodgeBurn
@@ -66,6 +73,32 @@ public struct PortraitRefinementSettings: Codable, Equatable {
         self.eyeBrighten = eyeBrighten
         self.skinToneUnify = skinToneUnify
         self.skinToneReference = skinToneReference
+        self.hairGapFilling = hairGapFilling
+        self.hairGloss = hairGloss
+        self.hairDarkening = hairDarkening
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case blemishStrength, keepSpots, dodgeBurn, structure, texture, gloss
+        case teethWhiten, eyeBrighten, skinToneUnify, skinToneReference
+        case hairGapFilling, hairGloss, hairDarkening
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        blemishStrength = try container.decodeIfPresent(Double.self, forKey: .blemishStrength) ?? 0
+        keepSpots = try container.decodeIfPresent(Bool.self, forKey: .keepSpots) ?? false
+        dodgeBurn = try container.decodeIfPresent(Double.self, forKey: .dodgeBurn) ?? 0
+        structure = try container.decodeIfPresent(Double.self, forKey: .structure) ?? 0
+        texture = try container.decodeIfPresent(Double.self, forKey: .texture) ?? 0
+        gloss = try container.decodeIfPresent(Double.self, forKey: .gloss) ?? 0
+        teethWhiten = try container.decodeIfPresent(Double.self, forKey: .teethWhiten) ?? 0
+        eyeBrighten = try container.decodeIfPresent(Double.self, forKey: .eyeBrighten) ?? 0
+        skinToneUnify = try container.decodeIfPresent(Double.self, forKey: .skinToneUnify) ?? 0
+        skinToneReference = try container.decodeIfPresent(PortraitToneReference.self, forKey: .skinToneReference) ?? .auto
+        hairGapFilling = try container.decodeIfPresent(Double.self, forKey: .hairGapFilling) ?? 0
+        hairGloss = try container.decodeIfPresent(Double.self, forKey: .hairGloss) ?? 0
+        hairDarkening = try container.decodeIfPresent(Double.self, forKey: .hairDarkening) ?? 0
     }
 
     /// True when every masked control is at its neutral value. The tone reference
@@ -73,6 +106,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     public var isNeutral: Bool {
         blemishStrength == 0 && dodgeBurn == 0 && structure == 0 && texture == 0
             && gloss == 0 && teethWhiten == 0 && eyeBrighten == 0 && skinToneUnify == 0
+            && hairGapFilling == 0 && hairGloss == 0 && hairDarkening == 0
     }
 }
 
@@ -149,11 +183,15 @@ public enum PortraitRefinementEngine {
         try require(settings.teethWhiten, named: "牙齿美白")
         try require(settings.eyeBrighten, named: "眼白提亮")
         try require(settings.skinToneUnify, named: "肤色统一")
+        try require(settings.hairGapFilling, named: "发缝填充强度")
+        try require(settings.hairGloss, named: "秀发光泽强度")
+        try require(settings.hairDarkening, named: "发色深邃强度")
     }
 
     public static func apply(_ image: CIImage,
                              settings: PortraitRefinementSettings,
                              faceMasks: [FaceSemanticMaskSet],
+                             landmarks: [FaceLandmarkSet] = [],
                              context: CIContext,
                              cancellation: CancellationToken? = nil) throws -> PortraitRefinementResult {
         try validate(settings)
@@ -242,6 +280,19 @@ public enum PortraitRefinementEngine {
                 }
             }
         }
+        try cancellation?.check()
+
+        // Hair refinement: gap filling, gloss sheen, tone depth
+        if settings.hairGapFilling > 0 || settings.hairGloss > 0 || settings.hairDarkening > 0 {
+            current = try HairRefinementEngine.apply(
+                current, settings: settings, faceMasks: faceMasks,
+                landmarks: landmarks, context: context, cancellation: cancellation
+            )
+            if settings.hairGapFilling > 0 { steps.append("hairGap") }
+            if settings.hairGloss > 0 { steps.append("hairGloss") }
+            if settings.hairDarkening > 0 { steps.append("hairDarkening") }
+        }
+
         let note = notes.isEmpty ? nil : notes.joined(separator: " ")
         return PortraitRefinementResult(image: current,
             report: PortraitRefinementReport(applied: !steps.isEmpty, faceCount: faceCount,

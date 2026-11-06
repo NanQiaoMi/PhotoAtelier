@@ -74,6 +74,16 @@ struct PortraitRetouchPanel: View {
                         .disabled(settings.skinToneUnify == 0)
                         .help("自动/中位取中位肤色；最亮取最亮人脸作参考。")
                 }
+                separator
+                Group {
+                    Text("秀发精修与发缝")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.vertical, 4)
+                    portraitSlider("发缝填充", \.hairGapFilling)
+                    portraitSlider("秀发光泽", \.hairGloss)
+                    portraitSlider("发色深邃", \.hairDarkening)
+                }
             }
             .padding(.top, 16)
             .disabled(!canEdit)
