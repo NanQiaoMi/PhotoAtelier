@@ -194,6 +194,11 @@ final class AppModel: ObservableObject {
     @Published var deliveryServerRunning: Bool = false
     @Published var deliveryServerLocalURL: String?
     @Published var deliveryServerLANURL: String?
+    // P2-E: Tethered shooting hot folder watcher
+    public let tetheredWatcher = TetheredWatchManager()
+    @Published public var tetheredConfig = TetheredWatchConfiguration()
+    @Published public var tetheredState: TetheredWatchState = .idle
+    @Published public var showTetheredSheet: Bool = false
     @Published var analysis: PhotoAnalysis?
     @Published var analysisBusy = false
     @Published var analysisError: String?
@@ -383,6 +388,7 @@ final class AppModel: ObservableObject {
                 + " · makeupVersion=\(makeupVersion)")
         }
         #endif
+        setupTetheredWatcher()
     }
 
     func chooseInput() {
@@ -1508,6 +1514,99 @@ final class AppModel: ObservableObject {
             stopDeliveryServer()
         } else {
             startDeliveryServer()
+        }
+    }
+
+    // MARK: - Tethered Shooting Hot Folder (P2-E)
+
+    private func setupTetheredWatcher() {
+        tetheredWatcher.onStateChange = { [weak self] state in
+            DispatchQueue.main.async {
+                self?.tetheredState = state
+            }
+        }
+        tetheredWatcher.onNewPhotos = { [weak self] urls in
+            DispatchQueue.main.async {
+                self?.handleTetheredNewPhotos(urls)
+            }
+        }
+    }
+
+    func chooseTetheredFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择联机拍摄热文件夹"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        if panel.runModal() == .OK, let url = panel.url {
+            tetheredConfig.folderURL = url
+        }
+    }
+
+    func startTetheredWatch(folderURL: URL? = nil) {
+        if let folderURL {
+            tetheredConfig.folderURL = folderURL
+        }
+        guard let folder = tetheredConfig.folderURL else {
+            errorMessage = "请先选择需要监视的联机拍摄热文件夹路径。"
+            return
+        }
+        do {
+            try tetheredWatcher.start(configuration: tetheredConfig)
+            if inputRoot == nil {
+                inputRoot = folder
+            }
+            status = "已开启联机拍摄监视：\(folder.lastPathComponent)"
+        } catch {
+            errorMessage = "启动联机拍摄监视失败：\(error.localizedDescription)"
+        }
+    }
+
+    func stopTetheredWatch() {
+        tetheredWatcher.stop()
+        status = "已停止联机拍摄热文件夹监视。"
+    }
+
+    func toggleTetheredWatch() {
+        if tetheredWatcher.state.isWatching {
+            stopTetheredWatch()
+        } else {
+            startTetheredWatch()
+        }
+    }
+
+    func triggerTetheredScan() {
+        tetheredWatcher.manualScan()
+    }
+
+    func handleTetheredNewPhotos(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let currentRoot = inputRoot
+        let libraryRoot = currentRoot ?? tetheredConfig.folderURL ?? urls.first?.deletingLastPathComponent()
+        guard let validRoot = libraryRoot else { return }
+
+        let incoming = PhotoSelection.items(fileURLs: urls, root: validRoot)
+        guard !incoming.isEmpty else { return }
+
+        if inputRoot == nil {
+            inputRoot = validRoot
+        }
+
+        var merged = PhotoSelection.merge(existing: photos, incoming: incoming)
+        restoreCatalogAttributes(for: &merged, root: validRoot)
+        let added = merged.count - photos.count
+        photos = merged
+
+        status = added > 0
+            ? "联机拍摄：已接入 \(added) 张新照片 · 共 \(merged.count) 张"
+            : "联机拍摄：收到照片更新 · 共 \(merged.count) 张"
+
+        if tetheredConfig.autoSelectLatest, let latest = incoming.last {
+            selectPhoto(latest)
+        } else if selectedID == nil, let first = merged.first {
+            selectPhoto(first)
         }
     }
 
