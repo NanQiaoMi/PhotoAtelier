@@ -294,6 +294,11 @@ struct PortraitRetouchPanel: View {
                     liquifySlider("鼻翼", \.narrowNose)
                     liquifySlider("嘴唇", \.lipWidth)
                     liquifySlider("下巴", \.chin)
+                }
+                Group {
+                    liquifySlider("高颅顶", \.cranialTop)
+                    liquifySlider("发际线", \.hairline)
+                    liquifySlider("丰太阳穴", \.temple)
                     AdjustmentSlider(title: "整体强度", value: liquifyStrengthBinding,
                                      range: 0...1, percent: true)
                     Toggle("保护背景直线（脸框外衰减）", isOn: liquifyBackgroundBinding)
