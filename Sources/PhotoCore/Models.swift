@@ -303,6 +303,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v17.
     /// Absent or disabled facial zonal wrinkle smoothing & anti-shine keeps the pre-v17 path.
     public var facialZonal: FacialZonalRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v18.
+    /// Absent or disabled pet enhancement keeps the pre-v18 path.
+    public var petEnhancement: PetEnhancementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -683,6 +686,81 @@ public struct FacialZonalRefinementReport: Codable, Equatable {
     }
 }
 
+/// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
+public struct PetEnhancementSettings: Codable, Equatable {
+    /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Fur fluffiness & micro-contrast enhancement (0...1, default 0).
+    public var furFluffiness: Double = 0
+    /// Pet eye brightening and catchlight sparkle (0...1, default 0).
+    public var eyeBrightening: Double = 0
+    /// Pet muzzle/snout moisture & depth enhancement (0...1, default 0).
+    public var muzzleMoisture: Double = 0
+    /// Coat dehaze & rich natural color purity (0...1, default 0).
+    public var coatDehaze: Double = 0
+    /// White & pale fur whitening / yellow-stain removal (0...1, default 0).
+    public var coatWhiten: Double = 0
+    /// Fine fur texture preservation (0...1, default 0.70).
+    public var texturePreservation: Double = 0.70
+
+    public init(enabled: Bool = false,
+                furFluffiness: Double = 0,
+                eyeBrightening: Double = 0,
+                muzzleMoisture: Double = 0,
+                coatDehaze: Double = 0,
+                coatWhiten: Double = 0,
+                texturePreservation: Double = 0.70) {
+        self.enabled = enabled
+        self.furFluffiness = furFluffiness
+        self.eyeBrightening = eyeBrightening
+        self.muzzleMoisture = muzzleMoisture
+        self.coatDehaze = coatDehaze
+        self.coatWhiten = coatWhiten
+        self.texturePreservation = texturePreservation
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (furFluffiness == 0 && eyeBrightening == 0 && muzzleMoisture == 0 && coatDehaze == 0 && coatWhiten == 0)
+    }
+
+    public func validated() throws -> PetEnhancementSettings {
+        guard furFluffiness.isFinite, (0...1).contains(furFluffiness) else {
+            throw AtelierError.invalidConfiguration("毛发蓬松度必须在 0...1 之间。")
+        }
+        guard eyeBrightening.isFinite, (0...1).contains(eyeBrightening) else {
+            throw AtelierError.invalidConfiguration("宠物明眸提亮必须在 0...1 之间。")
+        }
+        guard muzzleMoisture.isFinite, (0...1).contains(muzzleMoisture) else {
+            throw AtelierError.invalidConfiguration("鼻吻润泽度必须在 0...1 之间。")
+        }
+        guard coatDehaze.isFinite, (0...1).contains(coatDehaze) else {
+            throw AtelierError.invalidConfiguration("毛发去灰提纯度必须在 0...1 之间。")
+        }
+        guard coatWhiten.isFinite, (0...1).contains(coatWhiten) else {
+            throw AtelierError.invalidConfiguration("白毛去黄必须在 0...1 之间。")
+        }
+        guard texturePreservation.isFinite, (0...1).contains(texturePreservation) else {
+            throw AtelierError.invalidConfiguration("毛发肌理保护必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-I pet enhancement stage.
+public struct PetEnhancementReport: Codable, Equatable {
+    public var applied: Bool
+    public var petCount: Int
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false, petCount: Int = 0, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.petCount = petCount
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
 /// Manual repair / clone brush strokes stored in a v12 recipe.
 ///
 /// This is plain data: the pixels are produced by `RepairBrushEngine` in the
@@ -950,8 +1028,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...17).contains(version) else {
+        guard (1...18).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let petGroups = [adjustments.petEnhancement,
+                         automatic?.baseline.petEnhancement,
+                         automatic?.referenceSettings.petEnhancement]
+        guard version >= 18 || petGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的宠物写真美化需要配方版本 18，不能静默降级。")
         }
         let facialZonalGroups = [adjustments.facialZonal,
                                  automatic?.baseline.facialZonal,
@@ -1230,6 +1314,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var bodySkin: BodySkinRefinementReport?
     /// Per-photo P2-H facial zonal refinement status. `nil` when absent or disabled.
     public var facialZonal: FacialZonalRefinementReport?
+    /// Per-photo P2-I pet enhancement status. `nil` when absent or disabled.
+    public var petEnhancement: PetEnhancementReport?
     public init() {}
 }
 

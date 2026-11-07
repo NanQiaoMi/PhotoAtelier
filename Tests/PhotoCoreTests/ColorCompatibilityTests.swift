@@ -288,14 +288,14 @@ final class ColorCompatibilityTests: XCTestCase {
         XCTAssertEqual(oldRecipe.version, 2)
     }
 
-    func testBatchAcceptsRecipeVersionsOneThroughSeventeenAndRejectsEighteen() throws {
+    func testBatchAcceptsRecipeVersionsOneThroughEighteenAndRejectsNineteen() throws {
         let root = try TestFiles.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input", isDirectory: true)
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         let processor = BatchProcessor()
 
-        for version in 1...17 {
+        for version in 1...18 {
             var recipe = Recipe()
             recipe.version = version
             let output = root.appendingPathComponent("output-\(version)", isDirectory: true)
@@ -308,8 +308,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 18
-        let rejectedOutput = root.appendingPathComponent("output-18", isDirectory: true)
+        futureRecipe.version = 19
+        let rejectedOutput = root.appendingPathComponent("output-19", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -1385,7 +1385,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed settings fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 18
+        future.version = 19
         XCTAssertThrowsError(try future.validateVersion())
         var invalid = CertificatePhotoSettings(enabled: true)
         invalid.shadow.shadowOpacity = 2
@@ -1585,7 +1585,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed make-up fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 18
+        future.version = 19
         XCTAssertThrowsError(try future.validateVersion())
         XCTAssertThrowsError(try PhotoEngine.validate({
             var value = AdjustmentSettings()
