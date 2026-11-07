@@ -117,8 +117,8 @@ final class LocalMaskTests: XCTestCase {
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         // Recipes v1-v16 keep their legacy mask defaults and stay batch-runnable;
-        // v19 is the current version (P2-J sky enhancement fields are opt-in).
-        for version in 1...19 {
+        // v20 is the current version (P2-M multi-person portrait profiles).
+        for version in 1...20 {
             var recipe = legacy; recipe.version = version
             let summary = try BatchProcessor().run(items: [], inputRoot: input,
                 outputRoot: root.appendingPathComponent("output-\(version)"), recipe: recipe,
@@ -126,7 +126,7 @@ final class LocalMaskTests: XCTestCase {
             XCTAssertNotNil(summary.manifestURL)
         }
         // An unknown future version is rejected before any output directory exists.
-        var future = legacy; future.version = 20
+        var future = legacy; future.version = 21
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))

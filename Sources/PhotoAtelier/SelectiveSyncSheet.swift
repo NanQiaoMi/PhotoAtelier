@@ -81,6 +81,7 @@ struct SelectiveSyncSheet: View {
                     GroupBox(label: Label("人像美颜与微整形", systemImage: "person.crop.circle.dashed").font(.system(size: 12, weight: .semibold))) {
                         VStack(alignment: .leading, spacing: 6) {
                             Toggle("基础人像精修 (中性灰/平整/祛斑/美白/亮眼/肤色统一)", isOn: $model.syncOptions.portraitRetouch)
+                            Toggle("多人分人属性感知与独立精修 (男女童老分组/独立参数/肤色统一)", isOn: $model.syncOptions.multiPerson)
                             Toggle("面部骨相液化 (7种脸型预设/高颅顶/下巴/五官微整)", isOn: $model.syncOptions.facialReshape)
                             Toggle("面部五区专项祛皱与去油光 (黑眼圈/眼袋/法令纹/抬头纹/哑光)", isOn: $model.syncOptions.facialZonal)
                             Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)

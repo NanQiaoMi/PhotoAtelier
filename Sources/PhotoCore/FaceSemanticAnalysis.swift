@@ -225,6 +225,24 @@ public enum FaceSemanticAnalyzer {
         makeMasks(image: image, faces: landmarks, maxDimension: maxDimension)
     }
 
+    /// Builds an array of soft semantic mask sets, one per detected face.
+    ///
+    /// Unlike `masks(in:landmarks:)` which unions all faces into a single composite matte,
+    /// `perFaceMasks` keeps each face's skin, teeth, eyes, lips and brows strictly separated.
+    /// This enables independent per-person demographic retouching and skin tone unification.
+    public static func perFaceMasks(in image: CIImage,
+                                    landmarks: [FaceLandmarkSet],
+                                    maxDimension: Int = defaultMaxDimension) -> [FaceSemanticMaskSet] {
+        makePerFaceMasks(image: image, faces: landmarks, maxDimension: maxDimension)
+    }
+
+    /// Estimates demographic role (female/bride, male/groom, child, elder, unassigned)
+    /// using 100% local, private heuristics (facial geometry proportions + CIELab reflectance).
+    public static func estimateDemographicRole(face: FaceLandmarkSet,
+                                               in image: CIImage? = nil) -> PersonDemographicRole {
+        computeDemographicRole(face: face, in: image)
+    }
+
     /// Detects faces and converts Vision landmarks into normalized image points.
     ///
     /// The image is normalised to a zero-origin extent and downscaled so its
@@ -364,6 +382,216 @@ private extension FaceSemanticAnalyzer {
             lips: maskImage(lips, width: width, height: height, extent: extent),
             brows: maskImage(brows, width: width, height: height, extent: extent)
         )
+    }
+
+    static func makePerFaceMasks(image: CIImage,
+                                 faces: [FaceLandmarkSet],
+                                 maxDimension: Int) -> [FaceSemanticMaskSet] {
+        guard let extent = sanitizedRect(image.extent) else { return [] }
+        let limit = min(maximumRasterDimension, max(minimumRasterDimension, maxDimension))
+        let scale = min(1, CGFloat(limit) / max(extent.width, extent.height))
+        let width = max(1, Int((extent.width * scale).rounded()))
+        let height = max(1, Int((extent.height * scale).rounded()))
+        let resolution = CGSize(width: CGFloat(width), height: CGFloat(height))
+        let geometries = Array(faces.prefix(maximumFaces)).compactMap { geometry(for: $0) }
+        guard !geometries.isEmpty,
+              let pixels = rasterize(image: image, extent: extent, width: width, height: height) else {
+            return []
+        }
+        let colors = colorWeights(pixels: pixels, width: width, height: height)
+
+        return geometries.map { geometry in
+            let layers = maskLayers(for: geometry, colors: colors, width: width, height: height)
+            return FaceSemanticMaskSet(
+                extent: extent,
+                resolution: resolution,
+                faceBounds: geometry.box,
+                confidence: geometry.confidence,
+                faceCount: 1,
+                skin: maskImage(layers.skin, width: width, height: height, extent: extent),
+                teeth: maskImage(layers.teeth, width: width, height: height, extent: extent),
+                sclera: maskImage(layers.sclera, width: width, height: height, extent: extent),
+                iris: maskImage(layers.iris, width: width, height: height, extent: extent),
+                lips: maskImage(layers.lips, width: width, height: height, extent: extent),
+                brows: maskImage(layers.brows, width: width, height: height, extent: extent)
+            )
+        }
+    }
+
+    static func computeDemographicRole(face: FaceLandmarkSet, in image: CIImage?) -> PersonDemographicRole {
+        // 1. Geometric proportions
+        let chinY: CGFloat
+        let topY: CGFloat
+        if face.faceContour.count >= 3 {
+            chinY = face.faceContour.map(\.y).min() ?? face.boundingBox.minY
+            topY = face.faceContour.map(\.y).max() ?? face.boundingBox.maxY
+        } else {
+            chinY = face.boundingBox.minY
+            topY = face.boundingBox.maxY
+        }
+
+        let eyePoints = face.leftEye + face.rightEye
+        let eyeY: CGFloat
+        if !eyePoints.isEmpty {
+            eyeY = eyePoints.map(\.y).reduce(0, +) / CGFloat(eyePoints.count)
+        } else if let pupil = face.leftPupil ?? face.rightPupil {
+            eyeY = pupil.y
+        } else {
+            eyeY = face.boundingBox.midY
+        }
+
+        let totalHeight = max(CGFloat(0.001), topY - chinY)
+        let lowerFaceRatio = (eyeY - chinY) / totalHeight
+        // Infants and young children have round compact lower jaws and high cranial ratio
+        if lowerFaceRatio < 0.42 {
+            return .child
+        }
+
+        // 2. Optical reflectance & color analysis if image is provided
+        guard let image, let extent = sanitizedRect(image.extent) else {
+            return .unassigned
+        }
+
+        let box = sanitizedRect(face.boundingBox) ?? extent
+        let sampleSize = 64
+        guard let pixels = sampleFacePixels(image: image, faceBox: box, extent: extent, size: sampleSize) else {
+            return .unassigned
+        }
+
+        func sampleRegion(minU: Double, maxU: Double, minV: Double, maxV: Double) -> (l: Float, a: Float, b: Float, count: Int, lVariance: Float) {
+            var sumL: Float = 0
+            var sumA: Float = 0
+            var sumB: Float = 0
+            var count = 0
+            var lValues: [Float] = []
+            let colStart = max(0, min(sampleSize - 1, Int(minU * Double(sampleSize))))
+            let colEnd = max(0, min(sampleSize - 1, Int(maxU * Double(sampleSize))))
+            let rowStart = max(0, min(sampleSize - 1, Int((1 - maxV) * Double(sampleSize))))
+            let rowEnd = max(0, min(sampleSize - 1, Int((1 - minV) * Double(sampleSize))))
+
+            guard colStart <= colEnd, rowStart <= rowEnd else { return (0, 0, 0, 0, 0) }
+
+            for r in rowStart...rowEnd {
+                for c in colStart...colEnd {
+                    let offset = (r * sampleSize + c) * 4
+                    let red = pixels[offset]
+                    let green = pixels[offset + 1]
+                    let blue = pixels[offset + 2]
+                    let lab = labValue(red: red, green: green, blue: blue)
+                    sumL += lab.lightness
+                    sumA += lab.aStar
+                    sumB += lab.bStar
+                    lValues.append(lab.lightness)
+                    count += 1
+                }
+            }
+            guard count > 0 else { return (0, 0, 0, 0, 0) }
+            let meanL = sumL / Float(count)
+            let variance = lValues.reduce(0) { $0 + ($1 - meanL) * ($1 - meanL) } / Float(count)
+            return (meanL, sumA / Float(count), sumB / Float(count), count, variance)
+        }
+
+        let lipBox = boundingBox(of: [face.outerLips])
+        let lipMinU: Double
+        let lipMaxU: Double
+        let lipMinV: Double
+        let lipMaxV: Double
+
+        if let lb = lipBox, lb.width > 0, lb.height > 0 {
+            lipMinU = max(0.1, min(0.9, Double((lb.minX - box.minX) / box.width)))
+            lipMaxU = max(0.1, min(0.9, Double((lb.maxX - box.minX) / box.width)))
+            lipMinV = max(0.05, min(0.9, Double((lb.minY - box.minY) / box.height)))
+            lipMaxV = max(0.05, min(0.9, Double((lb.maxY - box.minY) / box.height)))
+        } else {
+            lipMinU = 0.35
+            lipMaxU = 0.65
+            lipMinV = 0.28
+            lipMaxV = 0.40
+        }
+
+        // Chin (lower face, beard & stubble zone: below lips)
+        let chinMaxV = max(0.05, lipMinV - 0.04)
+        let chinMinV = max(0.01, chinMaxV - 0.18)
+        let chinStats = sampleRegion(minU: 0.30, maxU: 0.70, minV: chinMinV, maxV: chinMaxV)
+
+        // Cheeks (reference mid-face skin: to the left and right of lips/nose)
+        let cheekMinV = lipMaxV
+        let cheekMaxV = min(0.80, cheekMinV + 0.20)
+        let leftCheek = sampleRegion(minU: max(0.05, lipMinU - 0.28), maxU: max(0.10, lipMinU - 0.05), minV: cheekMinV, maxV: cheekMaxV)
+        let rightCheek = sampleRegion(minU: min(0.90, lipMaxU + 0.05), maxU: min(0.95, lipMaxU + 0.28), minV: cheekMinV, maxV: cheekMaxV)
+        let cheekL = (leftCheek.l + rightCheek.l) * 0.5
+        let cheekA = (leftCheek.a + rightCheek.a) * 0.5
+        let cheekB = (leftCheek.b + rightCheek.b) * 0.5
+        let cheekVariance = (leftCheek.lVariance + rightCheek.lVariance) * 0.5
+
+        // Lips
+        let lipStats = sampleRegion(minU: lipMinU, maxU: lipMaxU, minV: lipMinV, maxV: lipMaxV)
+
+        // Forehead (for elder wrinkles and hairline)
+        let foreheadStats = sampleRegion(minU: 0.30, maxU: 0.70, minV: 0.75, maxV: 0.90)
+
+        guard chinStats.count > 0, (leftCheek.count > 0 || rightCheek.count > 0), lipStats.count > 0 else {
+            return .unassigned
+        }
+
+        let lipRedness = lipStats.a - cheekA
+        let stubbleDarkness = cheekL - chinStats.l
+        let stubbleCoolness = cheekB - chinStats.b
+
+        // Elder check: high variance in cheek nasolabial & forehead wrinkles + modest lightness
+        if (cheekVariance > 65.0 || foreheadStats.lVariance > 60.0) && cheekL < 65.0 {
+            return .elder
+        }
+
+        // Female check: strong red lip contrast OR smooth clean chin
+        if lipRedness >= 6.0 {
+            return .femaleAdult
+        }
+
+        // Male check: stubble shadow cools down yellow and darkens chin relative to cheek
+        if stubbleDarkness > 2.0 || stubbleCoolness > 1.2 {
+            return .maleAdult
+        }
+
+        // Soft fallback
+        if lipRedness > 3.0 && stubbleDarkness < 1.0 {
+            return .femaleAdult
+        } else if stubbleDarkness > 0.8 || stubbleCoolness > 0.6 {
+            return .maleAdult
+        }
+
+        return .unassigned
+    }
+
+    static func sampleFacePixels(image: CIImage,
+                                 faceBox: CGRect,
+                                 extent: CGRect,
+                                 size: Int = 64) -> [Float]? {
+        let pixelRect = CGRect(
+            x: extent.minX + max(0, faceBox.minX) * extent.width,
+            y: extent.minY + max(0, faceBox.minY) * extent.height,
+            width: min(1, faceBox.width) * extent.width,
+            height: min(1, faceBox.height) * extent.height
+        )
+        guard pixelRect.width > 2, pixelRect.height > 2 else { return nil }
+        let cropped = image.cropped(to: pixelRect)
+        let scaleX = CGFloat(size) / pixelRect.width
+        let scaleY = CGFloat(size) / pixelRect.height
+        let sampleBounds = CGRect(x: 0, y: 0, width: CGFloat(size), height: CGFloat(size))
+        let scaled = cropped
+            .transformed(by: CGAffineTransform(translationX: -pixelRect.minX, y: -pixelRect.minY))
+            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            .cropped(to: sampleBounds)
+
+        var pixels = [Float](repeating: 0, count: size * size * 4)
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let address = buffer.baseAddress else { return }
+            analysisContext.render(scaled, toBitmap: address,
+                                   rowBytes: size * 4 * MemoryLayout<Float>.stride,
+                                   bounds: sampleBounds, format: .RGBAf,
+                                   colorSpace: linearColorSpace)
+        }
+        return pixels
     }
 
     struct FaceMaskLayers {

@@ -59,6 +59,7 @@ struct PortraitFaceStatus: Equatable {
     var detectedFaceCount = 0
     var maximumConfidence = 0.0
     var hasUsableSkinMask = false
+    var detectedDemographics: [PersonDemographicRole] = []
     var summary = "切到“人像”页签会自动检测人脸。"
 }
 
@@ -2848,7 +2849,10 @@ final class AppModel: ObservableObject {
     // MARK: - Smart facial zonal wrinkle smoothing & anti-shine (P2-H)
 
     var facialZonalSettings: FacialZonalRefinementSettings {
-        adjustments.facialZonal ?? FacialZonalRefinementSettings()
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            return effectiveFacialZonal(forPersonIndex: idx)
+        }
+        return adjustments.facialZonal ?? FacialZonalRefinementSettings()
     }
 
     var facialZonalIsActive: Bool {
@@ -2856,9 +2860,26 @@ final class AppModel: ObservableObject {
     }
 
     func updateFacialZonal(_ mutate: (inout FacialZonalRefinementSettings) -> Void) {
-        var settings = adjustments.facialZonal ?? FacialZonalRefinementSettings()
-        mutate(&settings)
-        adjustments.facialZonal = settings
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var z = mp.individualProfiles[pIdx].facialZonalOverride ?? adjustments.facialZonal ?? FacialZonalRefinementSettings()
+                mutate(&z)
+                mp.individualProfiles[pIdx].facialZonalOverride = z
+            } else {
+                var z = adjustments.facialZonal ?? FacialZonalRefinementSettings()
+                mutate(&z)
+                let prof = PersonPortraitProfile(faceIndex: idx, role: role, enabled: true, facialZonalOverride: z)
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.facialZonal ?? FacialZonalRefinementSettings()
+            mutate(&settings)
+            adjustments.facialZonal = settings
+        }
     }
 
     func setFacialZonalEnabled(_ enabled: Bool) {
@@ -3146,7 +3167,10 @@ final class AppModel: ObservableObject {
     // MARK: Make-up (P1-C)
 
     var makeupSettings: MakeupSettings {
-        adjustments.makeup ?? MakeupSettings()
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            return effectiveMakeup(forPersonIndex: idx)
+        }
+        return adjustments.makeup ?? MakeupSettings()
     }
 
     var makeupIsActive: Bool {
@@ -3174,9 +3198,26 @@ final class AppModel: ObservableObject {
     /// ColorPicker selection is not lost before an intensity is raised (the field is
     /// still neutral: no pixels change and old recipe versions stay legal).
     func updateMakeup(_ mutate: (inout MakeupSettings) -> Void) {
-        var settings = adjustments.makeup ?? MakeupSettings()
-        mutate(&settings)
-        adjustments.makeup = MakeupSettings.collapsed(settings)
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var m = mp.individualProfiles[pIdx].makeupOverride ?? adjustments.makeup ?? MakeupSettings()
+                mutate(&m)
+                mp.individualProfiles[pIdx].makeupOverride = MakeupSettings.collapsed(m)
+            } else {
+                var m = adjustments.makeup ?? MakeupSettings()
+                mutate(&m)
+                let prof = PersonPortraitProfile(faceIndex: idx, role: role, enabled: true, makeupOverride: MakeupSettings.collapsed(m))
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.makeup ?? MakeupSettings()
+            mutate(&settings)
+            adjustments.makeup = MakeupSettings.collapsed(settings)
+        }
     }
 
     func resetMakeup() {
@@ -3203,9 +3244,10 @@ final class AppModel: ObservableObject {
         let engine = self.engine
         analysisQueue.async { [weak self] in
             let result = Result { () throws ->
-                (faces: [FaceLandmarkSet], usableSkin: Bool, maximumCoverage: Double) in
+                (faces: [FaceLandmarkSet], usableSkin: Bool, maximumCoverage: Double, demographics: [PersonDemographicRole]) in
                 let loaded = try PhotoLoader.load(url: photo.url, lensCorrection: false)
                 let faces = FaceSemanticAnalyzer.detect(in: loaded.image, maxFaces: Self.portraitMaximumFaces)
+                let demographics = faces.map { FaceSemanticAnalyzer.estimateDemographicRole(face: $0, in: loaded.image) }
                 var maximumCoverage = 0.0
                 for landmarks in faces {
                     guard let skin = FaceSemanticAnalyzer.masks(image: loaded.image,
@@ -3215,7 +3257,7 @@ final class AppModel: ObservableObject {
                     maximumCoverage = max(maximumCoverage, coverage)
                     if Self.isUsableSkinCoverage(maximumCoverage) { break }
                 }
-                return (faces, Self.isUsableSkinCoverage(maximumCoverage), maximumCoverage)
+                return (faces, Self.isUsableSkinCoverage(maximumCoverage), maximumCoverage, demographics)
             }
             DispatchQueue.main.async {
                 guard let self = self, self.portraitDetectionGeneration == generation else { return }
@@ -3225,21 +3267,23 @@ final class AppModel: ObservableObject {
                     let coveragePercent = String(format: "%.3f%%", detection.maximumCoverage * 100)
                     if detection.faces.isEmpty {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
-                            photoID: photo.id, summary:
+                            photoID: photo.id, detectedDemographics: [], summary:
                             "未检测到可用人脸：人像修复依赖本机 Vision 的人脸地标；侧脸、遮挡、小脸可能漏检。本机人像最多处理前 \(Self.portraitMaximumFaces) 张人脸，未检测到人脸时不应用人像调整。")
                     } else if !detection.usableSkin {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
-                            maximumConfidence: confidence,
+                            maximumConfidence: confidence, detectedDemographics: detection.demographics,
                             summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张），但皮肤蒙版覆盖不足（最高约 \(coveragePercent)，低于阈值 \(Self.portraitMinimumSkinCoverage * 100)%%）；人像整段跳过、不改像素，控件保持禁用。")
                     } else {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
                             maximumConfidence: confidence, hasUsableSkinMask: true,
+                            detectedDemographics: detection.demographics,
                             summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张）· 最高置信度 \(Int((confidence * 100).rounded()))% · 皮肤覆盖约 \(coveragePercent)；人像调整只在这张照片的预览中应用。")
                     }
                 case .failure(let error):
                     self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true, photoID: photo.id,
+                        detectedDemographics: [],
                         summary: "人脸检测未完成：\(error.localizedDescription)；人像调整未启用。")
                 }
             }
@@ -3249,14 +3293,105 @@ final class AppModel: ObservableObject {
     func invalidatePortraitDetection() {
         portraitDetectionGeneration = UUID()
         portraitFaceStatus = PortraitFaceStatus()
+        selectedPersonIndex = nil
+    }
+
+    // MARK: - P2-M: Multi-Person Face Demographic Grouping & Profiles
+
+    @Published var selectedPersonIndex: Int? = nil
+
+    func effectivePortrait(forPersonIndex idx: Int?) -> PortraitRefinementSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let p = profile.portraitOverride {
+                return p
+            }
+        }
+        return adjustments.portrait ?? PortraitRefinementSettings()
+    }
+
+    func effectiveMakeup(forPersonIndex idx: Int?) -> MakeupSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let m = profile.makeupOverride {
+                return m
+            }
+        }
+        return adjustments.makeup ?? MakeupSettings()
+    }
+
+    func effectiveFacialZonal(forPersonIndex idx: Int?) -> FacialZonalRefinementSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let z = profile.facialZonalOverride {
+                return z
+            }
+        }
+        return adjustments.facialZonal ?? FacialZonalRefinementSettings()
+    }
+
+    func assignedRole(forPersonIndex idx: Int) -> PersonDemographicRole {
+        if let prof = adjustments.multiPerson?.individualProfiles.first(where: { $0.faceIndex == idx }), prof.role != .unassigned {
+            return prof.role
+        }
+        return idx < portraitFaceStatus.detectedDemographics.count ? portraitFaceStatus.detectedDemographics[idx] : .unassigned
+    }
+
+    func setPersonRole(_ role: PersonDemographicRole, forPersonIndex idx: Int) {
+        var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+        mp.enabled = true
+        if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+            mp.individualProfiles[pIdx].role = role
+        } else {
+            var prof = PersonPortraitProfile.defaultProfile(for: role)
+            prof.faceIndex = idx
+            mp.individualProfiles.append(prof)
+        }
+        adjustments.multiPerson = mp
+    }
+
+    func applyRolePresetToPerson(_ role: PersonDemographicRole, forPersonIndex idx: Int) {
+        var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+        mp.enabled = true
+        var prof = PersonPortraitProfile.defaultProfile(for: role)
+        prof.faceIndex = idx
+        if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+            mp.individualProfiles[pIdx] = prof
+        } else {
+            mp.individualProfiles.append(prof)
+        }
+        adjustments.multiPerson = mp
+    }
+
+    func resetPersonProfile(forPersonIndex idx: Int) {
+        guard var mp = adjustments.multiPerson else { return }
+        mp.individualProfiles.removeAll(where: { $0.faceIndex == idx })
+        adjustments.multiPerson = mp.isNeutral ? nil : mp
     }
 
     /// Applies one portrait-field edit. Neutral settings collapse back to `nil`
     /// so old recipes keep the exact pre-v10 decode/encode shape.
     func updatePortraitSettings(_ mutate: (inout PortraitRefinementSettings) -> Void) {
-        var settings = adjustments.portrait ?? PortraitRefinementSettings()
-        mutate(&settings)
-        adjustments.portrait = settings.isNeutral ? nil : settings
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var p = mp.individualProfiles[pIdx].portraitOverride ?? adjustments.portrait ?? PortraitRefinementSettings()
+                mutate(&p)
+                mp.individualProfiles[pIdx].portraitOverride = p
+            } else {
+                var p = adjustments.portrait ?? PortraitRefinementSettings()
+                mutate(&p)
+                let prof = PersonPortraitProfile(faceIndex: idx, role: role, enabled: true, portraitOverride: p)
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.portrait ?? PortraitRefinementSettings()
+            mutate(&settings)
+            adjustments.portrait = settings.isNeutral ? nil : settings
+        }
     }
 
     func setPortraitToneReference(_ reference: PortraitToneReference) {

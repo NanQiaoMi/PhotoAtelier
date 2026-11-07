@@ -13,7 +13,7 @@ struct PortraitRetouchPanel: View {
     @ObservedObject var model: AppModel
 
     private var settings: PortraitRefinementSettings {
-        model.adjustments.portrait ?? PortraitRefinementSettings()
+        model.effectivePortrait(forPersonIndex: model.selectedPersonIndex)
     }
     private var status: PortraitFaceStatus { model.portraitFaceStatus }
     private var canEdit: Bool {
@@ -22,28 +22,36 @@ struct PortraitRetouchPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Label("人像精修 v1", systemImage: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.9))
-                .padding(.bottom, 10)
-            Text("基于本机 Vision 人脸地标与颜色规则的启发式处理：不是完整人脸分割，不保证真实照片效果。本机最多处理前 \(AppModel.portraitMaximumFaces) 张人脸；若检测到人脸但皮肤蒙版覆盖不足，人像整段跳过且不改像素。合成测试只验证区域约束与有界变化，未做真实照片审美验收。")
-                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
-                .padding(.bottom, 13)
-            statusCard
-            HStack(spacing: 8) {
-                Button("轻度精修起点") { model.applyLightPortraitStart() }
-                    .font(.system(size: 10))
-                    .buttonStyle(.bordered)
-                    .disabled(!canEdit)
-                Button("归零") { model.resetPortraitSettings() }
-                    .font(.system(size: 10))
-                    .buttonStyle(.plain)
-                    .foregroundColor(model.adjustments.portrait == nil ? AtelierPalette.muted : AtelierPalette.accent)
-                    .disabled(model.batchRunning || model.adjustments.portrait == nil)
-                Spacer(minLength: 0)
-            }.padding(.top, 12)
-                .help("轻度起点只给出保守数值；是否适合本张照片需要你自己判断。")
+            Group {
+                Label("人像精修 v1", systemImage: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                    .padding(.bottom, 10)
+                Text("基于本机 Vision 人脸地标与颜色规则的启发式处理：不是完整人脸分割，不保证真实照片效果。本机最多处理前 \(AppModel.portraitMaximumFaces) 张人脸；若检测到人脸但皮肤蒙版覆盖不足，人像整段跳过且不改像素。合成测试只验证区域约束与有界变化，未做真实照片审美验收。")
+                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                    .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 13)
+                statusCard
+
+                if status.detectedFaceCount > 1 || (model.adjustments.multiPerson?.enabled ?? false) {
+                    separator
+                    multiPersonSection
+                }
+
+                HStack(spacing: 8) {
+                    Button("轻度精修起点") { model.applyLightPortraitStart() }
+                        .font(.system(size: 10))
+                        .buttonStyle(.bordered)
+                        .disabled(!canEdit)
+                    Button("归零") { model.resetPortraitSettings() }
+                        .font(.system(size: 10))
+                        .buttonStyle(.plain)
+                        .foregroundColor(model.adjustments.portrait == nil ? AtelierPalette.muted : AtelierPalette.accent)
+                        .disabled(model.batchRunning || model.adjustments.portrait == nil)
+                    Spacer(minLength: 0)
+                }.padding(.top, 12)
+                    .help("轻度起点只给出保守数值；是否适合本张照片需要你自己判断。")
+            }
 
             VStack(alignment: .leading, spacing: 0) {
                 portraitSlider("祛瑕疵", \.blemishStrength)
@@ -871,5 +879,150 @@ struct PortraitRetouchPanel: View {
 
     private var separator: some View {
         Rectangle().fill(AtelierPalette.line).frame(height: 1).padding(.vertical, 14)
+    }
+
+    private var multiPersonSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("多人分人属性感知与独立精修", systemImage: "person.2.crop.square.stack")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { model.adjustments.multiPerson?.enabled ?? false },
+                    set: { enabled in
+                        var mp = model.adjustments.multiPerson ?? MultiPersonSettings()
+                        mp.enabled = enabled
+                        model.adjustments.multiPerson = mp.isNeutral ? nil : mp
+                    }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+            }
+
+            if model.adjustments.multiPerson?.enabled == true {
+                Text("已识别 \(status.detectedFaceCount) 位人物。点选人员标签可针对单人独立精修（磨皮/除皱/妆容），未修改项沿用全局。")
+                    .font(.system(size: 9))
+                    .foregroundColor(AtelierPalette.muted)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Button {
+                            model.selectedPersonIndex = nil
+                        } label: {
+                            Text("全部人员")
+                                .font(.system(size: 10, weight: model.selectedPersonIndex == nil ? .semibold : .regular))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(model.selectedPersonIndex == nil ? AtelierPalette.accent.opacity(0.3) : Color(NSColor.controlBackgroundColor))
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(model.selectedPersonIndex == nil ? AtelierPalette.accent : Color.clear, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(0..<max(status.detectedFaceCount, model.adjustments.multiPerson?.individualProfiles.compactMap(\.faceIndex).max().map({ $0 + 1 }) ?? 0), id: \.self) { idx in
+                            let role = model.assignedRole(forPersonIndex: idx)
+                            Button {
+                                model.selectedPersonIndex = idx
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: role.icon)
+                                    Text("人物 \(idx + 1) · \(role.title)")
+                                }
+                                .font(.system(size: 10, weight: model.selectedPersonIndex == idx ? .semibold : .regular))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(model.selectedPersonIndex == idx ? AtelierPalette.accent.opacity(0.3) : Color(NSColor.controlBackgroundColor))
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(model.selectedPersonIndex == idx ? AtelierPalette.accent : Color.clear, lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if let idx = model.selectedPersonIndex {
+                    let role = model.assignedRole(forPersonIndex: idx)
+                    HStack(spacing: 8) {
+                        Picker("指定角色", selection: Binding(
+                            get: { role },
+                            set: { newRole in
+                                model.setPersonRole(newRole, forPersonIndex: idx)
+                            }
+                        )) {
+                            ForEach(PersonDemographicRole.allCases) { r in
+                                Text(r.title).tag(r)
+                            }
+                        }
+                        .font(.system(size: 10))
+
+                        Button("应用推荐预设") {
+                            model.applyRolePresetToPerson(role, forPersonIndex: idx)
+                        }
+                        .font(.system(size: 10))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+
+                        Button("重置单人") {
+                            model.resetPersonProfile(forPersonIndex: idx)
+                        }
+                        .font(.system(size: 10))
+                        .buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.muted)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("多人肤色统一")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.85))
+                        Spacer()
+                        Text("\(Int(((model.adjustments.multiPerson?.unifySkinTone ?? 0) * 100).rounded()))%")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundColor(AtelierPalette.muted)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { model.adjustments.multiPerson?.unifySkinTone ?? 0 },
+                            set: { val in
+                                var mp = model.adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+                                mp.enabled = true
+                                mp.unifySkinTone = val
+                                model.adjustments.multiPerson = mp
+                            }
+                        ),
+                        in: 0...1
+                    )
+                    .controlSize(.mini)
+
+                    Picker("统一基准", selection: Binding(
+                        get: { model.adjustments.multiPerson?.toneReference ?? .auto },
+                        set: { ref in
+                            var mp = model.adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+                            mp.enabled = true
+                            mp.toneReference = ref
+                            model.adjustments.multiPerson = mp
+                        }
+                    )) {
+                        ForEach(PortraitToneReference.allCases, id: \.self) { r in
+                            Text(r.title).tag(r)
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .disabled((model.adjustments.multiPerson?.unifySkinTone ?? 0) == 0)
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(.vertical, 6)
     }
 }

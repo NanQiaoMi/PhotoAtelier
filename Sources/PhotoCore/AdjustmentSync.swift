@@ -53,6 +53,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart sky enhancement and atmospheric replacement.
     public var skyEnhancement: Bool = true
 
+    /// Multi-person demographic grouping, per-person profiles & skin tone unification.
+    public var multiPerson: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -91,6 +94,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         backdrop: Bool = true,
         petEnhancement: Bool = false,
         skyEnhancement: Bool = true,
+        multiPerson: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -115,6 +119,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.backdrop = backdrop
         self.petEnhancement = petEnhancement
         self.skyEnhancement = skyEnhancement
+        self.multiPerson = multiPerson
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -143,6 +148,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             backdrop: true,
             petEnhancement: true,
             skyEnhancement: true,
+            multiPerson: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -158,9 +164,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             basicTone: true,
             whiteBalance: true,
             tonalCurves: true,
-            hsl: false,
-            colorGrading: false,
-            colorHarmony: false,
+            hsl: true,
+            colorGrading: true,
+            colorHarmony: true,
             lut: true,
             portraitRetouch: true,
             facialReshape: true,
@@ -172,6 +178,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             backdrop: true,
             petEnhancement: false,
             skyEnhancement: false,
+            multiPerson: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -395,6 +402,11 @@ public enum AdjustmentSyncEngine {
         // 15. Sky enhancement
         if options.skyEnhancement {
             result.sky = source.sky
+        }
+
+        // 15b. Multi-person demographic grouping & per-person profiles
+        if options.multiPerson {
+            result.multiPerson = source.multiPerson
         }
 
         // 16. Lens effects & corrections

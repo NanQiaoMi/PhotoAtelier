@@ -309,6 +309,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v19.
     /// Absent or disabled sky enhancement keeps the pre-v19 path.
     public var sky: SkyEnhancementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v20.
+    /// Absent or disabled multi-person refinement keeps the pre-v20 path.
+    public var multiPerson: MultiPersonSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -866,6 +869,223 @@ public struct SkyEnhancementReport: Codable, Equatable {
     }
 }
 
+// MARK: - P2-M Multi-Person Face Identification, Demographic Grouping & Profiles
+
+/// Studio demographic roles for multi-person group retouching.
+public enum PersonDemographicRole: String, Codable, CaseIterable, Identifiable {
+    /// Female adult / bride (high smoothing, makeup enabled, rosiness).
+    case femaleAdult = "femaleAdult"
+    /// Male adult / groom (stubble & bone structure preservation, conservative smoothing, zero makeup).
+    case maleAdult = "maleAdult"
+    /// Child / infant (delicate skin protection, ultra-low smoothing, zero blemish removal, zero makeup).
+    case child = "child"
+    /// Senior / elder (age texture preservation, gentle blemish/age spot reduction, zero plastic finish).
+    case elder = "elder"
+    /// Unassigned / general default.
+    case unassigned = "unassigned"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .femaleAdult: return "女性 / 新娘"
+        case .maleAdult: return "男性 / 新郎"
+        case .child: return "儿童 / 婴儿"
+        case .elder: return "长辈 / 老人"
+        case .unassigned: return "通用 / 未指定"
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .femaleAdult: return "person.crop.circle.badge.checkmark"
+        case .maleAdult: return "person.crop.circle"
+        case .child: return "figure.child"
+        case .elder: return "figure.walk"
+        case .unassigned: return "person"
+        }
+    }
+}
+
+/// Profile containing independent portrait, makeup and facial zonal overrides for a specific person or role.
+public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
+    public var id: UUID
+    /// Target detected face index (0, 1, 2...) or `nil` if this profile is a demographic role template.
+    public var faceIndex: Int?
+    /// Assigned demographic role.
+    public var role: PersonDemographicRole
+    /// Master toggle for this specific person's overrides.
+    public var enabled: Bool
+    /// Independent portrait retouch override (smoothing, blemish, teeth, eyes).
+    public var portraitOverride: PortraitRefinementSettings?
+    /// Independent makeup override (lips, blush, brows, eyes).
+    public var makeupOverride: MakeupSettings?
+    /// Independent facial zonal override (wrinkles, dark circles, eye bags, anti-shine).
+    public var facialZonalOverride: FacialZonalRefinementSettings?
+
+    public init(id: UUID = UUID(),
+                faceIndex: Int? = nil,
+                role: PersonDemographicRole = .unassigned,
+                enabled: Bool = true,
+                portraitOverride: PortraitRefinementSettings? = nil,
+                makeupOverride: MakeupSettings? = nil,
+                facialZonalOverride: FacialZonalRefinementSettings? = nil) {
+        self.id = id
+        self.faceIndex = faceIndex
+        self.role = role
+        self.enabled = enabled
+        self.portraitOverride = portraitOverride
+        self.makeupOverride = makeupOverride
+        self.facialZonalOverride = facialZonalOverride
+    }
+
+    public var isNeutral: Bool {
+        (!enabled) || (
+            (portraitOverride == nil || portraitOverride!.isNeutral) &&
+            (makeupOverride == nil || makeupOverride!.isNeutral) &&
+            (facialZonalOverride == nil || facialZonalOverride!.isNeutral)
+        )
+    }
+
+    /// Default profile for a given demographic role.
+    public static func defaultProfile(for role: PersonDemographicRole) -> PersonPortraitProfile {
+        switch role {
+        case .femaleAdult:
+            return PersonPortraitProfile(
+                role: .femaleAdult,
+                portraitOverride: PortraitRefinementSettings(
+                    blemishStrength: 0.60, keepSpots: false,
+                    dodgeBurn: 0.45, structure: 0.20, texture: 0.35,
+                    gloss: 0.30, teethWhiten: 0.35, eyeBrighten: 0.25
+                ),
+                makeupOverride: MakeupSettings(
+                    lipIntensity: 0.40, browDensity: 0.25,
+                    cheekIntensity: 0.30, eyeshadowIntensity: 0.20
+                ),
+                facialZonalOverride: FacialZonalRefinementSettings(
+                    enabled: true,
+                    darkCircles: 0.50,
+                    eyeBags: 0.45,
+                    nasolabialFolds: 0.45,
+                    antiShine: 0.35
+                )
+            )
+        case .maleAdult:
+            return PersonPortraitProfile(
+                role: .maleAdult,
+                portraitOverride: PortraitRefinementSettings(
+                    blemishStrength: 0.40, keepSpots: true,
+                    dodgeBurn: 0.20, structure: 0.35, texture: 0.50,
+                    gloss: 0.40, teethWhiten: 0.25, eyeBrighten: 0.15
+                ),
+                makeupOverride: MakeupSettings(),
+                facialZonalOverride: FacialZonalRefinementSettings(
+                    enabled: true,
+                    darkCircles: 0.45,
+                    eyeBags: 0.40,
+                    nasolabialFolds: 0.30,
+                    antiShine: 0.50,
+                    jawlineSculpting: 0.35
+                )
+            )
+        case .child:
+            return PersonPortraitProfile(
+                role: .child,
+                portraitOverride: PortraitRefinementSettings(
+                    blemishStrength: 0.05, keepSpots: true,
+                    dodgeBurn: 0.10, structure: 0.0, texture: 0.10,
+                    gloss: 0.10, teethWhiten: 0.0, eyeBrighten: 0.20
+                ),
+                makeupOverride: MakeupSettings(),
+                facialZonalOverride: FacialZonalRefinementSettings()
+            )
+        case .elder:
+            return PersonPortraitProfile(
+                role: .elder,
+                portraitOverride: PortraitRefinementSettings(
+                    blemishStrength: 0.45, keepSpots: true,
+                    dodgeBurn: 0.25, structure: 0.20, texture: 0.60,
+                    gloss: 0.30, teethWhiten: 0.30, eyeBrighten: 0.30
+                ),
+                makeupOverride: MakeupSettings(lipIntensity: 0.15),
+                facialZonalOverride: FacialZonalRefinementSettings(
+                    enabled: true,
+                    darkCircles: 0.40,
+                    eyeBags: 0.30,
+                    nasolabialFolds: 0.25
+                )
+            )
+        case .unassigned:
+            return PersonPortraitProfile(role: .unassigned)
+        }
+    }
+}
+
+/// Settings for multi-person face grouping, demographic presets and tone unification.
+public struct MultiPersonSettings: Codable, Equatable {
+    /// Master toggle for multi-person group retouching.
+    public var enabled: Bool = false
+    /// Multi-face skin tone unification strength (0...1, default 0).
+    public var unifySkinTone: Double = 0
+    /// Reference skin tone source (median or brightest).
+    public var toneReference: PortraitToneReference = .auto
+    /// Role-based default profiles.
+    public var demographicDefaults: [PersonDemographicRole: PersonPortraitProfile] = [:]
+    /// Individual overrides keyed by face index.
+    public var individualProfiles: [PersonPortraitProfile] = []
+
+    public init(enabled: Bool = false,
+                unifySkinTone: Double = 0,
+                toneReference: PortraitToneReference = .auto,
+                demographicDefaults: [PersonDemographicRole: PersonPortraitProfile] = [:],
+                individualProfiles: [PersonPortraitProfile] = []) {
+        self.enabled = enabled
+        self.unifySkinTone = unifySkinTone
+        self.toneReference = toneReference
+        self.demographicDefaults = demographicDefaults
+        self.individualProfiles = individualProfiles
+    }
+
+    public var isNeutral: Bool {
+        guard enabled else { return true }
+        let hasUnify = unifySkinTone > 0.001
+        let hasActiveDemographics = demographicDefaults.values.contains(where: { !$0.isNeutral })
+        let hasActiveIndividuals = individualProfiles.contains(where: { !$0.isNeutral })
+        return !hasUnify && !hasActiveDemographics && !hasActiveIndividuals
+    }
+
+    public func profile(for faceIndex: Int, detectedRole: PersonDemographicRole = .unassigned) -> PersonPortraitProfile? {
+        if let individual = individualProfiles.first(where: { $0.faceIndex == faceIndex }) {
+            return individual
+        }
+        if let roleDefault = demographicDefaults[detectedRole] {
+            return roleDefault
+        }
+        return nil
+    }
+}
+
+/// Per-photo report for the multi-person demographic grouping pass.
+public struct MultiPersonReport: Codable, Equatable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var personRoles: [String]
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                personRoles: [String] = [],
+                appliedSteps: [String] = [],
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.personRoles = personRoles
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
 /// Manual repair / clone brush strokes stored in a v12 recipe.
 ///
 /// This is plain data: the pixels are produced by `RepairBrushEngine` in the
@@ -1133,8 +1353,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...19).contains(version) else {
+        guard (1...20).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let multiPersonGroups = [adjustments.multiPerson,
+                                 automatic?.baseline.multiPerson,
+                                 automatic?.referenceSettings.multiPerson]
+        guard version >= 20 || multiPersonGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的多人脸分组独立精修需要配方版本 20，不能静默降级。")
         }
         let skyGroups = [adjustments.sky,
                          automatic?.baseline.sky,
@@ -1524,6 +1750,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var petEnhancement: PetEnhancementReport?
     /// Per-photo P2-J sky enhancement status. `nil` when absent or disabled.
     public var sky: SkyEnhancementReport?
+    /// Per-photo P2-M multi-person demographic grouping and per-person profile status. `nil` when absent or disabled.
+    public var multiPerson: MultiPersonReport?
     public init() {}
 }
 
