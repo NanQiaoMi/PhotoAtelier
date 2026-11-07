@@ -2459,6 +2459,36 @@ final class AppModel: ObservableObject {
         status = "已重置影棚背景修复设置。"
     }
 
+    // MARK: - Smart clothing wrinkle smoothing (P2-F)
+
+    var clothingSettings: ClothingRefinementSettings {
+        adjustments.clothing ?? ClothingRefinementSettings()
+    }
+
+    var clothingIsActive: Bool {
+        adjustments.clothing.map { !$0.isNeutral } ?? false
+    }
+
+    func updateClothing(_ mutate: (inout ClothingRefinementSettings) -> Void) {
+        var settings = adjustments.clothing ?? ClothingRefinementSettings()
+        mutate(&settings)
+        adjustments.clothing = settings
+    }
+
+    func setClothingEnabled(_ enabled: Bool) {
+        updateClothing { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "衣物平整与祛皱已启用：平滑面料折痕与褶皱，保护纺织纹理与人物皮肤。"
+            : "衣物平整与祛皱已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetClothing() {
+        adjustments.clothing = nil
+        status = "已重置衣物平整设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`

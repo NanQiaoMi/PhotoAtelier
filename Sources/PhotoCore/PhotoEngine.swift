@@ -572,6 +572,18 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
+        // P2-F: Smart clothing wrinkle smoothing & crease removal.
+        if let clothing = settings.clothing, !clothing.isNeutral {
+            let clothingResult = try ClothingRefinementEngine.apply(
+                working, settings: clothing, personMatte: preparedPersonMatte,
+                faceLandmarks: detectedFaces.isEmpty ? nil : detectedFaces,
+                context: context, cancellation: cancellation
+            )
+            working = clothingResult.image
+            report.clothing = clothingResult.report
+        }
+        try cancellation?.check()
+
         // P2-D: Studio backdrop smoothing, wrinkle elimination & defect cleanup.
         if let backdrop = settings.backdrop, !backdrop.isNeutral {
             let backdropResult = try BackdropRefinementEngine.apply(
@@ -929,6 +941,14 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let clothingGroups = [adjustments.clothing,
+                              automatic?.baseline.clothing,
+                              automatic?.referenceSettings.clothing]
+        if clothingGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 15 }
+        let backdropGroups = [adjustments.backdrop,
+                              automatic?.baseline.backdrop,
+                              automatic?.referenceSettings.backdrop]
+        if backdropGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 14 }
         let makeupGroups = [adjustments.makeup,
                             automatic?.baseline.makeup,
                             automatic?.referenceSettings.makeup]
