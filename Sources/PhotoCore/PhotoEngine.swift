@@ -467,124 +467,221 @@ public final class PhotoEngine {
         let referenceColor = settings.referenceColor
         let referenceColorActive = referenceColor.map { !$0.isNeutral } ?? false
         let makeupActive = settings.makeup.map { !$0.isNeutral } ?? false
+        let multiPersonActive = settings.multiPerson.map { $0.enabled && !$0.isNeutral } ?? false
         let facialZonalActive = settings.facialZonal.map { !$0.isNeutral } ?? false
-        let needsPortraitMasks = portraitActive
+        let needsPortraitMasks = portraitActive || multiPersonActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive
+        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
         // historical first-4-face window; make-up may use up to its own limit when
         // it is the only reason for detecting.
         let detectedFaces: [FaceLandmarkSet]
-        if needsFaceMasks {
+        if let preparedMakeupFaces {
+            detectedFaces = preparedMakeupFaces
+        } else if needsFaceMasks {
             detectedFaces = FaceSemanticAnalyzer.detect(in: working,
-                maxFaces: makeupActive ? MakeupEngine.maximumFaces : 4)
+                maxFaces: (makeupActive || multiPersonActive) ? MakeupEngine.maximumFaces : 4)
         } else {
             detectedFaces = []
         }
         // Only portrait/refcolor consume masks: a make-up-only photo detects faces
         // for the make-up stage but must not pay for four unused semantic mats.
-        let preparedFaceMasks = needsPortraitMasks
-            ? detectedFaces.prefix(4).map { landmarks in
+        let preparedFaceMasks: [FaceSemanticMaskSet]
+        if multiPersonActive {
+            preparedFaceMasks = FaceSemanticAnalyzer.perFaceMasks(in: working, landmarks: detectedFaces)
+        } else if needsPortraitMasks {
+            preparedFaceMasks = detectedFaces.prefix(4).map { landmarks in
                 FaceSemanticAnalyzer.masks(image: working,
                                            faceBounds: landmarks.boundingBox,
                                            landmarks: landmarks)
             }.filter { !$0.isEmpty }
-            : []
+        } else {
+            preparedFaceMasks = []
+        }
         let preparedLandmarks = detectedFaces
-        if let portrait = settings.portrait, portraitActive {
-            let faces = preparedFaceMasks
-            if faces.isEmpty {
-                let note = "未检测到可用人脸或本机 Vision 不可用，人像修复已跳过（原图保持不变）。"
-                report.portrait = PortraitRefinementReport(applied: false, faceCount: 0, note: note)
+
+        if multiPersonActive, let multiPerson = settings.multiPerson {
+            if detectedFaces.isEmpty {
+                let note = "未检测到可用人脸或本机 Vision 不可用，多人独立精修已跳过（原图保持不变）。"
+                report.multiPerson = MultiPersonReport(applied: false, faceCount: 0, note: note)
                 report.warnings.append(note)
             } else {
-                let portraitResult = try PortraitRefinementEngine.apply(
-                    working, settings: portrait, faceMasks: faces,
-                    landmarks: preparedLandmarks,
-                    context: context, cancellation: cancellation)
-                working = portraitResult.image
-                report.portrait = portraitResult.report
-                if let note = portraitResult.report.note {
+                var appliedSteps: [String] = []
+                var rolesSummary: [String] = []
+                var perFaceSkinMasks: [CIImage] = []
+
+                for (idx, face) in detectedFaces.enumerated() {
+                    let detectedRole = FaceSemanticAnalyzer.estimateDemographicRole(face: face, in: working)
+                    let profile = multiPerson.profile(for: idx, detectedRole: detectedRole)
+                    let activeRole = (profile != nil && profile!.role != .unassigned) ? profile!.role : detectedRole
+                    rolesSummary.append("人物 \(idx + 1): \(activeRole.title)")
+
+                    let faceMask = idx < preparedFaceMasks.count ? preparedFaceMasks[idx] : nil
+                    if let skin = faceMask?.skin {
+                        perFaceSkinMasks.append(skin)
+                    }
+
+                    // 1. Per-person Portrait Refinement
+                    let effectivePortrait = (profile?.enabled == true ? profile?.portraitOverride : nil) ?? settings.portrait
+                    if let p = effectivePortrait, !p.isNeutral, let faceMask {
+                        let res = try PortraitRefinementEngine.apply(
+                            working, settings: p, faceMasks: [faceMask],
+                            landmarks: [face], context: context, cancellation: cancellation
+                        )
+                        working = res.image
+                        appliedSteps.append("portrait_\(idx + 1)")
+                    }
+
+                    // 2. Per-person Facial Zonal Refinement
+                    let effectiveZonal = (profile?.enabled == true ? profile?.facialZonalOverride : nil) ?? settings.facialZonal
+                    if let z = effectiveZonal, !z.isNeutral {
+                        let res = try FacialZonalRefinementEngine.apply(
+                            working, settings: z, faceLandmarks: [face],
+                            context: context, cancellation: cancellation
+                        )
+                        working = res.image
+                        appliedSteps.append("zonal_\(idx + 1)")
+                    }
+
+                    // 3. Per-person Makeup
+                    let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
+                    if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
+                        do {
+                            let madeUp = try MakeupEngine.apply(to: working, faces: [face], settings: m)
+                            working = madeUp
+                            appliedSteps.append("makeup_\(idx + 1)")
+                        } catch {
+                            // Non-fatal makeup fallback
+                        }
+                    }
+                }
+
+                // 4. Multi-Person Skin Tone Unification
+                if multiPerson.unifySkinTone > 0, !perFaceSkinMasks.isEmpty {
+                    working = try PortraitRefinementEngine.unifySkinTone(
+                        working, skinMasks: perFaceSkinMasks,
+                        reference: multiPerson.toneReference,
+                        strength: multiPerson.unifySkinTone,
+                        context: context
+                    )
+                    appliedSteps.append("skinToneUnify")
+                }
+
+                report.multiPerson = MultiPersonReport(
+                    applied: !appliedSteps.isEmpty,
+                    faceCount: detectedFaces.count,
+                    personRoles: rolesSummary,
+                    appliedSteps: appliedSteps,
+                    note: nil
+                )
+                report.portrait = PortraitRefinementReport(
+                    applied: appliedSteps.contains(where: { $0.starts(with: "portrait_") }),
+                    faceCount: detectedFaces.count
+                )
+                report.facialZonal = FacialZonalRefinementReport(
+                    applied: appliedSteps.contains(where: { $0.starts(with: "zonal_") })
+                )
+                report.makeup = MakeupReport(
+                    applied: appliedSteps.contains(where: { $0.starts(with: "makeup_") }),
+                    faceCount: detectedFaces.count
+                )
+            }
+        } else {
+            if let portrait = settings.portrait, portraitActive {
+                let faces = preparedFaceMasks
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸或本机 Vision 不可用，人像修复已跳过（原图保持不变）。"
+                    report.portrait = PortraitRefinementReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let portraitResult = try PortraitRefinementEngine.apply(
+                        working, settings: portrait, faceMasks: faces,
+                        landmarks: preparedLandmarks,
+                        context: context, cancellation: cancellation)
+                    working = portraitResult.image
+                    report.portrait = portraitResult.report
+                    if let note = portraitResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-H: Smart facial zonal wrinkle smoothing & anti-shine matte finish.
+            if let facialZonal = settings.facialZonal, !facialZonal.isNeutral {
+                let faces = detectedFaces
+                let facialZonalResult = try FacialZonalRefinementEngine.apply(
+                    working, settings: facialZonal,
+                    faceLandmarks: faces.isEmpty ? nil : faces,
+                    context: context, cancellation: cancellation
+                )
+                working = facialZonalResult.image
+                report.facialZonal = facialZonalResult.report
+                if let note = facialZonalResult.report.note {
                     report.warnings.append(note)
                 }
             }
-        }
-        try cancellation?.check()
+            try cancellation?.check()
 
-        // P2-H: Smart facial zonal wrinkle smoothing & anti-shine matte finish.
-        if let facialZonal = settings.facialZonal, !facialZonal.isNeutral {
-            let faces = detectedFaces
-            let facialZonalResult = try FacialZonalRefinementEngine.apply(
-                working, settings: facialZonal,
-                faceLandmarks: faces.isEmpty ? nil : faces,
-                context: context, cancellation: cancellation
-            )
-            working = facialZonalResult.image
-            report.facialZonal = facialZonalResult.report
-            if let note = facialZonalResult.report.note {
-                report.warnings.append(note)
-            }
-        }
-        try cancellation?.check()
-
-        // P1-C v13 heuristic make-up: after portrait refinement and before
-        // reference color / local masks, so the match and local edits see the
-        // made-up pixels. Absent or fully neutral settings skip the stage and keep
-        // the pre-v13 pixel path exact. No usable face → explicit skip with report
-        // and warning, never a silent edit.
-        //
-        // Output headroom: C2 clamps its tinted layer to <=1.5 linear, so this
-        // stage may hand >1 values to the next stages. ReferenceColor and the LUT
-        // kernels clamp their inputs to 0...1 (documented in their engines), so the
-        // >1 headroom does not leak past them; local masks can still sample up to
-        // 1.5 before the LUT. `report.makeup.applied == true` means "stage ran with
-        // usable landmarks"; heuristic masks can still be a geometric no-op on an
-        // individual face.
-        if let makeup = settings.makeup, !makeup.isNeutral {
-            let faces: [FaceLandmarkSet]
-            if let preparedMakeupFaces {
-                faces = preparedMakeupFaces
-            } else {
-                faces = preparedLandmarks
-            }
-            if faces.contains(where: { $0.hasUsableGeometry }) {
-                do {
-                    let madeUp = try MakeupEngine.apply(to: working, faces: faces,
-                                                        settings: makeup)
-                    let strength = max(max(makeup.lipIntensity, makeup.browDensity),
-                                       max(makeup.cheekIntensity, makeup.eyeshadowIntensity))
-                    // Below ~5% strength a 48px probe cannot reliably distinguish a
-                    // real (tiny) change from a mask miss, so keep the stage recorded
-                    // as applied instead of false-reporting "mask not hit".
-                    let difference = renderedDifference(working, madeUp)
-                    let threshold = max(Float(0.000001), Float(0.0001 * strength))
-                    if difference > threshold {
-                        working = madeUp
-                        report.makeup = MakeupReport(applied: true, faceCount: faces.count)
-                    } else if strength < 0.05 {
-                        working = madeUp
-                        report.makeup = MakeupReport(
-                            applied: true, faceCount: faces.count,
-                            note: "妆容强度极低（\(String(format: "%.3f", strength))），未检测到可测量的像素变化。")
-                    } else {
-                        let note = "检测到人脸但妆容掩码未命中有效区域（启发式蒙版为空/过小或强度极低），该段未改变像素。"
-                        working = madeUp
+            // P1-C v13 heuristic make-up: after portrait refinement and before
+            // reference color / local masks, so the match and local edits see the
+            // made-up pixels. Absent or fully neutral settings skip the stage and keep
+            // the pre-v13 pixel path exact. No usable face → explicit skip with report
+            // and warning, never a silent edit.
+            //
+            // Output headroom: C2 clamps its tinted layer to <=1.5 linear, so this
+            // stage may hand >1 values to the next stages. ReferenceColor and the LUT
+            // kernels clamp their inputs to 0...1 (documented in their engines), so the
+            // >1 headroom does not leak past them; local masks can still sample up to
+            // 1.5 before the LUT. `report.makeup.applied == true` means "stage ran with
+            // usable landmarks"; heuristic masks can still be a geometric no-op on an
+            // individual face.
+            if let makeup = settings.makeup, !makeup.isNeutral {
+                let faces: [FaceLandmarkSet]
+                if let preparedMakeupFaces {
+                    faces = preparedMakeupFaces
+                } else {
+                    faces = preparedLandmarks
+                }
+                if faces.contains(where: { $0.hasUsableGeometry }) {
+                    do {
+                        let madeUp = try MakeupEngine.apply(to: working, faces: faces,
+                                                            settings: makeup)
+                        let strength = max(max(makeup.lipIntensity, makeup.browDensity),
+                                           max(makeup.cheekIntensity, makeup.eyeshadowIntensity))
+                        // Below ~5% strength a 48px probe cannot reliably distinguish a
+                        // real (tiny) change from a mask miss, so keep the stage recorded
+                        // as applied instead of false-reporting "mask not hit".
+                        let difference = renderedDifference(working, madeUp)
+                        let threshold = max(Float(0.000001), Float(0.0001 * strength))
+                        if difference > threshold {
+                            working = madeUp
+                            report.makeup = MakeupReport(applied: true, faceCount: faces.count)
+                        } else if strength < 0.05 {
+                            working = madeUp
+                            report.makeup = MakeupReport(
+                                applied: true, faceCount: faces.count,
+                                note: "妆容强度极低（\(String(format: "%.3f", strength))），未检测到可测量的像素变化。")
+                        } else {
+                            let note = "检测到人脸但妆容掩码未命中有效区域（启发式蒙版为空/过小或强度极低），该段未改变像素。"
+                            working = madeUp
+                            report.makeup = MakeupReport(applied: false, faceCount: faces.count,
+                                                         note: note)
+                            report.warnings.append(note)
+                        }
+                    } catch {
+                        let note = "妆容应用失败：\(error.localizedDescription)；该段已跳过（原图保持不变）。"
                         report.makeup = MakeupReport(applied: false, faceCount: faces.count,
                                                      note: note)
                         report.warnings.append(note)
                     }
-                } catch {
-                    let note = "妆容应用失败：\(error.localizedDescription)；该段已跳过（原图保持不变）。"
-                    report.makeup = MakeupReport(applied: false, faceCount: faces.count,
-                                                 note: note)
+                } else {
+                    let note = "未检测到可用人脸或本机 Vision 不可用，妆容已跳过（原图保持不变）。"
+                    report.makeup = MakeupReport(applied: false, faceCount: 0, note: note)
                     report.warnings.append(note)
                 }
-            } else {
-                let note = "未检测到可用人脸或本机 Vision 不可用，妆容已跳过（原图保持不变）。"
-                report.makeup = MakeupReport(applied: false, faceCount: 0, note: note)
-                report.warnings.append(note)
             }
         }
         try cancellation?.check()
@@ -1008,6 +1105,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let multiPersonGroups = [adjustments.multiPerson,
+                                 automatic?.baseline.multiPerson,
+                                 automatic?.referenceSettings.multiPerson]
+        if multiPersonGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 20 }
         let skyGroups = [adjustments.sky,
                          automatic?.baseline.sky,
                          automatic?.referenceSettings.sky]
