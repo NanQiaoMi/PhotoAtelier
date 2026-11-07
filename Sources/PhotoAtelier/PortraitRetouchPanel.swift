@@ -109,10 +109,12 @@ struct PortraitRetouchPanel: View {
                 separator
                 petEnhancementSection
                 separator
-                liquifySection
+                skyEnhancementSection
             }
 
             Group {
+                separator
+                liquifySection
                 separator
                 repairSection
             }
@@ -776,6 +778,90 @@ struct PortraitRetouchPanel: View {
                 get: { model.petEnhancementSettings[keyPath: keyPath] },
                 set: { val in
                     model.updatePetEnhancement { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart sky detection, atmospheric relighting & replacement (P2-J)
+
+    private var skyEnhancementSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("智能天空氛围与置换", systemImage: "cloud.sun.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.skyEnhancementIsActive {
+                    Button("重置") {
+                        model.resetSkyEnhancement()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("外景婚纱与旅拍必备：智能识别天际线与天空区域，自适应排除人物主体。恢复过曝死白天空的湛蓝纯净层次，增强积云反差，渲染日落晚霞夕阳金红光晕，支持 5 款程序化天空置换，并自动向前景渗透环境漫射光消除贴纸感。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用智能天空氛围与置换", isOn: Binding(
+                get: { model.skyEnhancementSettings.enabled },
+                set: { model.setSkyEnhancementEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.skyEnhancementSettings.enabled {
+                VStack(spacing: 8) {
+                    Picker("天空预设", selection: Binding(
+                        get: { model.skyEnhancementSettings.skyPreset },
+                        set: { val in
+                            model.updateSkyEnhancement { $0.skyPreset = val }
+                        }
+                    )) {
+                        ForEach(SkyPreset.allCases) { preset in
+                            Text(preset.title).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.system(size: 10))
+
+                    if model.skyEnhancementSettings.skyPreset != .none {
+                        skyEnhancementSlider("置换不透明度", \.replacementOpacity,
+                                             help: "程序化天空与原图的混合比例。")
+                    }
+
+                    skyEnhancementSlider("天空湛蓝", \.skyVibrance,
+                                         help: "自适应提纯天空青蓝色阶，恢复泛白天穹的深邃蓝调。")
+                    skyEnhancementSlider("云层反差", \.cloudContrast,
+                                         help: "提升积云与层云的立体明暗反差，增强云层层次。")
+                    skyEnhancementSlider("晚霞氛围", \.sunsetWarmth,
+                                         help: "沿地平线注入夕阳金橙与晚霞色彩，营造黄昏意境。")
+                    skyEnhancementSlider("前景光照匹配", \.foregroundRelight,
+                                         help: "将天空光色自动向人物与前景渗透环境漫射，消除割裂感。")
+                    skyEnhancementSlider("边缘羽化", \.edgeFeather,
+                                         help: "地平线与发丝边缘自适应平滑羽化，防止硬切黑白边。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func skyEnhancementSlider(_ title: String,
+                                      _ keyPath: WritableKeyPath<SkyEnhancementSettings, Double>,
+                                      help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.skyEnhancementSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateSkyEnhancement { $0[keyPath: keyPath] = val }
                 }
             ),
             range: 0...1

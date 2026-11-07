@@ -309,6 +309,7 @@ public final class PhotoEngine {
         if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
         if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
+        if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -370,7 +371,9 @@ public final class PhotoEngine {
                         /// one detection when make-up is the only face-aware stage.
                         preparedMakeupFaces: [FaceLandmarkSet]? = nil,
                         /// Optional pre-detected animal targets for the pet enhancement stage.
-                        preparedPetTargets: [PetTarget]? = nil) throws -> ProcessedPhoto {
+                        preparedPetTargets: [PetTarget]? = nil,
+                        /// Optional pre-computed sky mask for the sky enhancement stage.
+                        preparedSkyMask: CIImage? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -651,6 +654,22 @@ public final class PhotoEngine {
             working = petResult.image
             report.petEnhancement = petResult.report
             if let note = petResult.report.note {
+                report.warnings.append(note)
+            }
+        }
+        try cancellation?.check()
+
+        // P2-J: Smart sky detection, atmospheric relighting & replacement.
+        if let sky = settings.sky, !sky.isNeutral {
+            let skyResult = try SkyEnhancementEngine.apply(
+                working, settings: sky,
+                personMatte: preparedPersonMatte,
+                precomputedSkyMask: preparedSkyMask,
+                context: context, cancellation: cancellation
+            )
+            working = skyResult.image
+            report.sky = skyResult.report
+            if let note = skyResult.report.note {
                 report.warnings.append(note)
             }
         }
@@ -989,6 +1008,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let skyGroups = [adjustments.sky,
+                         automatic?.baseline.sky,
+                         automatic?.referenceSettings.sky]
+        if skyGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 19 }
         let petGroups = [adjustments.petEnhancement,
                          automatic?.baseline.petEnhancement,
                          automatic?.referenceSettings.petEnhancement]

@@ -2579,6 +2579,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能宠物美化设置。"
     }
 
+    // MARK: - Smart sky detection, atmospheric relighting & replacement (P2-J)
+
+    var skyEnhancementSettings: SkyEnhancementSettings {
+        adjustments.sky ?? SkyEnhancementSettings()
+    }
+
+    var skyEnhancementIsActive: Bool {
+        adjustments.sky.map { !$0.isNeutral } ?? false
+    }
+
+    func updateSkyEnhancement(_ mutate: (inout SkyEnhancementSettings) -> Void) {
+        var settings = adjustments.sky ?? SkyEnhancementSettings()
+        mutate(&settings)
+        adjustments.sky = settings
+    }
+
+    func setSkyEnhancementEnabled(_ enabled: Bool) {
+        updateSkyEnhancement { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能天空氛围与置换已启用：湛蓝天色还原、云层反差立体、晚霞氛围渲染与前景环境光匹配。"
+            : "智能天空氛围与置换已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetSkyEnhancement() {
+        adjustments.sky = nil
+        status = "已重置智能天空氛围与置换设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`
