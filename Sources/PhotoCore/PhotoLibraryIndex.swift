@@ -12,6 +12,7 @@ public struct PhotoAttributeRecord: Codable, Equatable {
     public var qualityReport: QualityReport?
     public var adjustments: AdjustmentSettings?
     public var lutIdentifier: String?
+    public var virtualCopies: [VirtualCopy]
     public var updatedAt: Date
 
     public init(
@@ -23,6 +24,7 @@ public struct PhotoAttributeRecord: Codable, Equatable {
         qualityReport: QualityReport? = nil,
         adjustments: AdjustmentSettings? = nil,
         lutIdentifier: String? = nil,
+        virtualCopies: [VirtualCopy] = [],
         updatedAt: Date = Date()
     ) {
         self.relativePath = relativePath
@@ -33,7 +35,27 @@ public struct PhotoAttributeRecord: Codable, Equatable {
         self.qualityReport = qualityReport
         self.adjustments = adjustments
         self.lutIdentifier = lutIdentifier
+        self.virtualCopies = virtualCopies
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case relativePath, fileSize, modificationTimestamp, rating, isRejected
+        case qualityReport, adjustments, lutIdentifier, virtualCopies, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        relativePath = try container.decode(String.self, forKey: .relativePath)
+        fileSize = try container.decode(Int64.self, forKey: .fileSize)
+        modificationTimestamp = try container.decode(TimeInterval.self, forKey: .modificationTimestamp)
+        rating = try container.decodeIfPresent(Int.self, forKey: .rating) ?? 0
+        isRejected = try container.decodeIfPresent(Bool.self, forKey: .isRejected) ?? false
+        qualityReport = try container.decodeIfPresent(QualityReport.self, forKey: .qualityReport)
+        adjustments = try container.decodeIfPresent(AdjustmentSettings.self, forKey: .adjustments)
+        lutIdentifier = try container.decodeIfPresent(String.self, forKey: .lutIdentifier)
+        virtualCopies = try container.decodeIfPresent([VirtualCopy].self, forKey: .virtualCopies) ?? []
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 
     /// Checks if the cached record matches the current physical file attributes.
@@ -44,7 +66,7 @@ public struct PhotoAttributeRecord: Codable, Equatable {
 
 /// A serialized catalog representing all cached attributes for an imported folder.
 public struct FolderCatalog: Codable, Equatable {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var version: Int
     public var rootPath: String

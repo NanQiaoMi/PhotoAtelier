@@ -82,6 +82,9 @@ struct PhotoAtelierApp: App {
                     .disabled(model.selectedIDs.count <= 1 || model.batchRunning)
             }
             CommandGroup(replacing: .newItem) {
+                Button("新建虚拟副本") { model.createVirtualCopy() }
+                    .keyboardShortcut("n", modifiers: [.command])
+                    .disabled(model.selectedPhoto == nil || model.batchRunning)
                 Button("打开照片…") { model.chooseInput() }.keyboardShortcut("o")
                     .disabled(model.batchRunning)
                 Button("导入 LUT…") { model.importLUT() }.keyboardShortcut("l", modifiers: [.command, .shift])

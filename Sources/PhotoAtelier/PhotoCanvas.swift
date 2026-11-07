@@ -133,7 +133,7 @@ struct PhotoCanvas: View {
                     .frame(width: 26, height: 26).background(.white.opacity(0.9)).clipShape(Circle())
                     .offset(x: size.width * split - 13, y: size.height / 2 - 13)
                 HStack {
-                    Text("原片"); Spacer(); Text("调色后")
+                    Text(model.comparisonLeftTitle); Spacer(); Text(model.comparisonRightTitle)
                 }.font(.system(size: 9, weight: .medium)).foregroundColor(.white)
                     .padding(11).background(LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
             }

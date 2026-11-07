@@ -230,6 +230,56 @@ public enum PhotoSelection {
         return nil
     }
 
+    /// Sanitizes a virtual copy name into a safe filename suffix string.
+    public static func sanitizeSuffix(_ name: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>: \t\n\r.")
+        let components = name.components(separatedBy: invalid).filter { !$0.isEmpty }
+        return components.joined(separator: "_")
+    }
+
+    /// Expands photo items for batch export based on the virtual copy export mode (P2-L).
+    public static func expandForExport(items: [PhotoItem], options: ExportSelectionOptions) -> [PhotoItem] {
+        switch options.virtualCopyMode {
+        case .activeOnly:
+            return items.map { item in
+                var resolved = item
+                if let activeCopy = item.activeCopy {
+                    resolved.adjustments = activeCopy.adjustments
+                    resolved.lutIdentifier = activeCopy.lutIdentifier
+                }
+                return resolved
+            }
+        case .masterOnly:
+            return items.map { item in
+                var resolved = item
+                resolved.activeCopyID = nil
+                resolved.exportSuffix = nil
+                return resolved
+            }
+        case .allVersions:
+            var result: [PhotoItem] = []
+            for item in items {
+                // 1. Master version
+                var master = item
+                master.activeCopyID = nil
+                master.exportSuffix = nil
+                result.append(master)
+
+                // 2. Each virtual copy
+                for (copyIndex, virtualCopy) in item.virtualCopies.enumerated() {
+                    var copyItem = item
+                    copyItem.activeCopyID = virtualCopy.id
+                    copyItem.adjustments = virtualCopy.adjustments
+                    copyItem.lutIdentifier = virtualCopy.lutIdentifier
+                    let safeName = sanitizeSuffix(virtualCopy.name)
+                    copyItem.exportSuffix = "_\(safeName.isEmpty ? "v\(copyIndex + 1)" : safeName)"
+                    result.append(copyItem)
+                }
+            }
+            return result
+        }
+    }
+
     private static func isOrderedBefore(_ lhs: PhotoItem, _ rhs: PhotoItem) -> Bool {
         switch lhs.relativePath.localizedStandardCompare(rhs.relativePath) {
         case .orderedAscending: return true

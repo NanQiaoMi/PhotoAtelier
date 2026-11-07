@@ -150,24 +150,25 @@ public final class BatchProcessor {
         cancellation: CancellationToken,
         onEvent: @escaping (BatchEvent) -> Void
     ) async throws -> BatchSummary {
+        let effectiveItems = PhotoSelection.expandForExport(items: items, options: selection)
         var summary = BatchSummary(manifestURL: manifestURL)
-        onEvent(BatchEvent(kind: .started, index: 0, total: items.count, message: "开始批量处理"))
+        onEvent(BatchEvent(kind: .started, index: 0, total: effectiveItems.count, message: "开始批量处理"))
         let engine = PhotoEngine()
-        let store = BatchManifestStore(total: items.count, manifestURL: manifestURL, initial: manifest)
-        var entries: [BatchManifestEntry?] = Array(repeating: nil, count: items.count)
+        let store = BatchManifestStore(total: effectiveItems.count, manifestURL: manifestURL, initial: manifest)
+        var entries: [BatchManifestEntry?] = Array(repeating: nil, count: effectiveItems.count)
         var processable: [(offset: Int, item: PhotoItem)] = []
         // Session culling selection: rejected/unrated photos are skipped before any
         // decode/render, recorded in the manifest and never counted as failures.
         // Skips are decided up front (pure, cheap) so the parallel phase only sees
         // photos that actually need rendering.
-        for (offset, item) in items.enumerated() {
+        for (offset, item) in effectiveItems.enumerated() {
             if let reason = PhotoSelection.skipReason(for: item, options: selection) {
                 let entry = BatchManifestEntry(input: item.relativePath, output: nil,
                                                status: "skipped", message: reason, report: nil)
                 entries[offset] = entry
                 summary.skipped += 1
                 try store.record(entry, at: offset)
-                onEvent(BatchEvent(kind: .skipped, index: offset + 1, total: items.count,
+                onEvent(BatchEvent(kind: .skipped, index: offset + 1, total: effectiveItems.count,
                                    input: item.url, message: reason))
             } else {
                 processable.append((offset, item))
@@ -182,7 +183,7 @@ public final class BatchProcessor {
                 cancellation: cancellation
             ) { entry -> ItemResult in
                 let index = entry.offset + 1
-                onEvent(BatchEvent(kind: .processing, index: index, total: items.count,
+                onEvent(BatchEvent(kind: .processing, index: index, total: effectiveItems.count,
                                    input: entry.item.url, message: "正在处理 \(entry.item.relativePath)"))
                 do {
                     let record = try self.renderItem(
@@ -205,17 +206,17 @@ public final class BatchProcessor {
                     }
                     // Emit the per-photo event from the worker so the UI progress
                     // moves while the batch is running (not only at the end).
-                    onEvent(BatchEvent(kind: .completed, index: index, total: items.count,
+                    onEvent(BatchEvent(kind: .completed, index: index, total: effectiveItems.count,
                                        input: entry.item.url, output: record.outputURL,
                                        report: record.report))
                     return .exported(record)
                 } catch {
                     if let atelier = error as? AtelierError, isCancellation(atelier) {
-                        onEvent(BatchEvent(kind: .cancelled, index: index, total: items.count,
+                        onEvent(BatchEvent(kind: .cancelled, index: index, total: effectiveItems.count,
                                            input: entry.item.url, message: error.localizedDescription))
                         return .cancelled(error.localizedDescription)
                     }
-                    onEvent(BatchEvent(kind: .failed, index: index, total: items.count,
+                    onEvent(BatchEvent(kind: .failed, index: index, total: effectiveItems.count,
                                        input: entry.item.url, message: error.localizedDescription))
                     return .failed(error.localizedDescription)
                 }
@@ -380,7 +381,15 @@ public final class BatchProcessor {
                                               lensCropFactor: recipe.adjustments.lensCropFactor,
                                               lensFocalLength: recipe.adjustments.lensFocalLength)
             try cancellation.check()
-            var settings = item.adjustments ?? recipe.adjustments
+            var settings = item.effectiveAdjustments ?? item.adjustments ?? recipe.adjustments
+            var effectiveLUTCube = lut
+            if let itemLUTID = item.effectiveLUTIdentifier ?? item.lutIdentifier {
+                if itemLUTID == "none" {
+                    effectiveLUTCube = nil
+                } else if let preset = LUTCube.builtIns.first(where: { $0.id == itemLUTID }) ?? FilmLUTCatalog.preset(id: itemLUTID) {
+                    effectiveLUTCube = preset.cube
+                }
+            }
             var report = loaded.report
             if let automatic = recipe.automatic {
                 let analysis = try PhotoAnalyzer().analyze(image: loaded.image,
@@ -397,13 +406,13 @@ public final class BatchProcessor {
             let processed = try engine.process(
                 loaded.image,
                 settings: settings,
-                lut: lut,
+                lut: effectiveLUTCube,
                 initialReport: report,
                 outputColorSpace: recipe.export.colorSpace,
                 cancellation: cancellation
             )
             try cancellation.check()
-            let baseURL = try makeOutputBaseURL(for: item.relativePath, under: output,
+            let baseURL = try makeOutputBaseURL(for: item.relativePath, exportSuffix: item.exportSuffix, under: output,
                                                 settings: recipe.export, index: index)
             let outputURL = try writeUnique(
                 image: processed.image,
@@ -921,7 +930,7 @@ private func safeRelativeComponents(_ path: String) -> [String]? {
     return components
 }
 
-private func makeOutputBaseURL(for relativePath: String, under root: URL,
+private func makeOutputBaseURL(for relativePath: String, exportSuffix: String? = nil, under root: URL,
                                settings: ExportSettings, index: Int) throws -> URL {
     guard let components = safeRelativeComponents(relativePath), let fileName = components.last else {
         throw AtelierError.invalidConfiguration("输出相对路径无效")
@@ -936,10 +945,11 @@ private func makeOutputBaseURL(for relativePath: String, under root: URL,
     let extensionPart = original.pathExtension
     let stem = extensionPart.isEmpty ? fileName : original.deletingPathExtension
     let baseName: String
+    let combinedSuffix = settings.suffix + (exportSuffix ?? "")
     if let template = settings.fileNameTemplate {
-        baseName = try expandFileNameTemplate(template, name: stem, suffix: settings.suffix, index: index)
+        baseName = try expandFileNameTemplate(template, name: stem, suffix: combinedSuffix, index: index)
     } else {
-        baseName = stem + settings.suffix
+        baseName = stem + combinedSuffix
     }
     let outputName = baseName + "." + settings.format.fileExtension
     let result = directory.appendingPathComponent(outputName, isDirectory: false).standardizedFileURL

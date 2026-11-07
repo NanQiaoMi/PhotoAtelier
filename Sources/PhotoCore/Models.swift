@@ -1267,6 +1267,30 @@ public struct Recipe: Codable, Equatable {
     }
 }
 
+/// An offline, non-destructive virtual copy (version branch) derived from a photo.
+/// Stores independent adjustment settings and look without duplicating the physical image file on disk.
+public struct VirtualCopy: Identifiable, Codable, Equatable {
+    public var id: UUID
+    public var name: String
+    public var adjustments: AdjustmentSettings
+    public var lutIdentifier: String?
+    public var createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        adjustments: AdjustmentSettings,
+        lutIdentifier: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.adjustments = adjustments
+        self.lutIdentifier = lutIdentifier
+        self.createdAt = createdAt
+    }
+}
+
 public struct PhotoItem: Identifiable, Equatable {
     public let url: URL
     public let relativePath: String
@@ -1286,11 +1310,21 @@ public struct PhotoItem: Identifiable, Equatable {
     /// Optional per-photo custom LUT identifier (P2-K).
     public var lutIdentifier: String? = nil
 
+    /// Virtual copies (version branches) derived from this photo (P2-L).
+    public var virtualCopies: [VirtualCopy] = []
+
+    /// ID of the currently active virtual copy, or nil if the master version is active.
+    public var activeCopyID: UUID? = nil
+
+    /// Suffix appended to filename during batch export (e.g. "_v1", "_黑白").
+    public var exportSuffix: String? = nil
+
     public var id: String { url.path }
 
     public init(url: URL, relativePath: String, rating: Int = 0, isRejected: Bool = false,
                 qualityReport: QualityReport? = nil, adjustments: AdjustmentSettings? = nil,
-                lutIdentifier: String? = nil) {
+                lutIdentifier: String? = nil, virtualCopies: [VirtualCopy] = [],
+                activeCopyID: UUID? = nil, exportSuffix: String? = nil) {
         self.url = url
         self.relativePath = relativePath
         self.rating = min(5, max(0, rating))
@@ -1298,10 +1332,55 @@ public struct PhotoItem: Identifiable, Equatable {
         self.qualityReport = qualityReport
         self.adjustments = adjustments
         self.lutIdentifier = lutIdentifier
+        self.virtualCopies = virtualCopies
+        self.activeCopyID = activeCopyID
+        self.exportSuffix = exportSuffix
+    }
+
+    /// The currently active virtual copy, or nil if master is active.
+    public var activeCopy: VirtualCopy? {
+        guard let id = activeCopyID else { return nil }
+        return virtualCopies.first { $0.id == id }
+    }
+
+    /// Effective adjustments taking active virtual copy into account.
+    public var effectiveAdjustments: AdjustmentSettings? {
+        activeCopy?.adjustments ?? adjustments
+    }
+
+    /// Effective LUT taking active virtual copy into account.
+    public var effectiveLUTIdentifier: String? {
+        activeCopy != nil ? activeCopy?.lutIdentifier : lutIdentifier
     }
 
     /// Heuristic recommendation when the photo was analyzed, nil otherwise.
     public var qualityRecommendation: QualityRecommendation? { qualityReport?.recommendation }
+}
+
+/// Base reference used for interactive split Before/After comparison.
+public enum ComparisonMode: String, Codable, CaseIterable, Identifiable, Equatable {
+    case original = "原片"
+    case master = "主版本"
+
+    public var id: String { rawValue }
+}
+
+/// Mode for exporting virtual copies alongside master photos during batch export.
+public enum VirtualCopyExportMode: String, Codable, CaseIterable, Equatable {
+    /// Export whichever version is currently active for each photo.
+    case activeOnly = "activeOnly"
+    /// Export both the master version and all virtual copies with distinct filename suffixes.
+    case allVersions = "allVersions"
+    /// Export only the master version, ignoring any active virtual copies.
+    case masterOnly = "masterOnly"
+
+    public var title: String {
+        switch self {
+        case .activeOnly: return "仅导出当前选中版本"
+        case .allVersions: return "导出所有版本与主版本"
+        case .masterOnly: return "仅导出原图主版本"
+        }
+    }
 }
 
 /// Session-only batch export selection options from the culling UI.
@@ -1316,20 +1395,27 @@ public struct ExportSelectionOptions: Codable, Equatable {
     /// Skip photos that have not been rated yet (`rating == 0`) and are not
     /// rejected; rated photos (even 1 star) are still exported.
     public var skipUnselectedPhotos: Bool = false
+    /// Batch export mode for virtual copies.
+    public var virtualCopyMode: VirtualCopyExportMode = .activeOnly
 
-    public init(skipRejectedPhotos: Bool = false, skipUnselectedPhotos: Bool = false) {
+    public init(skipRejectedPhotos: Bool = false, skipUnselectedPhotos: Bool = false,
+                virtualCopyMode: VirtualCopyExportMode = .activeOnly) {
         self.skipRejectedPhotos = skipRejectedPhotos
         self.skipUnselectedPhotos = skipUnselectedPhotos
+        self.virtualCopyMode = virtualCopyMode
     }
 
     /// True when the options cannot change which files are exported.
-    public var isNeutral: Bool { !skipRejectedPhotos && !skipUnselectedPhotos }
+    public var isNeutral: Bool {
+        !skipRejectedPhotos && !skipUnselectedPhotos && virtualCopyMode == .activeOnly
+    }
 
-    /// Compact manifest/status summary, e.g. `skipRejected+skipUnselected`.
+    /// Compact manifest/status summary, e.g. `skipRejected+skipUnselected+virtualCopies:allVersions`.
     public var summary: String {
         var parts: [String] = []
         if skipRejectedPhotos { parts.append("skipRejected") }
         if skipUnselectedPhotos { parts.append("skipUnselected") }
+        if virtualCopyMode != .activeOnly { parts.append("virtualCopies:\(virtualCopyMode.rawValue)") }
         return parts.isEmpty ? "none" : parts.joined(separator: "+")
     }
 }
