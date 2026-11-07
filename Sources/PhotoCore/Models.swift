@@ -300,6 +300,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v16.
     /// Absent or disabled body and hand skin refinement keeps the pre-v16 path.
     public var bodySkin: BodySkinRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v17.
+    /// Absent or disabled facial zonal wrinkle smoothing & anti-shine keeps the pre-v17 path.
+    public var facialZonal: FacialZonalRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -600,6 +603,86 @@ public struct BodySkinRefinementReport: Codable, Equatable {
     }
 }
 
+/// Settings for P2-H smart facial zonal wrinkle smoothing and anti-shine matte finish.
+public struct FacialZonalRefinementSettings: Codable, Equatable {
+    /// Master toggle for facial zonal refinement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Dark circles reduction: lifts darkness and neutralizes purplish/bluish undertone in lower eyelid area (0...1).
+    public var darkCircles: Double = 0
+    /// Under-eye bags & tear troughs smoothing: lifts curvilinear crease shadow beneath eye orbital rim (0...1).
+    public var eyeBags: Double = 0
+    /// Nasolabial folds / smile lines smoothing: softens shadow grooves from nose wings down to mouth corners (0...1).
+    public var nasolabialFolds: Double = 0
+    /// Forehead wrinkles & glabellar frown lines smoothing: softens horizontal forehead lines and between-eyebrow vertical furrows (0...1).
+    public var foreheadWrinkles: Double = 0
+    /// Facial anti-shine / specular matte: suppresses harsh specular grease hotspots on T-zone and cheeks toward diffuse skin (0...1).
+    public var antiShine: Double = 0
+    /// Jawline & double-chin sculpting: softens submental shadow crease under chin to define clean mandibular contour (0...1).
+    public var jawlineSculpting: Double = 0
+    /// Micro-texture retention: preserves fine skin pores while smoothing (0...1, default 0.70).
+    public var texturePreservation: Double = 0.70
+
+    public init(enabled: Bool = false,
+                darkCircles: Double = 0,
+                eyeBags: Double = 0,
+                nasolabialFolds: Double = 0,
+                foreheadWrinkles: Double = 0,
+                antiShine: Double = 0,
+                jawlineSculpting: Double = 0,
+                texturePreservation: Double = 0.70) {
+        self.enabled = enabled
+        self.darkCircles = darkCircles
+        self.eyeBags = eyeBags
+        self.nasolabialFolds = nasolabialFolds
+        self.foreheadWrinkles = foreheadWrinkles
+        self.antiShine = antiShine
+        self.jawlineSculpting = jawlineSculpting
+        self.texturePreservation = texturePreservation
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (darkCircles == 0 && eyeBags == 0 && nasolabialFolds == 0 && foreheadWrinkles == 0 && antiShine == 0 && jawlineSculpting == 0)
+    }
+
+    public func validated() throws -> FacialZonalRefinementSettings {
+        guard darkCircles.isFinite, (0...1).contains(darkCircles) else {
+            throw AtelierError.invalidConfiguration("黑眼圈淡化强度必须在 0...1 之间。")
+        }
+        guard eyeBags.isFinite, (0...1).contains(eyeBags) else {
+            throw AtelierError.invalidConfiguration("眼袋泪沟平整强度必须在 0...1 之间。")
+        }
+        guard nasolabialFolds.isFinite, (0...1).contains(nasolabialFolds) else {
+            throw AtelierError.invalidConfiguration("法令纹平整强度必须在 0...1 之间。")
+        }
+        guard foreheadWrinkles.isFinite, (0...1).contains(foreheadWrinkles) else {
+            throw AtelierError.invalidConfiguration("抬头纹与川字纹平整强度必须在 0...1 之间。")
+        }
+        guard antiShine.isFinite, (0...1).contains(antiShine) else {
+            throw AtelierError.invalidConfiguration("面部去油光强度必须在 0...1 之间。")
+        }
+        guard jawlineSculpting.isFinite, (0...1).contains(jawlineSculpting) else {
+            throw AtelierError.invalidConfiguration("下颌线修容强度必须在 0...1 之间。")
+        }
+        guard texturePreservation.isFinite, (0...1).contains(texturePreservation) else {
+            throw AtelierError.invalidConfiguration("皮肤肌理保护必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-H facial zonal refinement stage.
+public struct FacialZonalRefinementReport: Codable, Equatable {
+    public var applied: Bool
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
 /// Manual repair / clone brush strokes stored in a v12 recipe.
 ///
 /// This is plain data: the pixels are produced by `RepairBrushEngine` in the
@@ -867,8 +950,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...16).contains(version) else {
+        guard (1...17).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let facialZonalGroups = [adjustments.facialZonal,
+                                 automatic?.baseline.facialZonal,
+                                 automatic?.referenceSettings.facialZonal]
+        guard version >= 17 || facialZonalGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的面部五区精修需要配方版本 17，不能静默降级。")
         }
         let bodySkinGroups = [adjustments.bodySkin,
                               automatic?.baseline.bodySkin,
@@ -1139,6 +1228,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var clothing: ClothingRefinementReport?
     /// Per-photo P2-G body and hand skin refinement status. `nil` when absent or disabled.
     public var bodySkin: BodySkinRefinementReport?
+    /// Per-photo P2-H facial zonal refinement status. `nil` when absent or disabled.
+    public var facialZonal: FacialZonalRefinementReport?
     public init() {}
 }
 

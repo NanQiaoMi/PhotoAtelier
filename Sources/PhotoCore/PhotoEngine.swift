@@ -307,6 +307,7 @@ public final class PhotoEngine {
         }
         if let repair = settings.repairBrush { try repair.validate() }
         if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
+        if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -460,9 +461,10 @@ public final class PhotoEngine {
         let referenceColor = settings.referenceColor
         let referenceColorActive = referenceColor.map { !$0.isNeutral } ?? false
         let makeupActive = settings.makeup.map { !$0.isNeutral } ?? false
+        let facialZonalActive = settings.facialZonal.map { !$0.isNeutral } ?? false
         let needsPortraitMasks = portraitActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-        let needsFaceMasks = needsPortraitMasks || makeupActive
+        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
@@ -501,6 +503,22 @@ public final class PhotoEngine {
                 if let note = portraitResult.report.note {
                     report.warnings.append(note)
                 }
+            }
+        }
+        try cancellation?.check()
+
+        // P2-H: Smart facial zonal wrinkle smoothing & anti-shine matte finish.
+        if let facialZonal = settings.facialZonal, !facialZonal.isNeutral {
+            let faces = detectedFaces
+            let facialZonalResult = try FacialZonalRefinementEngine.apply(
+                working, settings: facialZonal,
+                faceLandmarks: faces.isEmpty ? nil : faces,
+                context: context, cancellation: cancellation
+            )
+            working = facialZonalResult.image
+            report.facialZonal = facialZonalResult.report
+            if let note = facialZonalResult.report.note {
+                report.warnings.append(note)
             }
         }
         try cancellation?.check()
@@ -953,6 +971,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let facialZonalGroups = [adjustments.facialZonal,
+                                 automatic?.baseline.facialZonal,
+                                 automatic?.referenceSettings.facialZonal]
+        if facialZonalGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 17 }
         let bodySkinGroups = [adjustments.bodySkin,
                               automatic?.baseline.bodySkin,
                               automatic?.referenceSettings.bodySkin]
