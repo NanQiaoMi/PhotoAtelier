@@ -2896,6 +2896,58 @@ final class AppModel: ObservableObject {
         status = "已重置面部五区精修设置。"
     }
 
+    // MARK: - P2-N: Eye Catchlight & Aesthetic Teeth Refinement
+
+    var currentEyeTeethSettings: EyeTeethRefinementSettings {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            return effectiveEyeTeeth(forPersonIndex: idx)
+        }
+        return adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
+    }
+
+    var eyeTeethIsActive: Bool {
+        adjustments.eyeTeeth.map { !$0.isNeutral } ?? false
+    }
+
+    func updateEyeTeeth(_ mutate: (inout EyeTeethRefinementSettings) -> Void) {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var et = mp.individualProfiles[pIdx].eyeTeethOverride ?? adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
+                mutate(&et)
+                mp.individualProfiles[pIdx].eyeTeethOverride = et
+            } else {
+                var et = adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
+                mutate(&et)
+                var prof = PersonPortraitProfile.defaultProfile(for: role)
+                prof.faceIndex = idx
+                prof.eyeTeethOverride = et
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
+            mutate(&settings)
+            adjustments.eyeTeeth = settings
+        }
+    }
+
+    func setEyeTeethEnabled(_ enabled: Bool) {
+        updateEyeTeeth { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "眼神光与牙齿美学精修已启用：眼镜去反光、眼白去红血丝、虹膜明眸、摄影级眼神光、牙齿污斑净化与珐琅质微光。"
+            : "眼神光与牙齿美学精修已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetEyeTeeth() {
+        adjustments.eyeTeeth = nil
+        status = "已重置眼神光与牙齿美学精修设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
@@ -3328,6 +3380,16 @@ final class AppModel: ObservableObject {
             }
         }
         return adjustments.facialZonal ?? FacialZonalRefinementSettings()
+    }
+
+    func effectiveEyeTeeth(forPersonIndex idx: Int?) -> EyeTeethRefinementSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let et = profile.eyeTeethOverride {
+                return et
+            }
+        }
+        return adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
     }
 
     func assignedRole(forPersonIndex idx: Int) -> PersonDemographicRole {

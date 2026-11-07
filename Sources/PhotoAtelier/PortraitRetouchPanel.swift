@@ -104,6 +104,8 @@ struct PortraitRetouchPanel: View {
                 makeupSection
                 separator
                 facialZonalSection
+                separator
+                eyeTeethSection
             }
 
             Group {
@@ -655,6 +657,117 @@ struct PortraitRetouchPanel: View {
                 }
             ),
             range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart eye catchlight, anti-glare & aesthetic teeth refinement (P2-N)
+
+    private var eyeTeethSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("明眸眼神光与牙齿美学", systemImage: "sparkles.rectangle.stack")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.eyeTeethIsActive {
+                    Button("重置") {
+                        model.resetEyeTeeth()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("眼神与笑容核心微雕：智能消除镜片眩光泛白反光、消除眼白红血丝与黄浊、提升虹膜层次与深邃度、6款摄影级眼神光模板注入、牙齿黄茶渍与唇膏溢色净化、恢复健康珐琅质微高光并保护粉红牙龈。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用眼神光与牙齿美学精修", isOn: Binding(
+                get: { model.currentEyeTeethSettings.enabled },
+                set: { model.setEyeTeethEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.currentEyeTeethSettings.enabled {
+                VStack(spacing: 8) {
+                    eyeTeethSlider("眼镜去反光", \.eyeglassGlareReduction,
+                                   range: 0...1,
+                                   help: "抑制眼镜镜片表面被闪光灯或反光板激发的白雾光斑，透视还原瞳孔与眼皮细节。")
+                    eyeTeethSlider("眼白去红血丝", \.scleraBloodshotRemoval,
+                                   range: 0...1,
+                                   help: "净化巩膜红血丝与疲劳泛黄杂色，恢复清澈纯净瓷白感。")
+                    eyeTeethSlider("虹膜明眸深邃", \.irisClarity,
+                                   range: 0...1,
+                                   help: "增强瞳孔周围虹膜放射状纹理与暗边环（Limbal Ring）反差，打造深邃神采。")
+
+                    // Catchlight pattern picker
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("眼神光模板")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.8))
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { model.currentEyeTeethSettings.catchlightPattern },
+                                set: { pat in
+                                    model.updateEyeTeeth { $0.catchlightPattern = pat }
+                                }
+                            )) {
+                                ForEach(EyeCatchlightPattern.allCases) { pat in
+                                    Text(pat.displayName).tag(pat)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 110)
+                        }
+
+                        if model.currentEyeTeethSettings.catchlightPattern != .off {
+                            eyeTeethSlider("眼神光强度", \.catchlightStrength,
+                                           range: 0...1,
+                                           help: "控制眼神光光斑的亮度与高光可见度。")
+                            eyeTeethSlider("眼神光大小", \.catchlightScale,
+                                           range: 0.5...2.0,
+                                           help: "调节眼神光光斑相对瞳孔的尺寸比例（0.5x ~ 2.0x）。")
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    Divider().background(Color.white.opacity(0.1)).padding(.vertical, 2)
+
+                    eyeTeethSlider("牙渍唇膏净化", \.teethStainRemoval,
+                                   range: 0...1,
+                                   help: "净化牙齿表面黄茶渍、烟渍斑点与唇膏边缘溢色印记。")
+                    eyeTeethSlider("珐琅质自然微光", \.enamelSheen,
+                                   range: 0...1,
+                                   help: "在牙齿迎光弧面重注入通透半高光，防止死板假白。")
+                    eyeTeethSlider("牙龈粉润保护", \.gingivaProtection,
+                                   range: 0...1,
+                                   help: "严格锁定牙龈粉红色界限，防止美白时牙龈漂白失真。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func eyeTeethSlider(_ title: String,
+                                _ keyPath: WritableKeyPath<EyeTeethRefinementSettings, Double>,
+                                range: ClosedRange<Double> = 0...1,
+                                help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.currentEyeTeethSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateEyeTeeth { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
         )
         .help(help)
     }

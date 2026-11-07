@@ -166,6 +166,7 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 | v18 | 智能宠物写真美化 |
 | v19 | 智能天空识别、氛围增强与置换 |
 | v20 | 多人脸属性感知与分组独立精修（`multiPerson`） |
+| v21 | 智能眼神光、眼镜去反光与牙齿美学精修（`eyeTeeth`） |
 
 ---
 

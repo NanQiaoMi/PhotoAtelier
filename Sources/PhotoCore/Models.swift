@@ -312,6 +312,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v20.
     /// Absent or disabled multi-person refinement keeps the pre-v20 path.
     public var multiPerson: MultiPersonSettings? = nil
+    /// Optional for exact compatibility with recipes written before v21.
+    /// Absent or disabled eye & teeth refinement keeps the pre-v21 path.
+    public var eyeTeeth: EyeTeethRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -692,6 +695,144 @@ public struct FacialZonalRefinementReport: Codable, Equatable {
     }
 }
 
+/// Studio catchlight patterns for iris and pupil reflection.
+public enum EyeCatchlightPattern: String, Codable, CaseIterable, Identifiable {
+    case off
+    case naturalPoint   // 自然单点光 (Natural single round catchlight)
+    case ringLight      // 时尚环形光 (Beauty ring light)
+    case softboxSquare  // 柔光箱方光 (Studio square softbox)
+    case dualStrip      // 双侧条形光 (Dual side strip softbox)
+    case butterfly      // 经典蝶形光 (Paramount/butterfly overhead light)
+    case starburst      // 璀璨星芒光 (Sparkling starburst)
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .naturalPoint: return "自然单点"
+        case .ringLight: return "时尚环形"
+        case .softboxSquare: return "方形柔光箱"
+        case .dualStrip: return "双侧条形光"
+        case .butterfly: return "经典蝶形"
+        case .starburst: return "璀璨星芒"
+        }
+    }
+}
+
+/// Settings for P2-N eye catchlight, eyeglass anti-glare, sclera clarity and aesthetic teeth restoration.
+public struct EyeTeethRefinementSettings: Codable, Equatable {
+    /// Master toggle for eye & teeth refinement.
+    public var enabled: Bool = false
+    /// Eyeglass glare & white flare reduction (0...1).
+    public var eyeglassGlareReduction: Double = 0
+    /// Sclera bloodshot removal & yellow haze neutralization (0...1).
+    public var scleraBloodshotRemoval: Double = 0
+    /// Iris depth, clarity and edge contrast enhancement (0...1).
+    public var irisClarity: Double = 0
+    /// Catchlight pattern template.
+    public var catchlightPattern: EyeCatchlightPattern = .off
+    /// Catchlight brightness/opacity strength (0...1).
+    public var catchlightStrength: Double = 0
+    /// Catchlight relative size scale (0.5...2.0, default 1.0).
+    public var catchlightScale: Double = 1.0
+
+    /// Teeth stain, smoke/tea stains, and lip edge smudge cleanup (0...1).
+    public var teethStainRemoval: Double = 0
+    /// Enamel translucent specular sheen & 3D luster restoration (0...1).
+    public var enamelSheen: Double = 0
+    /// Gingival pink margin protection factor (0...1, default 0.8).
+    public var gingivaProtection: Double = 0.8
+
+    public init(enabled: Bool = false,
+                eyeglassGlareReduction: Double = 0,
+                scleraBloodshotRemoval: Double = 0,
+                irisClarity: Double = 0,
+                catchlightPattern: EyeCatchlightPattern = .off,
+                catchlightStrength: Double = 0,
+                catchlightScale: Double = 1.0,
+                teethStainRemoval: Double = 0,
+                enamelSheen: Double = 0,
+                gingivaProtection: Double = 0.8) {
+        self.enabled = enabled
+        self.eyeglassGlareReduction = eyeglassGlareReduction
+        self.scleraBloodshotRemoval = scleraBloodshotRemoval
+        self.irisClarity = irisClarity
+        self.catchlightPattern = catchlightPattern
+        self.catchlightStrength = catchlightStrength
+        self.catchlightScale = catchlightScale
+        self.teethStainRemoval = teethStainRemoval
+        self.enamelSheen = enamelSheen
+        self.gingivaProtection = gingivaProtection
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            eyeglassGlareReduction == 0 &&
+            scleraBloodshotRemoval == 0 &&
+            irisClarity == 0 &&
+            (catchlightPattern == .off || catchlightStrength == 0) &&
+            teethStainRemoval == 0 &&
+            enamelSheen == 0
+        )
+    }
+
+    public func validated() throws -> EyeTeethRefinementSettings {
+        guard eyeglassGlareReduction.isFinite, (0...1).contains(eyeglassGlareReduction) else {
+            throw AtelierError.invalidConfiguration("眼镜去反光强度必须在 0...1 之间。")
+        }
+        guard scleraBloodshotRemoval.isFinite, (0...1).contains(scleraBloodshotRemoval) else {
+            throw AtelierError.invalidConfiguration("眼白去红血丝强度必须在 0...1 之间。")
+        }
+        guard irisClarity.isFinite, (0...1).contains(irisClarity) else {
+            throw AtelierError.invalidConfiguration("虹膜明眸清晰度必须在 0...1 之间。")
+        }
+        guard catchlightStrength.isFinite, (0...1).contains(catchlightStrength) else {
+            throw AtelierError.invalidConfiguration("眼神光叠加强度必须在 0...1 之间。")
+        }
+        guard catchlightScale.isFinite, (0.5...2.0).contains(catchlightScale) else {
+            throw AtelierError.invalidConfiguration("眼神光尺寸缩放必须在 0.5...2.0 之间。")
+        }
+        guard teethStainRemoval.isFinite, (0...1).contains(teethStainRemoval) else {
+            throw AtelierError.invalidConfiguration("牙齿污渍净化强度必须在 0...1 之间。")
+        }
+        guard enamelSheen.isFinite, (0...1).contains(enamelSheen) else {
+            throw AtelierError.invalidConfiguration("珐琅质自然光泽强度必须在 0...1 之间。")
+        }
+        guard gingivaProtection.isFinite, (0...1).contains(gingivaProtection) else {
+            throw AtelierError.invalidConfiguration("牙龈保护系数必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-N eye catchlight, glare reduction, sclera bloodshot removal and aesthetic teeth restoration pass.
+public struct EyeTeethRefinementReport: Codable, Equatable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var eyeglassGlareApplied: Bool
+    public var scleraBloodshotApplied: Bool
+    public var catchlightPattern: EyeCatchlightPattern
+    public var teethStainApplied: Bool
+    public var note: String?
+
+    public init(applied: Bool,
+                faceCount: Int = 0,
+                eyeglassGlareApplied: Bool = false,
+                scleraBloodshotApplied: Bool = false,
+                catchlightPattern: EyeCatchlightPattern = .off,
+                teethStainApplied: Bool = false,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.eyeglassGlareApplied = eyeglassGlareApplied
+        self.scleraBloodshotApplied = scleraBloodshotApplied
+        self.catchlightPattern = catchlightPattern
+        self.teethStainApplied = teethStainApplied
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -922,6 +1063,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var makeupOverride: MakeupSettings?
     /// Independent facial zonal override (wrinkles, dark circles, eye bags, anti-shine).
     public var facialZonalOverride: FacialZonalRefinementSettings?
+    /// Independent eye & teeth aesthetic refinement override.
+    public var eyeTeethOverride: EyeTeethRefinementSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -929,7 +1072,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 enabled: Bool = true,
                 portraitOverride: PortraitRefinementSettings? = nil,
                 makeupOverride: MakeupSettings? = nil,
-                facialZonalOverride: FacialZonalRefinementSettings? = nil) {
+                facialZonalOverride: FacialZonalRefinementSettings? = nil,
+                eyeTeethOverride: EyeTeethRefinementSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -937,13 +1081,15 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.portraitOverride = portraitOverride
         self.makeupOverride = makeupOverride
         self.facialZonalOverride = facialZonalOverride
+        self.eyeTeethOverride = eyeTeethOverride
     }
 
     public var isNeutral: Bool {
         (!enabled) || (
             (portraitOverride == nil || portraitOverride!.isNeutral) &&
             (makeupOverride == nil || makeupOverride!.isNeutral) &&
-            (facialZonalOverride == nil || facialZonalOverride!.isNeutral)
+            (facialZonalOverride == nil || facialZonalOverride!.isNeutral) &&
+            (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral)
         )
     }
 
@@ -968,6 +1114,15 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                     eyeBags: 0.45,
                     nasolabialFolds: 0.45,
                     antiShine: 0.35
+                ),
+                eyeTeethOverride: EyeTeethRefinementSettings(
+                    enabled: true,
+                    scleraBloodshotRemoval: 0.35,
+                    irisClarity: 0.30,
+                    catchlightPattern: .ringLight,
+                    catchlightStrength: 0.40,
+                    teethStainRemoval: 0.30,
+                    enamelSheen: 0.35
                 )
             )
         case .maleAdult:
@@ -986,6 +1141,16 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                     nasolabialFolds: 0.30,
                     antiShine: 0.50,
                     jawlineSculpting: 0.35
+                ),
+                eyeTeethOverride: EyeTeethRefinementSettings(
+                    enabled: true,
+                    eyeglassGlareReduction: 0.40,
+                    scleraBloodshotRemoval: 0.30,
+                    irisClarity: 0.20,
+                    catchlightPattern: .naturalPoint,
+                    catchlightStrength: 0.25,
+                    teethStainRemoval: 0.35,
+                    enamelSheen: 0.25
                 )
             )
         case .child:
@@ -997,7 +1162,14 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                     gloss: 0.10, teethWhiten: 0.0, eyeBrighten: 0.20
                 ),
                 makeupOverride: MakeupSettings(),
-                facialZonalOverride: FacialZonalRefinementSettings()
+                facialZonalOverride: FacialZonalRefinementSettings(),
+                eyeTeethOverride: EyeTeethRefinementSettings(
+                    enabled: true,
+                    irisClarity: 0.20,
+                    catchlightPattern: .starburst,
+                    catchlightStrength: 0.30,
+                    enamelSheen: 0.20
+                )
             )
         case .elder:
             return PersonPortraitProfile(
@@ -1013,6 +1185,13 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                     darkCircles: 0.40,
                     eyeBags: 0.30,
                     nasolabialFolds: 0.25
+                ),
+                eyeTeethOverride: EyeTeethRefinementSettings(
+                    enabled: true,
+                    eyeglassGlareReduction: 0.40,
+                    scleraBloodshotRemoval: 0.40,
+                    teethStainRemoval: 0.40,
+                    enamelSheen: 0.20
                 )
             )
         case .unassigned:
@@ -1353,8 +1532,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...20).contains(version) else {
+        guard (1...21).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let eyeTeethGroups = [adjustments.eyeTeeth,
+                              automatic?.baseline.eyeTeeth,
+                              automatic?.referenceSettings.eyeTeeth]
+        guard version >= 21 || eyeTeethGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的眼神光与牙齿美学精修需要配方版本 21，不能静默降级。")
         }
         let multiPersonGroups = [adjustments.multiPerson,
                                  automatic?.baseline.multiPerson,
@@ -1752,6 +1937,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var sky: SkyEnhancementReport?
     /// Per-photo P2-M multi-person demographic grouping and per-person profile status. `nil` when absent or disabled.
     public var multiPerson: MultiPersonReport?
+    /// Per-photo P2-N eye catchlight, glare suppression and teeth refinement status. `nil` when absent or disabled.
+    public var eyeTeeth: EyeTeethRefinementReport?
     public init() {}
 }
 
