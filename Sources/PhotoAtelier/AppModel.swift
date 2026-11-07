@@ -144,6 +144,25 @@ final class AppModel: ObservableObject {
     let nativeInspection: NativeInspectionController
     @Published var beforeImage: NSImage?
     @Published var afterImage: NSImage?
+    @Published var comparisonMode: ComparisonMode = .original
+    @Published var showRenameCopyAlert: Bool = false
+    @Published var renameCopyID: UUID? = nil
+    @Published var renameCopyNewName: String = ""
+
+    var comparisonLeftTitle: String {
+        if comparisonMode == .master && selectedPhoto?.activeCopyID != nil {
+            return "主版本"
+        }
+        return "原片"
+    }
+
+    var comparisonRightTitle: String {
+        if let activeCopy = selectedPhoto?.activeCopy {
+            return activeCopy.name
+        }
+        return "调色后"
+    }
+
     @Published var histogram = Array(repeating: 0.0, count: 64)
     @Published var previewReport = ProcessingReport()
     @Published var previewBusy = false
@@ -591,6 +610,7 @@ final class AppModel: ObservableObject {
                     items[i].qualityReport = rec.qualityReport
                     items[i].adjustments = rec.adjustments
                     items[i].lutIdentifier = rec.lutIdentifier
+                    items[i].virtualCopies = rec.virtualCopies
                 }
             }
         }
@@ -610,6 +630,7 @@ final class AppModel: ObservableObject {
                     rec.qualityReport = photo.qualityReport
                     rec.adjustments = photo.adjustments
                     rec.lutIdentifier = photo.lutIdentifier
+                    rec.virtualCopies = photo.virtualCopies
                 }
             }
             try? self.libraryIndex.saveCatalog(catalog, forRoot: root)
@@ -791,8 +812,14 @@ final class AppModel: ObservableObject {
 
         // Save current adjustments for outgoing photo
         if let currentID = selectedID, let idx = photos.firstIndex(where: { $0.id == currentID }) {
-            photos[idx].adjustments = adjustments
-            photos[idx].lutIdentifier = selectedLUT
+            if let activeCopyID = photos[idx].activeCopyID,
+               let copyIdx = photos[idx].virtualCopies.firstIndex(where: { $0.id == activeCopyID }) {
+                photos[idx].virtualCopies[copyIdx].adjustments = adjustments
+                photos[idx].virtualCopies[copyIdx].lutIdentifier = selectedLUT
+            } else {
+                photos[idx].adjustments = adjustments
+                photos[idx].lutIdentifier = selectedLUT
+            }
         }
 
         nativeInspection.cancel()
@@ -808,15 +835,18 @@ final class AppModel: ObservableObject {
         invalidatePortraitDetection()
         selectedID = photo.id
 
-        // Load incoming photo's custom adjustments (if any) without dirtying undo history
-        if let custom = photo.adjustments {
-            undoSuppressed = true
+        // Load incoming photo's active virtual copy or custom adjustments without dirtying undo history
+        undoSuppressed = true
+        if let activeCopy = photo.activeCopy {
+            adjustments = activeCopy.adjustments
+            selectedLUT = activeCopy.lutIdentifier ?? "none"
+        } else if let custom = photo.adjustments {
             adjustments = custom
             if let customLUT = photo.lutIdentifier {
                 selectedLUT = customLUT
             }
-            undoSuppressed = false
         }
+        undoSuppressed = false
 
         beforeImage = nil; afterImage = nil
         regionalSuggestions = []
@@ -952,7 +982,22 @@ final class AppModel: ObservableObject {
                                                      outputColorSpace: outputSpace, cancellation: token,
                                                      preparedContentSelections: contentSelections, preparedLUTContext: lutContext)
                 let space = outputSpace.cgColorSpace
-                let before = try PreviewRaster.make(small, context: self.engine.context, colorSpace: space)
+                let before: CGImage
+                if self.comparisonMode == .master, photo.activeCopyID != nil {
+                    let masterSettings = photo.adjustments ?? self.recipe.adjustments
+                    var masterCube = cube
+                    if let masterLUTID = photo.lutIdentifier {
+                        if masterLUTID == "none" { masterCube = nil }
+                        else if let preset = LUTCube.builtIns.first(where: { $0.id == masterLUTID }) ?? FilmLUTCatalog.preset(id: masterLUTID) {
+                            masterCube = preset.cube
+                        }
+                    }
+                    let masterOutput = try self.engine.process(small, settings: masterSettings, lut: masterCube, initialReport: loaded.report,
+                                                              outputColorSpace: outputSpace, cancellation: token)
+                    before = try PreviewRaster.make(masterOutput.image, context: self.engine.context, colorSpace: space)
+                } else {
+                    before = try PreviewRaster.make(small, context: self.engine.context, colorSpace: space)
+                }
                 let after = try PreviewRaster.make(output.image, context: self.engine.context, colorSpace: space)
                 let histogram = self.makeHistogram(output.image)
                 var maskOverlay: CGImage?
@@ -1446,6 +1491,187 @@ final class AppModel: ObservableObject {
 
         saveCatalogDebounced()
         status = "已向 \(targetIDs.count) 张照片\(actionTitle)"
+    }
+
+    // MARK: - P2-L: Virtual Copies & Version Branching
+
+    /// Creates a new virtual copy derived from the given or selected photo.
+    @discardableResult
+    func createVirtualCopy(for photoID: String? = nil, name: String? = nil) -> VirtualCopy? {
+        let targetID = photoID ?? selectedID
+        guard let targetID, let idx = photos.firstIndex(where: { $0.id == targetID }) else { return nil }
+
+        // Determine base adjustments and LUT to duplicate
+        let baseAdjustments: AdjustmentSettings
+        let baseLUT: String?
+        if targetID == selectedID {
+            baseAdjustments = adjustments
+            baseLUT = selectedLUT
+        } else {
+            baseAdjustments = photos[idx].effectiveAdjustments ?? adjustments
+            baseLUT = photos[idx].effectiveLUTIdentifier ?? selectedLUT
+        }
+
+        let copyCount = photos[idx].virtualCopies.count
+        let copyName = name ?? "版本 \(copyCount + 1)"
+        let newCopy = VirtualCopy(
+            id: UUID(),
+            name: copyName,
+            adjustments: baseAdjustments,
+            lutIdentifier: baseLUT,
+            createdAt: Date()
+        )
+
+        performUndoableEdit("virtualCopy.create") {
+            photos[idx].virtualCopies.append(newCopy)
+            photos[idx].activeCopyID = newCopy.id
+            thumbnails.removeValue(forKey: targetID)
+        }
+
+        saveCatalogDebounced()
+        status = "已创建虚拟副本：\(newCopy.name)"
+        if targetID == selectedID {
+            requestPreview(immediate: true)
+        }
+        return newCopy
+    }
+
+    /// Switches the active version of a photo to a specific virtual copy (or nil for master).
+    func selectVirtualCopy(_ copyID: UUID?, for photoID: String? = nil) {
+        let targetID = photoID ?? selectedID
+        guard let targetID, let idx = photos.firstIndex(where: { $0.id == targetID }) else { return }
+
+        // If target photo is currently selected, persist current live adjustments back to its previous version
+        if targetID == selectedID {
+            if let activeID = photos[idx].activeCopyID,
+               let copyIdx = photos[idx].virtualCopies.firstIndex(where: { $0.id == activeID }) {
+                photos[idx].virtualCopies[copyIdx].adjustments = adjustments
+                photos[idx].virtualCopies[copyIdx].lutIdentifier = selectedLUT
+            } else {
+                photos[idx].adjustments = adjustments
+                photos[idx].lutIdentifier = selectedLUT
+            }
+        }
+
+        photos[idx].activeCopyID = copyID
+        thumbnails.removeValue(forKey: targetID)
+
+        if targetID == selectedID {
+            undoSuppressed = true
+            if let copyID, let copy = photos[idx].virtualCopies.first(where: { $0.id == copyID }) {
+                adjustments = copy.adjustments
+                selectedLUT = copy.lutIdentifier ?? "none"
+                status = "已切换至虚拟副本：\(copy.name)"
+            } else {
+                if let master = photos[idx].adjustments {
+                    adjustments = master
+                }
+                if let masterLUT = photos[idx].lutIdentifier {
+                    selectedLUT = masterLUT
+                }
+                status = "已切换至原图主版本"
+            }
+            undoSuppressed = false
+            requestPreview(immediate: true)
+        }
+
+        saveCatalogDebounced()
+    }
+
+    /// Duplicates an existing virtual copy into a new branched copy.
+    @discardableResult
+    func duplicateVirtualCopy(_ copyID: UUID, for photoID: String? = nil) -> VirtualCopy? {
+        let targetID = photoID ?? selectedID
+        guard let targetID, let idx = photos.firstIndex(where: { $0.id == targetID }),
+              let sourceCopy = photos[idx].virtualCopies.first(where: { $0.id == copyID }) else { return nil }
+
+        let newName = "\(sourceCopy.name) 副本"
+        let branchedCopy = VirtualCopy(
+            id: UUID(),
+            name: newName,
+            adjustments: sourceCopy.adjustments,
+            lutIdentifier: sourceCopy.lutIdentifier,
+            createdAt: Date()
+        )
+
+        performUndoableEdit("virtualCopy.duplicate") {
+            photos[idx].virtualCopies.append(branchedCopy)
+            photos[idx].activeCopyID = branchedCopy.id
+            thumbnails.removeValue(forKey: targetID)
+        }
+
+        saveCatalogDebounced()
+        status = "已复制虚拟副本：\(branchedCopy.name)"
+        if targetID == selectedID {
+            undoSuppressed = true
+            adjustments = branchedCopy.adjustments
+            selectedLUT = branchedCopy.lutIdentifier ?? "none"
+            undoSuppressed = false
+            requestPreview(immediate: true)
+        }
+        return branchedCopy
+    }
+
+    /// Renames an existing virtual copy.
+    func renameVirtualCopy(_ copyID: UUID, newName: String, for photoID: String? = nil) {
+        let targetID = photoID ?? selectedID
+        guard let targetID, let idx = photos.firstIndex(where: { $0.id == targetID }),
+              let copyIdx = photos[idx].virtualCopies.firstIndex(where: { $0.id == copyID }) else { return }
+
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performUndoableEdit("virtualCopy.rename") {
+            photos[idx].virtualCopies[copyIdx].name = trimmed
+        }
+        saveCatalogDebounced()
+        status = "已重命名副本为：\(trimmed)"
+    }
+
+    /// Deletes a virtual copy with full undo support.
+    func deleteVirtualCopy(_ copyID: UUID, for photoID: String? = nil) {
+        let targetID = photoID ?? selectedID
+        guard let targetID, let idx = photos.firstIndex(where: { $0.id == targetID }),
+              let copyIdx = photos[idx].virtualCopies.firstIndex(where: { $0.id == copyID }) else { return }
+
+        let deletedName = photos[idx].virtualCopies[copyIdx].name
+
+        performUndoableEdit("virtualCopy.delete") {
+            photos[idx].virtualCopies.remove(at: copyIdx)
+            if photos[idx].activeCopyID == copyID {
+                photos[idx].activeCopyID = nil
+            }
+            thumbnails.removeValue(forKey: targetID)
+        }
+
+        if targetID == selectedID, photos[idx].activeCopyID == nil {
+            undoSuppressed = true
+            if let master = photos[idx].adjustments {
+                adjustments = master
+            }
+            if let masterLUT = photos[idx].lutIdentifier {
+                selectedLUT = masterLUT
+            }
+            undoSuppressed = false
+            requestPreview(immediate: true)
+        }
+
+        saveCatalogDebounced()
+        status = "已删除虚拟副本：\(deletedName)"
+    }
+
+    func promptRenameActiveVirtualCopy() {
+        guard let copy = selectedPhoto?.activeCopy else { return }
+        renameCopyID = copy.id
+        renameCopyNewName = copy.name
+        showRenameCopyAlert = true
+    }
+
+    func confirmRenameActiveVirtualCopy() {
+        guard let id = renameCopyID else { return }
+        renameVirtualCopy(id, newName: renameCopyNewName)
+        renameCopyID = nil
+        renameCopyNewName = ""
     }
 
     // MARK: - Customer delivery page

@@ -248,6 +248,13 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSelectiveSyncSheet) {
             SelectiveSyncSheet(model: model)
         }
+        .alert("重命名虚拟副本", isPresented: $model.showRenameCopyAlert) {
+            TextField("副本名称", text: $model.renameCopyNewName)
+            Button("确定") {
+                model.confirmRenameActiveVirtualCopy()
+            }
+            Button("取消", role: .cancel) {}
+        }
     }
 
     private var header: some View {
@@ -505,6 +512,34 @@ struct ContentView: View {
                             .font(.system(size: 8, design: .monospaced))
                             .foregroundColor(AtelierPalette.muted)
                     }
+                    if !item.virtualCopies.isEmpty {
+                        HStack(spacing: 3) {
+                            Button {
+                                model.selectVirtualCopy(nil, for: item.id)
+                            } label: {
+                                Text("主")
+                                    .font(.system(size: 8, weight: item.activeCopyID == nil ? .bold : .regular))
+                                    .foregroundColor(item.activeCopyID == nil ? .white : AtelierPalette.muted)
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(item.activeCopyID == nil ? AtelierPalette.accent.opacity(0.4) : AtelierPalette.raised)
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }.buttonStyle(.plain)
+
+                            ForEach(item.virtualCopies) { copy in
+                                Button {
+                                    model.selectVirtualCopy(copy.id, for: item.id)
+                                } label: {
+                                    Text(copy.name)
+                                        .font(.system(size: 8, weight: item.activeCopyID == copy.id ? .bold : .regular))
+                                        .foregroundColor(item.activeCopyID == copy.id ? .white : AtelierPalette.muted)
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(item.activeCopyID == copy.id ? Color.cyan.opacity(0.4) : AtelierPalette.raised)
+                                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
                 }
                 Spacer(minLength: 0)
                 if isPrimary {
@@ -517,6 +552,36 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }.buttonStyle(.plain).onAppear { model.loadThumbnail(item) }
         .contextMenu {
+            Button("新建虚拟副本 (⌘N)") {
+                model.createVirtualCopy(for: item.id)
+            }
+            if !item.virtualCopies.isEmpty {
+                Menu("切换版本 (\(item.activeCopy?.name ?? "主版本"))") {
+                    Button(item.activeCopyID == nil ? "✓ 主版本 (原图)" : "主版本 (原图)") {
+                        model.selectVirtualCopy(nil, for: item.id)
+                    }
+                    Divider()
+                    ForEach(item.virtualCopies) { copy in
+                        Button(item.activeCopyID == copy.id ? "✓ \(copy.name)" : copy.name) {
+                            model.selectVirtualCopy(copy.id, for: item.id)
+                        }
+                    }
+                }
+            }
+            if let activeID = item.activeCopyID {
+                Button("复制当前副本为新版本") {
+                    model.duplicateVirtualCopy(activeID, for: item.id)
+                }
+                Button("重命名当前副本…") {
+                    model.promptRenameActiveVirtualCopy()
+                }
+                Button("删除当前虚拟副本", role: .destructive) {
+                    model.deleteVirtualCopy(activeID, for: item.id)
+                }
+            }
+
+            Divider()
+
             Button("复制调整参数 (Cmd+Shift+C)") {
                 model.copyAdjustments()
             }
@@ -548,9 +613,59 @@ struct ContentView: View {
 
     private var previewToolbar: some View {
         HStack(spacing: 12) {
-            Circle().fill(model.selectedPhoto == nil ? AtelierPalette.muted : AtelierPalette.accent).frame(width: 5, height: 5)
-            Text(model.selectedPhoto?.url.lastPathComponent ?? "照片工作台")
-                .font(.system(size: 11, weight: .medium)).lineLimit(1)
+            Group {
+                Circle().fill(model.selectedPhoto == nil ? AtelierPalette.muted : AtelierPalette.accent).frame(width: 5, height: 5)
+                Text(model.selectedPhoto?.url.lastPathComponent ?? "照片工作台")
+                    .font(.system(size: 11, weight: .medium)).lineLimit(1)
+
+                if let photo = model.selectedPhoto {
+                    Menu {
+                        Button(photo.activeCopyID == nil ? "✓ 主版本 (原图)" : "主版本 (原图)") {
+                            model.selectVirtualCopy(nil)
+                        }
+                        if !photo.virtualCopies.isEmpty {
+                            Divider()
+                            ForEach(photo.virtualCopies) { copy in
+                                Button(photo.activeCopyID == copy.id ? "✓ \(copy.name)" : copy.name) {
+                                    model.selectVirtualCopy(copy.id)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("新建虚拟副本 (⌘N)") {
+                            model.createVirtualCopy()
+                        }
+                        if let activeID = photo.activeCopyID {
+                            Button("复制当前副本为新版本") {
+                                _ = model.duplicateVirtualCopy(activeID)
+                            }
+                            Button("重命名当前副本…") {
+                                model.promptRenameActiveVirtualCopy()
+                            }
+                            Button("删除当前虚拟副本", role: .destructive) {
+                                model.deleteVirtualCopy(activeID)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.fill.on.square.fill")
+                                .font(.system(size: 9))
+                            Text(photo.activeCopy?.name ?? "主版本")
+                                .font(.system(size: 10, weight: .medium))
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8))
+                        }
+                        .foregroundColor(photo.activeCopyID != nil ? .cyan : AtelierPalette.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(photo.activeCopyID != nil ? Color.cyan.opacity(0.15) : AtelierPalette.raised)
+                        .clipShape(Capsule())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+
             Spacer(minLength: 0)
             if model.previewBusy { ProgressView().controlSize(.mini) }
             Group {
@@ -580,10 +695,23 @@ struct ContentView: View {
                     .font(.system(size: 10)).foregroundColor(AtelierPalette.accent)
             }.buttonStyle(.plain)
                 .disabled(model.afterImage == nil || model.previewBusy || model.analysisBusy || model.scanning || model.batchRunning)
-            Button { compare.toggle() } label: {
-                Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
-                    .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
-            }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
+            Group {
+                Button { compare.toggle() } label: {
+                    Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
+                        .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
+                }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
+                if model.selectedPhoto?.activeCopyID != nil && compare {
+                    Picker("", selection: $model.comparisonMode) {
+                        Text("比对原片").tag(ComparisonMode.original)
+                        Text("比对主版本").tag(ComparisonMode.master)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 140)
+                    .onChange(of: model.comparisonMode) { _ in
+                        model.requestPreview(immediate: true)
+                    }
+                }
+            }
             ratingControls
             Text("适合窗口").font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
         }.padding(.horizontal, 22).frame(height: 47)
