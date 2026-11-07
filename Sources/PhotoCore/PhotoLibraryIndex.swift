@@ -10,6 +10,8 @@ public struct PhotoAttributeRecord: Codable, Equatable {
     public var rating: Int
     public var isRejected: Bool
     public var qualityReport: QualityReport?
+    public var adjustments: AdjustmentSettings?
+    public var lutIdentifier: String?
     public var updatedAt: Date
 
     public init(
@@ -19,6 +21,8 @@ public struct PhotoAttributeRecord: Codable, Equatable {
         rating: Int = 0,
         isRejected: Bool = false,
         qualityReport: QualityReport? = nil,
+        adjustments: AdjustmentSettings? = nil,
+        lutIdentifier: String? = nil,
         updatedAt: Date = Date()
     ) {
         self.relativePath = relativePath
@@ -27,6 +31,8 @@ public struct PhotoAttributeRecord: Codable, Equatable {
         self.rating = max(0, min(5, rating))
         self.isRejected = isRejected
         self.qualityReport = qualityReport
+        self.adjustments = adjustments
+        self.lutIdentifier = lutIdentifier
         self.updatedAt = updatedAt
     }
 
@@ -38,7 +44,7 @@ public struct PhotoAttributeRecord: Codable, Equatable {
 
 /// A serialized catalog representing all cached attributes for an imported folder.
 public struct FolderCatalog: Codable, Equatable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public var version: Int
     public var rootPath: String
