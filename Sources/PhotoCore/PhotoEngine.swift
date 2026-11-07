@@ -308,6 +308,7 @@ public final class PhotoEngine {
         if let repair = settings.repairBrush { try repair.validate() }
         if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
         if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
+        if let eyeTeeth = settings.eyeTeeth, !eyeTeeth.isNeutral { _ = try eyeTeeth.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -469,9 +470,10 @@ public final class PhotoEngine {
         let makeupActive = settings.makeup.map { !$0.isNeutral } ?? false
         let multiPersonActive = settings.multiPerson.map { $0.enabled && !$0.isNeutral } ?? false
         let facialZonalActive = settings.facialZonal.map { !$0.isNeutral } ?? false
+        let eyeTeethActive = settings.eyeTeeth.map { !$0.isNeutral } ?? false
         let needsPortraitMasks = portraitActive || multiPersonActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive
+        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive || eyeTeethActive
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
@@ -545,7 +547,18 @@ public final class PhotoEngine {
                         appliedSteps.append("zonal_\(idx + 1)")
                     }
 
-                    // 3. Per-person Makeup
+                    // 3. Per-person Eye & Teeth Refinement
+                    let effectiveEyeTeeth = (profile?.enabled == true ? profile?.eyeTeethOverride : nil) ?? settings.eyeTeeth
+                    if let et = effectiveEyeTeeth, !et.isNeutral, face.hasUsableGeometry {
+                        let res = EyeTeethRefinementEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            perFaceMask: faceMask, settings: et
+                        )
+                        working = res
+                        appliedSteps.append("eyeTeeth_\(idx + 1)")
+                    }
+
+                    // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
                         do {
@@ -558,7 +571,7 @@ public final class PhotoEngine {
                     }
                 }
 
-                // 4. Multi-Person Skin Tone Unification
+                // 5. Multi-Person Skin Tone Unification
                 if multiPerson.unifySkinTone > 0, !perFaceSkinMasks.isEmpty {
                     working = try PortraitRefinementEngine.unifySkinTone(
                         working, skinMasks: perFaceSkinMasks,
@@ -582,6 +595,10 @@ public final class PhotoEngine {
                 )
                 report.facialZonal = FacialZonalRefinementReport(
                     applied: appliedSteps.contains(where: { $0.starts(with: "zonal_") })
+                )
+                report.eyeTeeth = EyeTeethRefinementReport(
+                    applied: appliedSteps.contains(where: { $0.starts(with: "eyeTeeth_") }),
+                    faceCount: detectedFaces.count
                 )
                 report.makeup = MakeupReport(
                     applied: appliedSteps.contains(where: { $0.starts(with: "makeup_") }),
@@ -621,6 +638,26 @@ public final class PhotoEngine {
                 report.facialZonal = facialZonalResult.report
                 if let note = facialZonalResult.report.note {
                     report.warnings.append(note)
+                }
+            }
+            try cancellation?.check()
+
+            // P2-N: Smart eye catchlight, eyeglass anti-glare, sclera bloodshot removal & aesthetic teeth restoration
+            if let eyeTeeth = settings.eyeTeeth, !eyeTeeth.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，眼神光与牙齿美学精修已跳过（原图保持不变）。"
+                    report.eyeTeeth = EyeTeethRefinementReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let eyeTeethResult = EyeTeethRefinementEngine.apply(
+                        to: working, faces: faces, settings: eyeTeeth
+                    )
+                    working = eyeTeethResult.image
+                    report.eyeTeeth = eyeTeethResult.report
+                    if let note = eyeTeethResult.report.note {
+                        report.warnings.append(note)
+                    }
                 }
             }
             try cancellation?.check()
@@ -1105,6 +1142,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let eyeTeethGroups = [adjustments.eyeTeeth,
+                              automatic?.baseline.eyeTeeth,
+                              automatic?.referenceSettings.eyeTeeth]
+        if eyeTeethGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 21 }
         let multiPersonGroups = [adjustments.multiPerson,
                                  automatic?.baseline.multiPerson,
                                  automatic?.referenceSettings.multiPerson]

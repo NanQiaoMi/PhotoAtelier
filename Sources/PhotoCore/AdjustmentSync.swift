@@ -56,6 +56,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Multi-person demographic grouping, per-person profiles & skin tone unification.
     public var multiPerson: Bool = true
 
+    /// Eye catchlight, eyeglass anti-glare, sclera clarity and teeth aesthetic restoration.
+    public var eyeTeeth: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -95,6 +98,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         petEnhancement: Bool = false,
         skyEnhancement: Bool = true,
         multiPerson: Bool = true,
+        eyeTeeth: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -120,6 +124,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.petEnhancement = petEnhancement
         self.skyEnhancement = skyEnhancement
         self.multiPerson = multiPerson
+        self.eyeTeeth = eyeTeeth
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -149,6 +154,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             petEnhancement: true,
             skyEnhancement: true,
             multiPerson: true,
+            eyeTeeth: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -179,6 +185,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             petEnhancement: false,
             skyEnhancement: false,
             multiPerson: true,
+            eyeTeeth: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -407,6 +414,11 @@ public enum AdjustmentSyncEngine {
         // 15b. Multi-person demographic grouping & per-person profiles
         if options.multiPerson {
             result.multiPerson = source.multiPerson
+        }
+
+        // 15c. Eye catchlight & aesthetic teeth refinement
+        if options.eyeTeeth {
+            result.eyeTeeth = source.eyeTeeth
         }
 
         // 16. Lens effects & corrections
