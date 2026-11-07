@@ -336,6 +336,7 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **P2-H：智能面部五区专项祛皱与去油光** | ✅ 已交付 (`feat/p2h-facial-zonal-refinement`) | 基于 Vision 人脸关键点几何拓扑的黑眼圈暗沉提亮色素中和、眼袋泪沟阴影平抚、法令纹鼻唇沟软化、额头横纹眉间川字纹平抑、T区/面颊油光哑光雾化、双下巴颈颌线收敛雕刻、微孔高频肤质重注入；配方版本升级至 17 | 原生 CIColorKernel，单帧 < 5ms，591 测试全绿 |
 | **P2-I：智能宠物写真精修与美化** | ✅ 已交付 (`feat/p2i-pet-portrait-enhancement`) | 基于 Vision `VNRecognizeAnimalsRequest` 目标定位与 GPU 频域着色器的毛发蓬松微观毛流、明眸提亮眼神光聚焦、鼻吻润泽立体反差、毛发去灰提纯、白毛去黄净白；配方版本升级至 18 | 原生 CIColorKernel，单帧 < 5ms，602 测试全绿 |
 | **P2-J：智能天空识别、氛围增强与置换** | ✅ 已交付 (`feat/p2j-sky-enhancement-relighting`) | 基于 Vision 地平线检测结合人物遮罩切分、Core Image 湛蓝天色还原、积云立体反差增强、地平线晚霞金橙氛围、5种程序化天空置换预设与前景环境光照匹配；配方版本升级至 19 | 原生 CIColorKernel，单帧 < 5ms，613 测试全绿 |
+| **P2-K：选择性参数复制与多选批量同步** | ✅ 已交付 (`feat/p2k-selective-sync-per-photo-adjustments`) | 细粒度 12+ 模块选择性参数复制、多选批量同步、单图独立配方目录持久化（FolderCatalog v2）与单步批量撤销 | 纯 Swift 原生合并引擎，零模型开销，620 测试全绿 |
 | 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
 | RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |

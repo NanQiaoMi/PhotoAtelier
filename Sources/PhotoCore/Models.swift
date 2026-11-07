@@ -1280,15 +1280,24 @@ public struct PhotoItem: Identifiable, Equatable {
     /// user runs auto-culling (or a caller injects one).
     public var qualityReport: QualityReport?
 
+    /// Optional per-photo custom adjustment settings (P2-K). When nil, inherits folder recipe adjustments.
+    public var adjustments: AdjustmentSettings? = nil
+
+    /// Optional per-photo custom LUT identifier (P2-K).
+    public var lutIdentifier: String? = nil
+
     public var id: String { url.path }
 
     public init(url: URL, relativePath: String, rating: Int = 0, isRejected: Bool = false,
-                qualityReport: QualityReport? = nil) {
+                qualityReport: QualityReport? = nil, adjustments: AdjustmentSettings? = nil,
+                lutIdentifier: String? = nil) {
         self.url = url
         self.relativePath = relativePath
         self.rating = min(5, max(0, rating))
         self.isRejected = isRejected
         self.qualityReport = qualityReport
+        self.adjustments = adjustments
+        self.lutIdentifier = lutIdentifier
     }
 
     /// Heuristic recommendation when the photo was analyzed, nil otherwise.

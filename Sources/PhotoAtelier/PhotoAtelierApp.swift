@@ -70,6 +70,17 @@ struct PhotoAtelierApp: App {
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(!model.canRedo || model.batchRunning)
             }
+            CommandGroup(after: .pasteboard) {
+                Button("复制调整参数") { model.copyAdjustments() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(model.selectedPhoto == nil || model.batchRunning)
+                Button("粘贴调整参数") { model.pasteAdjustments() }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                    .disabled(model.copiedAdjustments == nil || model.selectedPhoto == nil || model.batchRunning)
+                Button("选择性同步…") { model.showSelectiveSyncSheet = true }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .disabled(model.selectedIDs.count <= 1 || model.batchRunning)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("打开照片…") { model.chooseInput() }.keyboardShortcut("o")
                     .disabled(model.batchRunning)

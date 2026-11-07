@@ -245,6 +245,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showTetheredSheet) {
             TetheredWatchSheet(model: model)
         }
+        .sheet(isPresented: $model.showSelectiveSyncSheet) {
+            SelectiveSyncSheet(model: model)
+        }
     }
 
     private var header: some View {
@@ -408,6 +411,22 @@ struct ContentView: View {
                     .padding(.horizontal, 4).padding(.vertical, 1)
                     .background(AtelierPalette.accent.opacity(0.15))
                     .clipShape(Capsule())
+
+                Button {
+                    model.showSelectiveSyncSheet = true
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("同步")
+                    }
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundColor(AtelierPalette.accent)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(AtelierPalette.accent.opacity(0.15))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("选择性同步当前调整参数至已选的 \(model.selectedIDs.count) 张照片 (Shift+Cmd+S)")
             }
             ForEach(1...5, id: \.self) { star in
                 Button {
@@ -497,6 +516,22 @@ struct ContentView: View {
                 .background(isSelected ? AtelierPalette.raised : .clear)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }.buttonStyle(.plain).onAppear { model.loadThumbnail(item) }
+        .contextMenu {
+            Button("复制调整参数 (Cmd+Shift+C)") {
+                model.copyAdjustments()
+            }
+            Button("粘贴调整参数 (Cmd+Shift+V)") {
+                model.pasteAdjustments()
+            }
+            .disabled(model.copiedAdjustments == nil)
+
+            if model.selectedIDs.count > 1 {
+                Divider()
+                Button("选择性同步到已选 \(model.selectedIDs.count) 张照片… (Shift+Cmd+S)") {
+                    model.showSelectiveSyncSheet = true
+                }
+            }
+        }
     }
 
     private func starsText(_ rating: Int) -> String {

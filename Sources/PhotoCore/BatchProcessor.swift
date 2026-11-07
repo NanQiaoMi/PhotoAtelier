@@ -380,7 +380,7 @@ public final class BatchProcessor {
                                               lensCropFactor: recipe.adjustments.lensCropFactor,
                                               lensFocalLength: recipe.adjustments.lensFocalLength)
             try cancellation.check()
-            var settings = recipe.adjustments
+            var settings = item.adjustments ?? recipe.adjustments
             var report = loaded.report
             if let automatic = recipe.automatic {
                 let analysis = try PhotoAnalyzer().analyze(image: loaded.image,

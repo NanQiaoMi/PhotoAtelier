@@ -90,8 +90,20 @@ final class AppModel: ObservableObject {
         didSet {
             refreshNativeInspection()
             recordUndoAdjustmentChange(from: oldValue)
+            if let currentID = selectedID, let idx = photos.firstIndex(where: { $0.id == currentID }) {
+                photos[idx].adjustments = adjustments
+                photos[idx].lutIdentifier = selectedLUT
+                saveCatalogDebounced()
+            }
         }
     }
+
+    // MARK: - P2-K: Selective Adjustments Copy & Multi-Photo Batch Sync
+
+    @Published var copiedAdjustments: AdjustmentSettings? = nil
+    @Published var copiedLUT: String? = nil
+    @Published var showSelectiveSyncSheet: Bool = false
+    @Published var syncOptions = AdjustmentSyncOptions.allAdjustments
     @Published var exportSettings = ExportSettings() {
         didSet { if oldValue.colorSpace != exportSettings.colorSpace { refreshNativeInspection() } }
     }
@@ -577,6 +589,8 @@ final class AppModel: ObservableObject {
                     items[i].rating = rec.rating
                     items[i].isRejected = rec.isRejected
                     items[i].qualityReport = rec.qualityReport
+                    items[i].adjustments = rec.adjustments
+                    items[i].lutIdentifier = rec.lutIdentifier
                 }
             }
         }
@@ -594,6 +608,8 @@ final class AppModel: ObservableObject {
                     rec.rating = photo.rating
                     rec.isRejected = photo.isRejected
                     rec.qualityReport = photo.qualityReport
+                    rec.adjustments = photo.adjustments
+                    rec.lutIdentifier = photo.lutIdentifier
                 }
             }
             try? self.libraryIndex.saveCatalog(catalog, forRoot: root)
@@ -772,6 +788,13 @@ final class AppModel: ObservableObject {
             selectedIDs = [photo.id]
         }
         guard selectedID != photo.id else { return }
+
+        // Save current adjustments for outgoing photo
+        if let currentID = selectedID, let idx = photos.firstIndex(where: { $0.id == currentID }) {
+            photos[idx].adjustments = adjustments
+            photos[idx].lutIdentifier = selectedLUT
+        }
+
         nativeInspection.cancel()
         nativeInspectionRegion.center = .init(x: 0.5, y: 0.5)
         cancelMaskInteraction()
@@ -784,6 +807,17 @@ final class AppModel: ObservableObject {
         styleReference = nil; stylePreviews.cancel()
         invalidatePortraitDetection()
         selectedID = photo.id
+
+        // Load incoming photo's custom adjustments (if any) without dirtying undo history
+        if let custom = photo.adjustments {
+            undoSuppressed = true
+            adjustments = custom
+            if let customLUT = photo.lutIdentifier {
+                selectedLUT = customLUT
+            }
+            undoSuppressed = false
+        }
+
         beforeImage = nil; afterImage = nil
         regionalSuggestions = []
         invalidateAnalysis()
@@ -1346,6 +1380,72 @@ final class AppModel: ObservableObject {
             return nil
         }
         return CIImage(cgImage: cgImage)
+    }
+
+    // MARK: - P2-K: Selective Adjustments Copy & Multi-Photo Batch Sync
+
+    /// Copies adjustments and LUT identifier from currently selected photo to clipboard.
+    func copyAdjustments() {
+        copiedAdjustments = adjustments
+        copiedLUT = selectedLUT
+        let name = selectedPhoto?.url.lastPathComponent ?? "当前照片"
+        status = "已复制调整参数（\(name)）"
+    }
+
+    /// Pastes copied adjustments to currently selected photos using the specified or default sync options.
+    func pasteAdjustments(options: AdjustmentSyncOptions = .allAdjustments) {
+        guard let source = copiedAdjustments else {
+            status = "剪贴板无有效调整参数，请先使用 复制调整参数。"
+            return
+        }
+        let targetIDs = selectedIDs.isEmpty ? (selectedID.map { [$0] } ?? []) : Array(selectedIDs)
+        guard !targetIDs.isEmpty else { return }
+
+        syncAdjustments(source: source, sourceLUT: copiedLUT, targetIDs: targetIDs, options: options, actionTitle: "粘贴调整参数")
+    }
+
+    /// Synchronizes source adjustments into multiple target photos with granular options and a single undo step.
+    func syncAdjustments(
+        source: AdjustmentSettings,
+        sourceLUT: String?,
+        targetIDs: [String],
+        options: AdjustmentSyncOptions,
+        actionTitle: String = "同步调整参数"
+    ) {
+        guard !targetIDs.isEmpty else { return }
+
+        performUndoableEdit("adjustments.sync") {
+            for id in targetIDs {
+                if let idx = photos.firstIndex(where: { $0.id == id }) {
+                    let current = photos[idx].adjustments ?? adjustments
+                    var targetLUT = photos[idx].lutIdentifier ?? selectedLUT
+                    let merged = AdjustmentSyncEngine.merge(
+                        source: source,
+                        into: current,
+                        options: options,
+                        sourceLUT: sourceLUT,
+                        targetLUT: &targetLUT
+                    )
+                    photos[idx].adjustments = merged
+                    photos[idx].lutIdentifier = targetLUT
+                    thumbnails.removeValue(forKey: id)
+                }
+            }
+
+            // If currently displayed photo is in the synced targets, update live active adjustments
+            if let currentID = selectedID, targetIDs.contains(currentID), let currentPhoto = photos.first(where: { $0.id == currentID }) {
+                if let newAdjustments = currentPhoto.adjustments {
+                    adjustments = newAdjustments
+                }
+                if let newLUT = currentPhoto.lutIdentifier {
+                    selectedLUT = newLUT
+                }
+                requestPreview(immediate: true)
+            }
+        }
+
+        saveCatalogDebounced()
+        status = "已向 \(targetIDs.count) 张照片\(actionTitle)"
     }
 
     // MARK: - Customer delivery page
