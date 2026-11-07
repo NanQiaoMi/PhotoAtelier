@@ -98,6 +98,11 @@ struct PortraitRetouchPanel: View {
 
             Group {
                 separator
+                bodySkinSection
+            }
+
+            Group {
+                separator
                 clothingSection
             }
 
@@ -563,6 +568,72 @@ struct PortraitRetouchPanel: View {
                 get: { model.clothingSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateClothing { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart body and hand skin refinement (P2-G)
+
+    private var bodySkinSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("身体与手部美肤", systemImage: "hand.raised")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.bodySkinIsActive {
+                    Button("重置") {
+                        model.resetBodySkin()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("智能识别人像颈部、肩臂与手部裸露皮肤，平整颈部横向折痕与颈纹阴影，抑制手背与手臂凸起青蓝静脉，中性灰平滑身体粗糙，并统一身体与面部的色温明度，保留微观毛孔肌理。面部五官受严格隔离保护。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用身体与手部美肤", isOn: Binding(
+                get: { model.bodySkinSettings.enabled },
+                set: { model.setBodySkinEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.bodySkinSettings.enabled {
+                VStack(spacing: 8) {
+                    bodySkinSlider("颈纹淡化", \.neckSmoothing,
+                                   help: "抚平下颌与锁骨之间的横向颈纹阴影与折痕。")
+                    bodySkinSlider("青筋淡化", \.veinReduction,
+                                   help: "抑制手背与手臂的青蓝色凸起静脉与关节暗沉。")
+                    bodySkinSlider("身体平整", \.bodySmoothing,
+                                   help: "身体四肢中性灰磨皮，抚平皮肤粗糙与杂色。")
+                    bodySkinSlider("肤色统一", \.bodyToneHarmonization,
+                                   help: "将身体与手部色温与明度向面部肤色锚点统一。")
+                    bodySkinSlider("肌理保护", \.texturePreservation,
+                                   help: "保留真皮毛孔微观肌理，杜绝塑料假人感。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func bodySkinSlider(_ title: String,
+                                _ keyPath: WritableKeyPath<BodySkinRefinementSettings, Double>,
+                                help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.bodySkinSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateBodySkin { $0[keyPath: keyPath] = val }
                 }
             ),
             range: 0...1

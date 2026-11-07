@@ -116,9 +116,9 @@ final class LocalMaskTests: XCTestCase {
         let input = root.appendingPathComponent("input")
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        // Recipes v1-v15 keep their legacy mask defaults and stay batch-runnable;
-        // v15 is the current version (P2-F smart clothing refinement fields are opt-in).
-        for version in 1...15 {
+        // Recipes v1-v16 keep their legacy mask defaults and stay batch-runnable;
+        // v16 is the current version (P2-G body and hand skin refinement fields are opt-in).
+        for version in 1...16 {
             var recipe = legacy; recipe.version = version
             let summary = try BatchProcessor().run(items: [], inputRoot: input,
                 outputRoot: root.appendingPathComponent("output-\(version)"), recipe: recipe,
@@ -126,7 +126,7 @@ final class LocalMaskTests: XCTestCase {
             XCTAssertNotNil(summary.manifestURL)
         }
         // An unknown future version is rejected before any output directory exists.
-        var future = legacy; future.version = 16
+        var future = legacy; future.version = 17
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))
