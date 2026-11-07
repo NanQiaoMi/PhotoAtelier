@@ -294,6 +294,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v14.
     /// Absent or disabled studio backdrop refinement keeps the pre-v14 path.
     public var backdrop: BackdropRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v15.
+    /// Absent or disabled clothing refinement keeps the pre-v15 path.
+    public var clothing: ClothingRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -470,6 +473,58 @@ public struct BackdropRefinementReport: Codable, Equatable {
     public var note: String?
 
     public init(applied: Bool, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
+/// Settings for P2-F clothing wrinkle smoothing and fabric refinement.
+public struct ClothingRefinementSettings: Codable, Equatable {
+    /// Master toggle for clothing refinement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Smoothing strength for unwanted fabric wrinkles and folds (0...1).
+    public var wrinkleSmoothing: Double = 0
+    /// Crease/seam line attenuation strength (0...1).
+    public var creaseRemoval: Double = 0
+    /// Texture retention: preserves fine fabric weave / knit pattern while smoothing folds (0...1, default 0.7).
+    public var texturePreservation: Double = 0.7
+
+    public init(enabled: Bool = false,
+                wrinkleSmoothing: Double = 0,
+                creaseRemoval: Double = 0,
+                texturePreservation: Double = 0.7) {
+        self.enabled = enabled
+        self.wrinkleSmoothing = wrinkleSmoothing
+        self.creaseRemoval = creaseRemoval
+        self.texturePreservation = texturePreservation
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (wrinkleSmoothing == 0 && creaseRemoval == 0)
+    }
+
+    public func validated() throws -> ClothingRefinementSettings {
+        guard wrinkleSmoothing.isFinite, (0...1).contains(wrinkleSmoothing) else {
+            throw AtelierError.invalidConfiguration("衣物平整强度必须在 0...1 之间。")
+        }
+        guard creaseRemoval.isFinite, (0...1).contains(creaseRemoval) else {
+            throw AtelierError.invalidConfiguration("衣物褶皱抑制必须在 0...1 之间。")
+        }
+        guard texturePreservation.isFinite, (0...1).contains(texturePreservation) else {
+            throw AtelierError.invalidConfiguration("衣物织物肌理保护必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-F clothing wrinkle smoothing stage.
+public struct ClothingRefinementReport: Codable, Equatable {
+    public var applied: Bool
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false, appliedSteps: [String] = [], note: String? = nil) {
         self.applied = applied
         self.appliedSteps = appliedSteps
         self.note = note
@@ -726,6 +781,8 @@ public struct Recipe: Codable, Equatable {
     /// Version 12 adds certificate photo / background replacement, manual repair
     /// brush strokes and the customer delivery page export.
     /// Version 13 adds the heuristic make-up fields (lips/brows/blush/eyeshadow).
+    /// Version 14 adds studio backdrop refinement and advanced make-up sculpting.
+    /// Version 15 adds smart clothing wrinkle smoothing and crease removal.
     public var version = 9
     public var adjustments: AdjustmentSettings
     public var export: ExportSettings
@@ -741,7 +798,7 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...14).contains(version) else {
+        guard (1...15).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
         }
         let portraitSettings = [adjustments.portrait,
@@ -791,6 +848,12 @@ public struct Recipe: Codable, Equatable {
                             automatic?.referenceSettings.makeup]
         guard version >= 14 || makeupGroups.allSatisfy({ $0 == nil || !$0!.requiresVersion14 }) else {
             throw AtelierError.invalidConfiguration("眼线/睫毛/美瞳/眼神光/高光修容等增强妆容需要配方版本 14，不能静默降级。")
+        }
+        let clothingGroups = [adjustments.clothing,
+                              automatic?.baseline.clothing,
+                              automatic?.referenceSettings.clothing]
+        guard version >= 15 || clothingGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的衣物平整与祛皱需要配方版本 15，不能静默降级。")
         }
         let backdropGroups = [adjustments.backdrop,
                               automatic?.baseline.backdrop,
@@ -997,6 +1060,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var makeup: MakeupReport?
     /// Per-photo P2-D studio backdrop refinement status. `nil` when absent or disabled.
     public var backdrop: BackdropRefinementReport?
+    /// Per-photo P2-F clothing refinement status. `nil` when absent or disabled.
+    public var clothing: ClothingRefinementReport?
     public init() {}
 }
 

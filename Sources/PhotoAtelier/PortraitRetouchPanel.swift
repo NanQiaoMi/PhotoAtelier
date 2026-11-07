@@ -98,6 +98,11 @@ struct PortraitRetouchPanel: View {
 
             Group {
                 separator
+                clothingSection
+            }
+
+            Group {
+                separator
                 liquifySection
                 separator
                 repairSection
@@ -501,6 +506,68 @@ struct PortraitRetouchPanel: View {
                     model.setLiquifyParameter(newValue, keyPath)
                 }),
             range: -1...1)
+    }
+
+    // MARK: - Smart clothing wrinkle smoothing (P2-F)
+
+    private var clothingSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("智能衣物平整与祛皱", systemImage: "tshirt")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.clothingIsActive {
+                    Button("重置") {
+                        model.resetClothing()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("基于 Vision 人物抠图智能分离面料区域，平滑衣物折痕、压痕与穿着褶皱，保留微观编织纹理（cotton/wool/knit）与身体轮廓，严格保护面部、发型与裸露皮肤。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用衣物平整与祛皱", isOn: Binding(
+                get: { model.clothingSettings.enabled },
+                set: { model.setClothingEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.clothingSettings.enabled {
+                VStack(spacing: 8) {
+                    clothingSlider("衣物平整", \.wrinkleSmoothing,
+                                   help: "抚平面料大面积折痕与散乱褶皱，使衣物平整贴合。")
+                    clothingSlider("褶皱抑制", \.creaseRemoval,
+                                   help: "抑制尖锐折痕、压褶线与深色折印。")
+                    clothingSlider("织物肌理保护", \.texturePreservation,
+                                   help: "保留衣物本身的微观编织纹理（棉麻质感、针织线圈），避免塑料假面感。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func clothingSlider(_ title: String,
+                                _ keyPath: WritableKeyPath<ClothingRefinementSettings, Double>,
+                                help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.clothingSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateClothing { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: 0...1
+        )
+        .help(help)
     }
 
     private var separator: some View {
