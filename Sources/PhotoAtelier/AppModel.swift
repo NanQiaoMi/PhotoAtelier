@@ -2549,6 +2549,36 @@ final class AppModel: ObservableObject {
         status = "已重置面部五区精修设置。"
     }
 
+    // MARK: - Smart pet enhancement (P2-I)
+
+    var petEnhancementSettings: PetEnhancementSettings {
+        adjustments.petEnhancement ?? PetEnhancementSettings()
+    }
+
+    var petEnhancementIsActive: Bool {
+        adjustments.petEnhancement.map { !$0.isNeutral } ?? false
+    }
+
+    func updatePetEnhancement(_ mutate: (inout PetEnhancementSettings) -> Void) {
+        var settings = adjustments.petEnhancement ?? PetEnhancementSettings()
+        mutate(&settings)
+        adjustments.petEnhancement = settings
+    }
+
+    func setPetEnhancementEnabled(_ enabled: Bool) {
+        updatePetEnhancement { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能宠物美化已启用：毛发蓬松质感、宠物明眸提亮、鼻吻立体润泽、毛发去灰提纯与白毛去黄。"
+            : "智能宠物美化已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetPetEnhancement() {
+        adjustments.petEnhancement = nil
+        status = "已重置智能宠物美化设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`

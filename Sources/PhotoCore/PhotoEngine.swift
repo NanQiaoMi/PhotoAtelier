@@ -308,6 +308,7 @@ public final class PhotoEngine {
         if let repair = settings.repairBrush { try repair.validate() }
         if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
         if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
+        if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
         if let reference = settings.referenceColor {
             try reference.profile.validate()
@@ -367,7 +368,9 @@ public final class PhotoEngine {
                         /// advanced callers that already detected faces); `nil` reuses
                         /// the landmarks detected for portrait/reference-color, or runs
                         /// one detection when make-up is the only face-aware stage.
-                        preparedMakeupFaces: [FaceLandmarkSet]? = nil) throws -> ProcessedPhoto {
+                        preparedMakeupFaces: [FaceLandmarkSet]? = nil,
+                        /// Optional pre-detected animal targets for the pet enhancement stage.
+                        preparedPetTargets: [PetTarget]? = nil) throws -> ProcessedPhoto {
         try Self.validate(settings)
         try cancellation?.check()
 
@@ -635,6 +638,21 @@ public final class PhotoEngine {
                                                 preparedMatte: preparedPersonMatte,
                                                 preparedFaceBox: preparedCertificateFaceBox,
                                                 report: &report, cancellation: cancellation)
+        }
+        try cancellation?.check()
+
+        // P2-I: Smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
+        if let pet = settings.petEnhancement, !pet.isNeutral {
+            let petResult = try PetEnhancementEngine.apply(
+                working, settings: pet,
+                targets: preparedPetTargets,
+                context: context, cancellation: cancellation
+            )
+            working = petResult.image
+            report.petEnhancement = petResult.report
+            if let note = petResult.report.note {
+                report.warnings.append(note)
+            }
         }
         try cancellation?.check()
 
@@ -971,6 +989,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let petGroups = [adjustments.petEnhancement,
+                         automatic?.baseline.petEnhancement,
+                         automatic?.referenceSettings.petEnhancement]
+        if petGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 18 }
         let facialZonalGroups = [adjustments.facialZonal,
                                  automatic?.baseline.facialZonal,
                                  automatic?.referenceSettings.facialZonal]

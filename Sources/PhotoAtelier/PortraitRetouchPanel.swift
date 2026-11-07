@@ -107,7 +107,12 @@ struct PortraitRetouchPanel: View {
 
             Group {
                 separator
+                petEnhancementSection
+                separator
                 liquifySection
+            }
+
+            Group {
                 separator
                 repairSection
             }
@@ -703,6 +708,74 @@ struct PortraitRetouchPanel: View {
                 get: { model.bodySkinSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateBodySkin { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart pet enhancement (P2-I)
+
+    private var petEnhancementSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("智能宠物写真美化", systemImage: "pawprint.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.petEnhancementIsActive {
+                    Button("重置") {
+                        model.resetPetEnhancement()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("专为猫咪与狗狗写真打造：智能定位宠物身躯毛发、眼眶与鼻吻，增强毛发蓬松微观毛流，提亮双眸并聚集晶亮眼神光，加深鼻吻立体湿润感，去除环境光散射毛发灰蒙雾感，并中和浅色白毛发黄。100% 本地原生，无需外置模型。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用智能宠物写真美化", isOn: Binding(
+                get: { model.petEnhancementSettings.enabled },
+                set: { model.setPetEnhancementEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.petEnhancementSettings.enabled {
+                VStack(spacing: 8) {
+                    petEnhancementSlider("毛发蓬松", \.furFluffiness,
+                                         help: "提取毛发高频微观毛流对比度，令皮毛根根分明、丰盈蓬松。")
+                    petEnhancementSlider("明眸提亮", \.eyeBrightening,
+                                         help: "提亮宠物眼眶晶状体暗部，强化晶莹眼神光高光。")
+                    petEnhancementSlider("鼻吻润泽", \.muzzleMoisture,
+                                         help: "加深鼻头深邃暗部并提亮水光高光，呈现湿润立体质感。")
+                    petEnhancementSlider("毛发去灰", \.coatDehaze,
+                                         help: "消除环境散射灰雾，还原毛发深黑、金黄、银灰的原生纯度。")
+                    petEnhancementSlider("白毛去黄", \.coatWhiten,
+                                         help: "中和浅色或白色宠物毛发上的氧化发黄，还原纯净白亮。")
+                    petEnhancementSlider("肌理保护", \.texturePreservation,
+                                         help: "重注入微观毛发真实纹理，防止平滑后出现橡皮擦糊感。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func petEnhancementSlider(_ title: String,
+                                      _ keyPath: WritableKeyPath<PetEnhancementSettings, Double>,
+                                      help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.petEnhancementSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updatePetEnhancement { $0[keyPath: keyPath] = val }
                 }
             ),
             range: 0...1
