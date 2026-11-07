@@ -2519,6 +2519,36 @@ final class AppModel: ObservableObject {
         status = "已重置身体与手部美肤设置。"
     }
 
+    // MARK: - Smart facial zonal wrinkle smoothing & anti-shine (P2-H)
+
+    var facialZonalSettings: FacialZonalRefinementSettings {
+        adjustments.facialZonal ?? FacialZonalRefinementSettings()
+    }
+
+    var facialZonalIsActive: Bool {
+        adjustments.facialZonal.map { !$0.isNeutral } ?? false
+    }
+
+    func updateFacialZonal(_ mutate: (inout FacialZonalRefinementSettings) -> Void) {
+        var settings = adjustments.facialZonal ?? FacialZonalRefinementSettings()
+        mutate(&settings)
+        adjustments.facialZonal = settings
+    }
+
+    func setFacialZonalEnabled(_ enabled: Bool) {
+        updateFacialZonal { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "面部五区精修已启用：淡化黑眼圈、平整眼袋泪沟、抚平法令纹与抬头纹、面部去油光与下颌线修容。"
+            : "面部五区精修已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetFacialZonal() {
+        adjustments.facialZonal = nil
+        status = "已重置面部五区精修设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`

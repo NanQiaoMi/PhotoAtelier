@@ -94,14 +94,13 @@ struct PortraitRetouchPanel: View {
             Group {
                 separator
                 makeupSection
+                separator
+                facialZonalSection
             }
 
             Group {
                 separator
                 bodySkinSection
-            }
-
-            Group {
                 separator
                 clothingSection
             }
@@ -568,6 +567,76 @@ struct PortraitRetouchPanel: View {
                 get: { model.clothingSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateClothing { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart facial zonal wrinkle smoothing & anti-shine (P2-H)
+
+    private var facialZonalSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("面部五区精修与去油光", systemImage: "face.dashed")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.facialZonalIsActive {
+                    Button("重置") {
+                        model.resetFacialZonal()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("基于面部几何精细分区：淡化下眼睑黑眼圈暗沉、抚平眼袋与泪沟凹陷阴影、消除鼻唇法令纹深部沟壑、抚平抬头纹与眉间川字纹，抑制 T 区面部油光并保留微观毛孔肌理，重塑下颌轮廓线。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用面部五区精修", isOn: Binding(
+                get: { model.facialZonalSettings.enabled },
+                set: { model.setFacialZonalEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.facialZonalSettings.enabled {
+                VStack(spacing: 8) {
+                    facialZonalSlider("祛黑眼圈", \.darkCircles,
+                                      help: "淡化下眼睑由于微循环或色素沉积导致的蓝紫暗沉。")
+                    facialZonalSlider("眼袋泪沟", \.eyeBags,
+                                      help: "抚平下眼眶下缘弧形凹陷阴影槽与浮肿泪沟。")
+                    facialZonalSlider("祛法令纹", \.nasolabialFolds,
+                                      help: "抚平从鼻翼两侧延伸至嘴角旁的表情阴影沟壑。")
+                    facialZonalSlider("抬头川字", \.foreheadWrinkles,
+                                      help: "抚平额头横向纹理与两眉之间垂直川字皱纹阴影。")
+                    facialZonalSlider("面部去油光", \.antiShine,
+                                      help: "压制额头中央与鼻梁T区泛白反光，收敛为高级哑光质感。")
+                    facialZonalSlider("下颌修容", \.jawlineSculpting,
+                                      help: "淡化下巴底部重叠双下巴阴影，重塑清晰下颌轮廓线。")
+                    facialZonalSlider("肌理保护", \.texturePreservation,
+                                      help: "保留皮肤原生细腻微观毛孔，防止塑料感失真。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func facialZonalSlider(_ title: String,
+                                   _ keyPath: WritableKeyPath<FacialZonalRefinementSettings, Double>,
+                                   help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.facialZonalSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateFacialZonal { $0[keyPath: keyPath] = val }
                 }
             ),
             range: 0...1
