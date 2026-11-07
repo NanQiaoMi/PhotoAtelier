@@ -306,6 +306,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v18.
     /// Absent or disabled pet enhancement keeps the pre-v18 path.
     public var petEnhancement: PetEnhancementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v19.
+    /// Absent or disabled sky enhancement keeps the pre-v19 path.
+    public var sky: SkyEnhancementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -761,6 +764,108 @@ public struct PetEnhancementReport: Codable, Equatable {
     }
 }
 
+/// Atmospheric procedural sky preset styles for P2-J.
+public enum SkyPreset: String, Codable, CaseIterable, Identifiable {
+    case none
+    case azureClear
+    case sunsetGlow
+    case twilightLilac
+    case dramaticClouds
+    case morningDawn
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .none: return "原图天空（仅增强）"
+        case .azureClear: return "湛蓝晴空"
+        case .sunsetGlow: return "日落晚霞"
+        case .twilightLilac: return "暮光紫霞"
+        case .dramaticClouds: return "戏剧阴云"
+        case .morningDawn: return "柔光晨曦"
+        }
+    }
+}
+
+/// Settings for P2-J smart sky detection, atmospheric relighting and replacement.
+public struct SkyEnhancementSettings: Codable, Equatable {
+    /// Master toggle for sky enhancement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Sky vibrance & azure depth enhancement (0...1, default 0).
+    public var skyVibrance: Double = 0
+    /// Cloud structure & contrast enhancement (0...1, default 0).
+    public var cloudContrast: Double = 0
+    /// Sunset & golden hour atmospheric warmth (0...1, default 0).
+    public var sunsetWarmth: Double = 0
+    /// Procedural atmospheric sky preset replacement (default: .none).
+    public var skyPreset: SkyPreset = .none
+    /// Sky replacement opacity / blend strength (0...1, default 0.80).
+    public var replacementOpacity: Double = 0.80
+    /// Ambient light transfer onto foreground subject (0...1, default 0.35).
+    public var foregroundRelight: Double = 0.35
+    /// Horizon edge feathering & halo suppression (0...1, default 0.50).
+    public var edgeFeather: Double = 0.50
+
+    public init(enabled: Bool = false,
+                skyVibrance: Double = 0,
+                cloudContrast: Double = 0,
+                sunsetWarmth: Double = 0,
+                skyPreset: SkyPreset = .none,
+                replacementOpacity: Double = 0.80,
+                foregroundRelight: Double = 0.35,
+                edgeFeather: Double = 0.50) {
+        self.enabled = enabled
+        self.skyVibrance = skyVibrance
+        self.cloudContrast = cloudContrast
+        self.sunsetWarmth = sunsetWarmth
+        self.skyPreset = skyPreset
+        self.replacementOpacity = replacementOpacity
+        self.foregroundRelight = foregroundRelight
+        self.edgeFeather = edgeFeather
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (skyVibrance == 0 && cloudContrast == 0 && sunsetWarmth == 0 && skyPreset == .none)
+    }
+
+    public func validated() throws -> SkyEnhancementSettings {
+        guard skyVibrance.isFinite, (0...1).contains(skyVibrance) else {
+            throw AtelierError.invalidConfiguration("天空湛蓝度必须在 0...1 之间。")
+        }
+        guard cloudContrast.isFinite, (0...1).contains(cloudContrast) else {
+            throw AtelierError.invalidConfiguration("云层反差必须在 0...1 之间。")
+        }
+        guard sunsetWarmth.isFinite, (0...1).contains(sunsetWarmth) else {
+            throw AtelierError.invalidConfiguration("晚霞氛围必须在 0...1 之间。")
+        }
+        guard replacementOpacity.isFinite, (0...1).contains(replacementOpacity) else {
+            throw AtelierError.invalidConfiguration("天空置换不透明度必须在 0...1 之间。")
+        }
+        guard foregroundRelight.isFinite, (0...1).contains(foregroundRelight) else {
+            throw AtelierError.invalidConfiguration("前景光照匹配必须在 0...1 之间。")
+        }
+        guard edgeFeather.isFinite, (0...1).contains(edgeFeather) else {
+            throw AtelierError.invalidConfiguration("边缘羽化必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-J sky enhancement stage.
+public struct SkyEnhancementReport: Codable, Equatable {
+    public var applied: Bool
+    public var hasSkyDetected: Bool
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false, hasSkyDetected: Bool = false, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.hasSkyDetected = hasSkyDetected
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
 /// Manual repair / clone brush strokes stored in a v12 recipe.
 ///
 /// This is plain data: the pixels are produced by `RepairBrushEngine` in the
@@ -1028,8 +1133,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...18).contains(version) else {
+        guard (1...19).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let skyGroups = [adjustments.sky,
+                         automatic?.baseline.sky,
+                         automatic?.referenceSettings.sky]
+        guard version >= 19 || skyGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的天空氛围与置换需要配方版本 19，不能静默降级。")
         }
         let petGroups = [adjustments.petEnhancement,
                          automatic?.baseline.petEnhancement,
@@ -1316,6 +1427,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var facialZonal: FacialZonalRefinementReport?
     /// Per-photo P2-I pet enhancement status. `nil` when absent or disabled.
     public var petEnhancement: PetEnhancementReport?
+    /// Per-photo P2-J sky enhancement status. `nil` when absent or disabled.
+    public var sky: SkyEnhancementReport?
     public init() {}
 }
 
