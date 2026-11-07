@@ -2489,6 +2489,36 @@ final class AppModel: ObservableObject {
         status = "已重置衣物平整设置。"
     }
 
+    // MARK: - Smart body and hand skin refinement (P2-G)
+
+    var bodySkinSettings: BodySkinRefinementSettings {
+        adjustments.bodySkin ?? BodySkinRefinementSettings()
+    }
+
+    var bodySkinIsActive: Bool {
+        adjustments.bodySkin.map { !$0.isNeutral } ?? false
+    }
+
+    func updateBodySkin(_ mutate: (inout BodySkinRefinementSettings) -> Void) {
+        var settings = adjustments.bodySkin ?? BodySkinRefinementSettings()
+        mutate(&settings)
+        adjustments.bodySkin = settings
+    }
+
+    func setBodySkinEnabled(_ enabled: Bool) {
+        updateBodySkin { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "身体与手部美肤已启用：平整颈纹、淡化青筋、身体中性灰磨皮与肤色统一。"
+            : "身体与手部美肤已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetBodySkin() {
+        adjustments.bodySkin = nil
+        status = "已重置身体与手部美肤设置。"
+    }
+
     // MARK: Manual repair / clone brush (P1-B)
 
     /// UI/slider radius range, aligned with `RepairStroke`/`RepairBrushEngine`

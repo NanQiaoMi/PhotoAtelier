@@ -297,6 +297,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v15.
     /// Absent or disabled clothing refinement keeps the pre-v15 path.
     public var clothing: ClothingRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v16.
+    /// Absent or disabled body and hand skin refinement keeps the pre-v16 path.
+    public var bodySkin: BodySkinRefinementSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -520,6 +523,72 @@ public struct ClothingRefinementSettings: Codable, Equatable {
 
 /// Per-photo record of the P2-F clothing wrinkle smoothing stage.
 public struct ClothingRefinementReport: Codable, Equatable {
+    public var applied: Bool
+    public var appliedSteps: [String]
+    public var note: String?
+
+    public init(applied: Bool = false, appliedSteps: [String] = [], note: String? = nil) {
+        self.applied = applied
+        self.appliedSteps = appliedSteps
+        self.note = note
+    }
+}
+
+/// Settings for P2-G body and hand skin refinement (neck smoothing, vein reduction, body tone harmonization).
+public struct BodySkinRefinementSettings: Codable, Equatable {
+    /// Master toggle for body and hand skin refinement. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Neck wrinkle and crease smoothing strength (0...1).
+    public var neckSmoothing: Double = 0
+    /// Body and limbs skin smoothing (0...1).
+    public var bodySmoothing: Double = 0
+    /// Hand and arm superficial vein & joint redness/darkness reduction (0...1).
+    public var veinReduction: Double = 0
+    /// Harmonize body and hand skin tone towards the face skin tone (0...1).
+    public var bodyToneHarmonization: Double = 0
+    /// Micro-texture retention: preserves fine skin pores while smoothing (0...1, default 0.7).
+    public var texturePreservation: Double = 0.7
+
+    public init(enabled: Bool = false,
+                neckSmoothing: Double = 0,
+                bodySmoothing: Double = 0,
+                veinReduction: Double = 0,
+                bodyToneHarmonization: Double = 0,
+                texturePreservation: Double = 0.7) {
+        self.enabled = enabled
+        self.neckSmoothing = neckSmoothing
+        self.bodySmoothing = bodySmoothing
+        self.veinReduction = veinReduction
+        self.bodyToneHarmonization = bodyToneHarmonization
+        self.texturePreservation = texturePreservation
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (neckSmoothing == 0 && bodySmoothing == 0 && veinReduction == 0 && bodyToneHarmonization == 0)
+    }
+
+    public func validated() throws -> BodySkinRefinementSettings {
+        guard neckSmoothing.isFinite, (0...1).contains(neckSmoothing) else {
+            throw AtelierError.invalidConfiguration("颈纹平整强度必须在 0...1 之间。")
+        }
+        guard bodySmoothing.isFinite, (0...1).contains(bodySmoothing) else {
+            throw AtelierError.invalidConfiguration("身体平整强度必须在 0...1 之间。")
+        }
+        guard veinReduction.isFinite, (0...1).contains(veinReduction) else {
+            throw AtelierError.invalidConfiguration("青筋淡化强度必须在 0...1 之间。")
+        }
+        guard bodyToneHarmonization.isFinite, (0...1).contains(bodyToneHarmonization) else {
+            throw AtelierError.invalidConfiguration("身体肤色统一强度必须在 0...1 之间。")
+        }
+        guard texturePreservation.isFinite, (0...1).contains(texturePreservation) else {
+            throw AtelierError.invalidConfiguration("皮肤肌理保护必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Per-photo record of the P2-G body and hand skin refinement stage.
+public struct BodySkinRefinementReport: Codable, Equatable {
     public var applied: Bool
     public var appliedSteps: [String]
     public var note: String?
@@ -798,8 +867,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...15).contains(version) else {
+        guard (1...16).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let bodySkinGroups = [adjustments.bodySkin,
+                              automatic?.baseline.bodySkin,
+                              automatic?.referenceSettings.bodySkin]
+        guard version >= 16 || bodySkinGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的身体与手部美肤需要配方版本 16，不能静默降级。")
         }
         let portraitSettings = [adjustments.portrait,
                                 automatic?.baseline.portrait,
@@ -1062,6 +1137,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var backdrop: BackdropRefinementReport?
     /// Per-photo P2-F clothing refinement status. `nil` when absent or disabled.
     public var clothing: ClothingRefinementReport?
+    /// Per-photo P2-G body and hand skin refinement status. `nil` when absent or disabled.
+    public var bodySkin: BodySkinRefinementReport?
     public init() {}
 }
 
