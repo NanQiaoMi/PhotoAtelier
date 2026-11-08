@@ -3008,6 +3008,66 @@ final class AppModel: ObservableObject {
         status = "已重置全身身形与姿态塑形设置。"
     }
 
+    // MARK: - Smart double eyelid sculpting, tape concealing & aegyo sal sculpting (P2-P)
+
+    var eyelidAegyoSalSettings: EyelidAegyoSalSettings {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            return effectiveEyelidAegyoSal(forPersonIndex: idx)
+        }
+        return adjustments.eyelidAegyoSal ?? EyelidAegyoSalSettings()
+    }
+
+    var eyelidAegyoSalIsActive: Bool {
+        adjustments.eyelidAegyoSal.map { !$0.isNeutral } ?? false
+    }
+
+    func updateEyelidAegyoSal(_ mutate: (inout EyelidAegyoSalSettings) -> Void) {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var el = mp.individualProfiles[pIdx].eyelidAegyoSalOverride ?? adjustments.eyelidAegyoSal ?? EyelidAegyoSalSettings()
+                mutate(&el)
+                mp.individualProfiles[pIdx].eyelidAegyoSalOverride = el
+            } else {
+                var el = adjustments.eyelidAegyoSal ?? EyelidAegyoSalSettings()
+                mutate(&el)
+                var prof = PersonPortraitProfile.defaultProfile(for: role)
+                prof.faceIndex = idx
+                prof.eyelidAegyoSalOverride = el
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.eyelidAegyoSal ?? EyelidAegyoSalSettings()
+            mutate(&settings)
+            adjustments.eyelidAegyoSal = settings
+        }
+    }
+
+    func setEyelidAegyoSalEnabled(_ enabled: Bool) {
+        updateEyelidAegyoSal { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "双眼皮雕刻与卧蚕立体塑形已启用：4款双眼皮折痕微雕、去双眼皮贴反光与阶梯纹、卧蚕珠光高光与阴影修容。"
+            : "双眼皮雕刻与卧蚕立体塑形已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetEyelidAegyoSal() {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            if var mp = adjustments.multiPerson,
+               let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                mp.individualProfiles[pIdx].eyelidAegyoSalOverride = nil
+                adjustments.multiPerson = mp
+            }
+        } else {
+            adjustments.eyelidAegyoSal = nil
+        }
+        status = "已重置双眼皮与卧蚕微雕设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
@@ -3460,6 +3520,16 @@ final class AppModel: ObservableObject {
             }
         }
         return adjustments.bodyReshape ?? BodyReshapeSettings()
+    }
+
+    func effectiveEyelidAegyoSal(forPersonIndex idx: Int?) -> EyelidAegyoSalSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let el = profile.eyelidAegyoSalOverride {
+                return el
+            }
+        }
+        return adjustments.eyelidAegyoSal ?? EyelidAegyoSalSettings()
     }
 
     func assignedRole(forPersonIndex idx: Int) -> PersonDemographicRole {

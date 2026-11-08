@@ -310,6 +310,7 @@ public final class PhotoEngine {
         if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
         if let eyeTeeth = settings.eyeTeeth, !eyeTeeth.isNeutral { _ = try eyeTeeth.validated() }
         if let bodyReshape = settings.bodyReshape, !bodyReshape.isNeutral { _ = try bodyReshape.validated() }
+        if let eyelid = settings.eyelidAegyoSal, !eyelid.isNeutral { _ = try eyelid.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -472,9 +473,10 @@ public final class PhotoEngine {
         let multiPersonActive = settings.multiPerson.map { $0.enabled && !$0.isNeutral } ?? false
         let facialZonalActive = settings.facialZonal.map { !$0.isNeutral } ?? false
         let eyeTeethActive = settings.eyeTeeth.map { !$0.isNeutral } ?? false
+        let eyelidAegyoSalActive = settings.eyelidAegyoSal.map { !$0.isNeutral } ?? false
         let needsPortraitMasks = portraitActive || multiPersonActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive || eyeTeethActive
+        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive || eyeTeethActive || eyelidAegyoSalActive
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
@@ -559,6 +561,17 @@ public final class PhotoEngine {
                         appliedSteps.append("eyeTeeth_\(idx + 1)")
                     }
 
+                    // 3b. Per-person Eyelid & Aegyo Sal Refinement
+                    let effectiveEyelid = (profile?.enabled == true ? profile?.eyelidAegyoSalOverride : nil) ?? settings.eyelidAegyoSal
+                    if let el = effectiveEyelid, !el.isNeutral, face.hasUsableGeometry {
+                        let res = EyelidAegyoSalRefinementEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            perFaceMask: faceMask, settings: el
+                        )
+                        working = res
+                        appliedSteps.append("eyelid_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -599,6 +612,10 @@ public final class PhotoEngine {
                 )
                 report.eyeTeeth = EyeTeethRefinementReport(
                     applied: appliedSteps.contains(where: { $0.starts(with: "eyeTeeth_") }),
+                    faceCount: detectedFaces.count
+                )
+                report.eyelidAegyoSal = EyelidAegyoSalReport(
+                    applied: appliedSteps.contains(where: { $0.starts(with: "eyelid_") }),
                     faceCount: detectedFaces.count
                 )
                 report.makeup = MakeupReport(
@@ -663,7 +680,25 @@ public final class PhotoEngine {
             }
             try cancellation?.check()
 
-            // P1-C v13 heuristic make-up: after portrait refinement and before
+            // P2-P: Smart double eyelid sculpting, eyelid tape concealing & aegyo sal sculpting
+            if let eyelidAegyoSal = settings.eyelidAegyoSal, !eyelidAegyoSal.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，双眼皮与卧蚕微雕已跳过（原图保持不变）。"
+                    report.eyelidAegyoSal = EyelidAegyoSalReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let eyelidResult = EyelidAegyoSalRefinementEngine.apply(
+                        to: working, faces: faces, settings: eyelidAegyoSal
+                    )
+                    working = eyelidResult.image
+                    report.eyelidAegyoSal = eyelidResult.report
+                    if let note = eyelidResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
             // reference color / local masks, so the match and local edits see the
             // made-up pixels. Absent or fully neutral settings skip the stage and keep
             // the pre-v13 pixel path exact. No usable face → explicit skip with report
@@ -1163,6 +1198,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let eyelidGroups = [adjustments.eyelidAegyoSal,
+                            automatic?.baseline.eyelidAegyoSal,
+                            automatic?.referenceSettings.eyelidAegyoSal]
+        var hasEyelidOverride = false
+        let multiSettings = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettings {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.eyelidAegyoSalOverride, !o.isNeutral { hasEyelidOverride = true; break }
+            }
+            if hasEyelidOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.eyelidAegyoSalOverride, !o.isNeutral { hasEyelidOverride = true; break }
+            }
+            if hasEyelidOverride { break }
+        }
+        if eyelidGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasEyelidOverride { return 23 }
         let bodyReshapeGroups = [adjustments.bodyReshape,
                                  automatic?.baseline.bodyReshape,
                                  automatic?.referenceSettings.bodyReshape]
