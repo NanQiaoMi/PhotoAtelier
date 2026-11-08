@@ -320,6 +320,7 @@ public final class PhotoEngine {
         if let jawChinReshape = settings.jawChinReshape, !jawChinReshape.isNeutral { _ = try jawChinReshape.validated() }
         if let facialContour = settings.facialContour, !facialContour.isNeutral { _ = try facialContour.validated() }
         if let eyebrowReshape = settings.eyebrowReshape, !eyebrowReshape.isNeutral { _ = try eyebrowReshape.validated() }
+        if let facialBoneContour = settings.facialBoneContour, !facialBoneContour.isNeutral { _ = try facialBoneContour.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -669,6 +670,17 @@ public final class PhotoEngine {
                         appliedSteps.append("eyebrowReshape_\(idx + 1)")
                     }
 
+                    // 3k. Per-person Facial Bone 3D Contour Shading, Facial Folding & Studio Lighting
+                    let effectiveFacialBoneContour = (profile?.enabled == true ? profile?.facialBoneContourOverride : nil) ?? settings.facialBoneContour
+                    if let fbc = effectiveFacialBoneContour, !fbc.isNeutral, face.hasUsableGeometry {
+                        let res = FacialBoneContourEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            settings: fbc, perFaceMask: faceMask
+                        )
+                        working = res.image
+                        appliedSteps.append("facialBoneContour_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -952,6 +964,26 @@ public final class PhotoEngine {
                     working = ebResult.image
                     report.eyebrowReshape = ebResult.report
                     if let note = ebResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-Z: Smart facial bone 3D contour shading, facial folding angle & studio lighting sculpting
+            if let facialBoneContour = settings.facialBoneContour, !facialBoneContour.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，全脸骨相光影修容已跳过（原图保持不变）。"
+                    report.facialBoneContour = FacialBoneContourReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let fbcResult = FacialBoneContourEngine.apply(
+                        to: working, faces: faces, settings: facialBoneContour
+                    )
+                    working = fbcResult.image
+                    report.facialBoneContour = fbcResult.report
+                    if let note = fbcResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1469,6 +1501,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let facialBoneContourGroups = [adjustments.facialBoneContour,
+                                       automatic?.baseline.facialBoneContour,
+                                       automatic?.referenceSettings.facialBoneContour]
+        var hasFacialBoneContourOverride = false
+        let multiSettingsForFacialBoneContour = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForFacialBoneContour {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.facialBoneContourOverride, !o.isNeutral { hasFacialBoneContourOverride = true; break }
+            }
+            if hasFacialBoneContourOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.facialBoneContourOverride, !o.isNeutral { hasFacialBoneContourOverride = true; break }
+            }
+            if hasFacialBoneContourOverride { break }
+        }
+        if facialBoneContourGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasFacialBoneContourOverride { return 33 }
         let eyebrowReshapeGroups = [adjustments.eyebrowReshape,
                                     automatic?.baseline.eyebrowReshape,
                                     automatic?.referenceSettings.eyebrowReshape]

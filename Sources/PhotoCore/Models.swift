@@ -348,6 +348,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v32.
     /// Absent or disabled eyebrow reshaping keeps the pre-v32 path.
     public var eyebrowReshape: EyebrowReshapeSettings? = nil
+    /// Optional for exact compatibility with recipes written before v33.
+    /// Absent or disabled facial bone contour shading keeps the pre-v33 path.
+    public var facialBoneContour: FacialBoneContourSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1968,6 +1971,120 @@ public struct EyebrowReshapeReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-Z smart facial bone 3D contour shading, facial folding angle & high-fashion studio lighting sculpting.
+public struct FacialBoneContourSettings: Codable, Equatable, Sendable {
+    /// Master toggle for facial bone contour adjustments.
+    public var enabled: Bool = false
+    /// Facial folding angle enhancement / 面部折叠度增强 (0...1.0, default 0).
+    public var facialFolding: Double = 0
+    /// T-Zone 3D specular highlight / T 区立体高光 (0...1.0, default 0).
+    public var tZoneHighlight: Double = 0
+    /// Bilateral C-Zone highlight / 双侧 C 区高光 (0...1.0, default 0).
+    public var cZoneHighlight: Double = 0
+    /// Sub-zygomatic cheek contour shadow / 面颊侧部微阴影修容 (0...1.0, default 0).
+    public var cheekContourShadow: Double = 0
+    /// Mandibular jawline contour shadow / 下颌线下阴影与双下巴视觉收缩 (0...1.0, default 0).
+    public var jawlineShadow: Double = 0
+    /// Philtrum ridge & Cupid's bow highlight / 人中与唇峰立体高光 (0...1.0, default 0).
+    public var philtrumHighlight: Double = 0
+    /// Contour lighting warmth modulation / 修容光影色温倾向 (-0.5...0.5, default 0).
+    public var contourToneWarmth: Double = 0
+
+    public init(enabled: Bool = false,
+                facialFolding: Double = 0,
+                tZoneHighlight: Double = 0,
+                cZoneHighlight: Double = 0,
+                cheekContourShadow: Double = 0,
+                jawlineShadow: Double = 0,
+                philtrumHighlight: Double = 0,
+                contourToneWarmth: Double = 0) {
+        self.enabled = enabled
+        self.facialFolding = max(0.0, min(1.0, facialFolding))
+        self.tZoneHighlight = max(0.0, min(1.0, tZoneHighlight))
+        self.cZoneHighlight = max(0.0, min(1.0, cZoneHighlight))
+        self.cheekContourShadow = max(0.0, min(1.0, cheekContourShadow))
+        self.jawlineShadow = max(0.0, min(1.0, jawlineShadow))
+        self.philtrumHighlight = max(0.0, min(1.0, philtrumHighlight))
+        self.contourToneWarmth = max(-0.5, min(0.5, contourToneWarmth))
+    }
+
+    /// True when the settings cannot change pixels; the stage is skipped completely.
+    public var isNeutral: Bool {
+        !enabled || (
+            facialFolding <= 0.0001 &&
+            tZoneHighlight <= 0.0001 &&
+            cZoneHighlight <= 0.0001 &&
+            cheekContourShadow <= 0.0001 &&
+            jawlineShadow <= 0.0001 &&
+            philtrumHighlight <= 0.0001
+        )
+    }
+
+    public func validated() throws -> FacialBoneContourSettings {
+        guard facialFolding.isFinite, (0...1).contains(facialFolding) else {
+            throw AtelierError.invalidConfiguration("面部折叠度调节程度必须在 0...1 之间。")
+        }
+        guard tZoneHighlight.isFinite, (0...1).contains(tZoneHighlight) else {
+            throw AtelierError.invalidConfiguration("T 区高光调节程度必须在 0...1 之间。")
+        }
+        guard cZoneHighlight.isFinite, (0...1).contains(cZoneHighlight) else {
+            throw AtelierError.invalidConfiguration("C 区高光调节程度必须在 0...1 之间。")
+        }
+        guard cheekContourShadow.isFinite, (0...1).contains(cheekContourShadow) else {
+            throw AtelierError.invalidConfiguration("面颊修容阴影调节程度必须在 0...1 之间。")
+        }
+        guard jawlineShadow.isFinite, (0...1).contains(jawlineShadow) else {
+            throw AtelierError.invalidConfiguration("下颌线修容阴影调节程度必须在 0...1 之间。")
+        }
+        guard philtrumHighlight.isFinite, (0...1).contains(philtrumHighlight) else {
+            throw AtelierError.invalidConfiguration("人中高光调节程度必须在 0...1 之间。")
+        }
+        guard contourToneWarmth.isFinite, (-0.5...0.5).contains(contourToneWarmth) else {
+            throw AtelierError.invalidConfiguration("修容光影色温倾向调节程度必须在 -0.5...0.5 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-Z smart facial bone 3D contour shading, facial folding angle & high-fashion studio lighting sculpting pass.
+public struct FacialBoneContourReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var facialFoldingApplied: Double
+    public var tZoneHighlightApplied: Double
+    public var cZoneHighlightApplied: Double
+    public var cheekContourShadowApplied: Double
+    public var jawlineShadowApplied: Double
+    public var philtrumHighlightApplied: Double
+    public var contourToneWarmthApplied: Double
+    public var executionTime: Double?
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                facialFoldingApplied: Double = 0,
+                tZoneHighlightApplied: Double = 0,
+                cZoneHighlightApplied: Double = 0,
+                cheekContourShadowApplied: Double = 0,
+                jawlineShadowApplied: Double = 0,
+                philtrumHighlightApplied: Double = 0,
+                contourToneWarmthApplied: Double = 0,
+                executionTime: Double? = nil,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.facialFoldingApplied = facialFoldingApplied
+        self.tZoneHighlightApplied = tZoneHighlightApplied
+        self.cZoneHighlightApplied = cZoneHighlightApplied
+        self.cheekContourShadowApplied = cheekContourShadowApplied
+        self.jawlineShadowApplied = jawlineShadowApplied
+        self.philtrumHighlightApplied = philtrumHighlightApplied
+        self.contourToneWarmthApplied = contourToneWarmthApplied
+        self.executionTime = executionTime
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -2220,6 +2337,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var facialContourOverride: FacialContourSettings?
     /// Independent eyebrow reshaping, wild brow texture & symmetry calibration override.
     public var eyebrowReshapeOverride: EyebrowReshapeSettings?
+    /// Independent facial bone 3D contour shading, facial folding angle & studio lighting override.
+    public var facialBoneContourOverride: FacialBoneContourSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -2238,7 +2357,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 noseReshapeOverride: NoseReshapeSettings? = nil,
                 jawChinReshapeOverride: JawChinReshapeSettings? = nil,
                 facialContourOverride: FacialContourSettings? = nil,
-                eyebrowReshapeOverride: EyebrowReshapeSettings? = nil) {
+                eyebrowReshapeOverride: EyebrowReshapeSettings? = nil,
+                facialBoneContourOverride: FacialBoneContourSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -2257,6 +2377,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.jawChinReshapeOverride = jawChinReshapeOverride
         self.facialContourOverride = facialContourOverride
         self.eyebrowReshapeOverride = eyebrowReshapeOverride
+        self.facialBoneContourOverride = facialBoneContourOverride
     }
 
     public var isNeutral: Bool {
@@ -2274,7 +2395,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (noseReshapeOverride == nil || noseReshapeOverride!.isNeutral) &&
             (jawChinReshapeOverride == nil || jawChinReshapeOverride!.isNeutral) &&
             (facialContourOverride == nil || facialContourOverride!.isNeutral) &&
-            (eyebrowReshapeOverride == nil || eyebrowReshapeOverride!.isNeutral)
+            (eyebrowReshapeOverride == nil || eyebrowReshapeOverride!.isNeutral) &&
+            (facialBoneContourOverride == nil || facialBoneContourOverride!.isNeutral)
         )
     }
 
@@ -2717,8 +2839,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...32).contains(version) else {
+        guard (1...33).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let facialBoneContourGroups = [adjustments.facialBoneContour,
+                                       automatic?.baseline.facialBoneContour,
+                                       automatic?.referenceSettings.facialBoneContour]
+        var hasFacialBoneContourOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.facialBoneContourOverride, !o.isNeutral { hasFacialBoneContourOverride = true; break }
+            }
+            if !hasFacialBoneContourOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.facialBoneContourOverride, !o.isNeutral { hasFacialBoneContourOverride = true; break }
+                }
+            }
+        }
+        guard version >= 33 || (facialBoneContourGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasFacialBoneContourOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能全脸骨相立体光影重塑、面部折叠度与 T区/C区/下巴高光阴影精雕需要配方版本 33，不能静默降级。")
         }
         let eyebrowReshapeGroups = [adjustments.eyebrowReshape,
                                     automatic?.baseline.eyebrowReshape,
@@ -3300,6 +3439,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var facialContour: FacialContourReport?
     /// Per-photo P2-Y eyebrow reshaping, wild brow texture & symmetry calibration status. `nil` when absent or disabled.
     public var eyebrowReshape: EyebrowReshapeReport?
+    /// Per-photo P2-Z facial bone 3D contour shading, facial folding angle & studio lighting status. `nil` when absent or disabled.
+    public var facialBoneContour: FacialBoneContourReport?
     public init() {}
 }
 

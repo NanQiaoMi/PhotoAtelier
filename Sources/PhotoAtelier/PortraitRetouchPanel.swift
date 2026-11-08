@@ -133,6 +133,8 @@ struct PortraitRetouchPanel: View {
                 facialContourSection
                 separator
                 eyebrowReshapeSection
+                separator
+                facialBoneContourSection
             }
 
             Group {
@@ -1575,6 +1577,77 @@ struct PortraitRetouchPanel: View {
                 get: { model.eyebrowReshapeSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateEyebrowReshape { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart facial bone 3D contour shading, facial folding angle & studio lighting (P2-Z)
+
+    private var facialBoneContourSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("全脸骨相光影修容", systemImage: "sparkles.rectangle.stack")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.facialBoneContourIsActive {
+                    Button("重置") {
+                        model.resetFacialBoneContour()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.accent)
+                }
+            }
+
+            Text("面部折叠度、T区/C区立体高光、面颊与下颌修容阴影、人中唇峰高光与修容色温。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用全脸骨相光影修容", isOn: Binding(
+                get: { model.facialBoneContourSettings.enabled },
+                set: { model.setFacialBoneContourEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.facialBoneContourSettings.enabled {
+                VStack(spacing: 8) {
+                    facialBoneContourSlider("面部折叠度", \.facialFolding, range: 0...1,
+                                            help: "增强面部立体折叠度：侧脸光影柔和衰减，正脸中轴挺拔，使扁平大脸呈现出小巧紧凑的高折叠度骨相。")
+                    facialBoneContourSlider("T 区立体高光", \.tZoneHighlight, range: 0...1,
+                                            help: "额头中下部 + 印堂 + 鼻梁中轴线的物理级珍珠微光，立体拔高面部中段。")
+                    facialBoneContourSlider("双侧 C 区高光", \.cZoneHighlight, range: 0...1,
+                                            help: "外眼眶经太阳穴向颧骨上方弯曲的高光弧带，打造明星红毯级的饱满通透水光感。")
+                    facialBoneContourSlider("面颊侧影修容", \.cheekContourShadow, range: 0...1,
+                                            help: "颧下向口角延伸的自然渐变微阴影，收敛宽脸、雕琢超模级骨相结构。")
+                    facialBoneContourSlider("下颌线下阴影", \.jawlineShadow, range: 0...1,
+                                            help: "沿下颌骨底缘向颈部过渡的立体微阴影，消除光线平淡导致的面颈粘连，强化下颌线切割感。")
+                    facialBoneContourSlider("人中唇峰高光", \.philtrumHighlight, range: 0...1,
+                                            help: "双侧人中嵴与丘比特唇弓的点缀高光，增强面部下庭精致生动感与幼态立体感。")
+                    facialBoneContourSlider("修容光影色温", \.contourToneWarmth, range: -0.5...0.5,
+                                            help: "修容阴影与高光的色温倾向：正值偏暖金蜜桃更适合暖调肤色，负值偏中性冷茶调防止修容发脏。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func facialBoneContourSlider(_ title: String,
+                                         _ keyPath: WritableKeyPath<FacialBoneContourSettings, Double>,
+                                         range: ClosedRange<Double> = 0...1,
+                                         help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.facialBoneContourSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateFacialBoneContour { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range
