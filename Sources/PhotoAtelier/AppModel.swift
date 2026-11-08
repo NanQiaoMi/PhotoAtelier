@@ -3098,6 +3098,36 @@ final class AppModel: ObservableObject {
         status = "已重置大光圈景深虚化与光斑雕刻设置。"
     }
 
+    // MARK: - Smart hair color harmonization, gray hair removal & recoloring (P2-R)
+
+    var hairColorSettings: HairColorSettings {
+        adjustments.hairColor ?? HairColorSettings()
+    }
+
+    var hairColorIsActive: Bool {
+        adjustments.hairColor.map { !$0.isNeutral } ?? false
+    }
+
+    func updateHairColor(_ mutate: (inout HairColorSettings) -> Void) {
+        var settings = adjustments.hairColor ?? HairColorSettings()
+        mutate(&settings)
+        adjustments.hairColor = settings
+    }
+
+    func setHairColorEnabled(_ enabled: Bool) {
+        updateHairColor { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "发色统一与白发修整已启用：智能白发消除、斑驳发色统一与7款沙龙发色调色。"
+            : "发色统一与白发修整已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetHairColor() {
+        adjustments.hairColor = nil
+        status = "已重置发色统一与白发修整设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

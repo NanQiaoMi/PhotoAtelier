@@ -324,6 +324,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v24.
     /// Absent or disabled bokeh blur & depth-of-field synthesis keeps the pre-v24 path.
     public var bokehBlur: BokehBlurSettings? = nil
+    /// Optional for exact compatibility with recipes written before v25.
+    /// Absent or disabled hair color harmonization & gray hair removal keeps the pre-v25 path.
+    public var hairColor: HairColorSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1156,6 +1159,134 @@ public struct BokehBlurReport: Codable, Equatable {
     }
 }
 
+/// Classic salon hair color tones for P2-R hair recoloring.
+public enum HairTone: String, Codable, CaseIterable, Identifiable, Sendable {
+    case original        // 保持原色
+    case naturalBlack    // 自然黑茶
+    case chestnutBrown   // 优雅栗棕
+    case mochaDark       // 深摩卡棕
+    case burgundyRed     // 醇厚红酒
+    case coolLinen       // 冷灰亚麻
+    case honeyGold       // 暖蜜金棕
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .original: return "保持原色"
+        case .naturalBlack: return "自然黑茶"
+        case .chestnutBrown: return "优雅栗棕"
+        case .mochaDark: return "深摩卡棕"
+        case .burgundyRed: return "醇厚红酒"
+        case .coolLinen: return "冷灰亚麻"
+        case .honeyGold: return "暖蜜金棕"
+        }
+    }
+
+    public var toneIndex: Int {
+        switch self {
+        case .original: return 0
+        case .naturalBlack: return 1
+        case .chestnutBrown: return 2
+        case .mochaDark: return 3
+        case .burgundyRed: return 4
+        case .coolLinen: return 5
+        case .honeyGold: return 6
+        }
+    }
+
+    public var targetRGB: (r: Double, g: Double, b: Double) {
+        switch self {
+        case .original: return (0.12, 0.10, 0.08)
+        case .naturalBlack: return (0.08, 0.08, 0.09)
+        case .chestnutBrown: return (0.38, 0.22, 0.12)
+        case .mochaDark: return (0.24, 0.15, 0.10)
+        case .burgundyRed: return (0.42, 0.12, 0.16)
+        case .coolLinen: return (0.30, 0.28, 0.25)
+        case .honeyGold: return (0.48, 0.35, 0.18)
+        }
+    }
+}
+
+/// Settings for P2-R smart hair color harmonization, gray hair removal & recoloring.
+public struct HairColorSettings: Codable, Equatable, Sendable {
+    /// Master toggle for hair color adjustments.
+    public var enabled: Bool = false
+    /// Gray / silver hair removal strength (0...1, default 0).
+    public var grayHairRemoval: Double = 0
+    /// Hair color harmonization strength (0...1, default 0).
+    public var hairHarmonization: Double = 0
+    /// Target salon hair color tone.
+    public var hairTone: HairTone = .original
+    /// Target salon hair tone tint strength (0...1, default 0).
+    public var hairToneStrength: Double = 0
+    /// Hair luminance adjustment (-0.5...0.5, default 0).
+    public var hairLuminanceAdjust: Double = 0
+
+    public init(enabled: Bool = false,
+                grayHairRemoval: Double = 0,
+                hairHarmonization: Double = 0,
+                hairTone: HairTone = .original,
+                hairToneStrength: Double = 0,
+                hairLuminanceAdjust: Double = 0) {
+        self.enabled = enabled
+        self.grayHairRemoval = max(0.0, min(1.0, grayHairRemoval))
+        self.hairHarmonization = max(0.0, min(1.0, hairHarmonization))
+        self.hairTone = hairTone
+        self.hairToneStrength = max(0.0, min(1.0, hairToneStrength))
+        self.hairLuminanceAdjust = max(-0.5, min(0.5, hairLuminanceAdjust))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            grayHairRemoval <= 0.0001 &&
+            hairHarmonization <= 0.0001 &&
+            (hairTone == .original || hairToneStrength <= 0.0001) &&
+            abs(hairLuminanceAdjust) <= 0.0001
+        )
+    }
+
+    public func validated() throws -> HairColorSettings {
+        guard grayHairRemoval.isFinite, (0...1).contains(grayHairRemoval) else {
+            throw AtelierError.invalidConfiguration("去白发强度必须在 0...1 之间。")
+        }
+        guard hairHarmonization.isFinite, (0...1).contains(hairHarmonization) else {
+            throw AtelierError.invalidConfiguration("发色统一强度必须在 0...1 之间。")
+        }
+        guard hairToneStrength.isFinite, (0...1).contains(hairToneStrength) else {
+            throw AtelierError.invalidConfiguration("发色调色强度必须在 0...1 之间。")
+        }
+        guard hairLuminanceAdjust.isFinite, (-0.5...0.5).contains(hairLuminanceAdjust) else {
+            throw AtelierError.invalidConfiguration("发色明度调整必须在 -0.5...0.5 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-R hair color harmonization & gray hair removal pass.
+public struct HairColorReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var grayHairApplied: Bool
+    public var harmonizationApplied: Bool
+    public var toneApplied: Bool
+    public var note: String?
+
+    public init(applied: Bool,
+                faceCount: Int = 0,
+                grayHairApplied: Bool = false,
+                harmonizationApplied: Bool = false,
+                toneApplied: Bool = false,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.grayHairApplied = grayHairApplied
+        self.harmonizationApplied = harmonizationApplied
+        self.toneApplied = toneApplied
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1392,6 +1523,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var bodyReshapeOverride: BodyReshapeSettings?
     /// Independent double eyelid & aegyo sal refinement override.
     public var eyelidAegyoSalOverride: EyelidAegyoSalSettings?
+    /// Independent hair color harmonization & gray hair removal override.
+    public var hairColorOverride: HairColorSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1402,7 +1535,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 facialZonalOverride: FacialZonalRefinementSettings? = nil,
                 eyeTeethOverride: EyeTeethRefinementSettings? = nil,
                 bodyReshapeOverride: BodyReshapeSettings? = nil,
-                eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil) {
+                eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil,
+                hairColorOverride: HairColorSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1413,6 +1547,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.eyeTeethOverride = eyeTeethOverride
         self.bodyReshapeOverride = bodyReshapeOverride
         self.eyelidAegyoSalOverride = eyelidAegyoSalOverride
+        self.hairColorOverride = hairColorOverride
     }
 
     public var isNeutral: Bool {
@@ -1422,7 +1557,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (facialZonalOverride == nil || facialZonalOverride!.isNeutral) &&
             (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral) &&
             (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral) &&
-            (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral)
+            (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral) &&
+            (hairColorOverride == nil || hairColorOverride!.isNeutral)
         )
     }
 
@@ -1865,8 +2001,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...24).contains(version) else {
+        guard (1...25).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let hairColorGroups = [adjustments.hairColor,
+                               automatic?.baseline.hairColor,
+                               automatic?.referenceSettings.hairColor]
+        var hasHairColorOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.hairColorOverride, !o.isNeutral { hasHairColorOverride = true; break }
+            }
+            if !hasHairColorOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.hairColorOverride, !o.isNeutral { hasHairColorOverride = true; break }
+                }
+            }
+        }
+        guard version >= 25 || (hairColorGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasHairColorOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的发色统一与白发修整需要配方版本 25，不能静默降级。")
         }
         let bokehGroups = [adjustments.bokehBlur,
                            automatic?.baseline.bokehBlur,
@@ -2296,6 +2449,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var eyelidAegyoSal: EyelidAegyoSalReport?
     /// Per-photo P2-Q bokeh blur and depth-of-field synthesis status. `nil` when absent or disabled.
     public var bokehBlur: BokehBlurReport?
+    /// Per-photo P2-R hair color harmonization & gray hair removal status. `nil` when absent or disabled.
+    public var hairColor: HairColorReport?
     public init() {}
 }
 

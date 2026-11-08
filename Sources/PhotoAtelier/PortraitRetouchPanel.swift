@@ -108,6 +108,8 @@ struct PortraitRetouchPanel: View {
                 eyeTeethSection
                 separator
                 eyelidAegyoSalSection
+                separator
+                hairColorSection
             }
 
             Group {
@@ -953,6 +955,95 @@ struct PortraitRetouchPanel: View {
                 get: { model.eyelidAegyoSalSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateEyelidAegyoSal { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart hair color harmonization & gray hair removal (P2-R)
+
+    private var hairColorSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("发色统一与白发消除", systemImage: "sparkles.square.filled.on.square")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.hairColorIsActive {
+                    Button("重置") {
+                        model.resetHairColor()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("秀发美学色彩精修：精准识别并消除散落白发与银丝缕，统一阳光暴晒或染发退色产生的斑驳色块，并提供7款自然沙龙发色微调。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用发色统一与白发修整", isOn: Binding(
+                get: { model.hairColorSettings.enabled },
+                set: { model.setHairColorEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.hairColorSettings.enabled {
+                VStack(spacing: 8) {
+                    hairColorSlider("白发消除强度", \.grayHairRemoval, range: 0...1,
+                                    help: "智能压暗散落银白发丝，取样周边基底发色柔和过渡，避免黑头盔硬边。")
+                    hairColorSlider("发色统一收敛", \.hairHarmonization, range: 0...1,
+                                    help: "抑制发梢枯黄、退色与斑驳色差，将毛发色彩收敛至统一基准调。")
+
+                    HStack {
+                        Text("沙龙发色色调")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.8))
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { model.hairColorSettings.hairTone },
+                            set: { tone in
+                                model.updateHairColor { $0.hairTone = tone }
+                            }
+                        )) {
+                            ForEach(HairTone.allCases) { tone in
+                                Text(tone.displayName).tag(tone)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 110)
+                    }
+
+                    if model.hairColorSettings.hairTone != .original {
+                        hairColorSlider("发色调色强度", \.hairToneStrength, range: 0...1,
+                                        help: "控制目标沙龙发色浓郁度，保留原生发丝明暗光影层次与高光。")
+                    }
+
+                    hairColorSlider("发色明度微调", \.hairLuminanceAdjust, range: -0.5...0.5,
+                                    help: "提升或压暗头发整体明度（-50% ~ +50%）。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func hairColorSlider(_ title: String,
+                                 _ keyPath: WritableKeyPath<HairColorSettings, Double>,
+                                 range: ClosedRange<Double> = 0...1,
+                                 help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.hairColorSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateHairColor { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range
