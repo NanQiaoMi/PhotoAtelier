@@ -106,6 +106,8 @@ struct PortraitRetouchPanel: View {
                 facialZonalSection
                 separator
                 eyeTeethSection
+                separator
+                eyelidAegyoSalSection
             }
 
             Group {
@@ -839,6 +841,116 @@ struct PortraitRetouchPanel: View {
                 get: { model.currentEyeTeethSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateEyeTeeth { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart double eyelid sculpting, tape concealing & aegyo sal sculpting (P2-P)
+
+    private var eyelidAegyoSalSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("双眼皮雕刻与卧蚕立体塑形", systemImage: "eye.trianglebadge.exclamationmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.eyelidAegyoSalIsActive {
+                    Button("重置") {
+                        model.resetEyelidAegyoSal()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("眼部精细轮廓雕刻：支持开扇型/平行型/新月型/欧美型4款双眼皮折痕生成，平抚双眼皮贴硬阶梯边缘与消除强反光，卧蚕珠光饱满提亮与立体下缘修容微雕。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用双眼皮与卧蚕精雕", isOn: Binding(
+                get: { model.eyelidAegyoSalSettings.enabled },
+                set: { model.setEyelidAegyoSalEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.eyelidAegyoSalSettings.enabled {
+                VStack(spacing: 8) {
+                    // Eyelid style picker
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("双眼皮形态")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.8))
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { model.eyelidAegyoSalSettings.eyelidStyle },
+                                set: { style in
+                                    model.updateEyelidAegyoSal { $0.eyelidStyle = style }
+                                }
+                            )) {
+                                ForEach(EyelidStyle.allCases) { style in
+                                    Text(style.title).tag(style)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 110)
+                        }
+
+                        if model.eyelidAegyoSalSettings.eyelidStyle != .off {
+                            eyelidSlider("折痕深邃度", \.eyelidStrength,
+                                         range: 0...1,
+                                         help: "控制双眼皮折痕阴影与上方微高光的对比度与清晰度。")
+                            eyelidSlider("折痕相对高度", \.eyelidHeight,
+                                         range: 0.5...2.0,
+                                         help: "调节双眼皮折痕与上睑缘之间的相对垂直间距（0.5x ~ 2.0x）。")
+                            eyelidSlider("折痕延展宽度", \.eyelidWidth,
+                                         range: 0...1,
+                                         help: "调节双眼皮折痕向眼尾横向拉长延展的宽度范围。")
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    Divider().background(Color.white.opacity(0.1)).padding(.vertical, 2)
+
+                    eyelidSlider("去双眼皮贴反光", \.tapeConceal,
+                                 range: 0...1,
+                                 help: "智能检测上眼睑双眼皮贴边缘反光硬边并平滑柔焦，与自然肤色无缝融合。")
+
+                    Divider().background(Color.white.opacity(0.1)).padding(.vertical, 2)
+
+                    eyelidSlider("卧蚕饱满提亮", \.aegyoSalLuminance,
+                                 range: 0...1,
+                                 help: "在下睫毛下方眼轮匝肌隆起处注入自然珠光高光，打造饱满减龄效果。")
+                    eyelidSlider("卧蚕下缘修容", \.aegyoSalShadow,
+                                 range: 0...1,
+                                 help: "在卧蚕凸起下缘轻微加深微雕立体阴影弧线，清晰界定卧蚕边界。")
+                    eyelidSlider("卧蚕饱满宽度", \.aegyoSalWidth,
+                                 range: 0.5...1.5,
+                                 help: "控制下眼睑卧蚕凸起区域的垂直宽度与丰满范围（0.5x ~ 1.5x）。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func eyelidSlider(_ title: String,
+                              _ keyPath: WritableKeyPath<EyelidAegyoSalSettings, Double>,
+                              range: ClosedRange<Double> = 0...1,
+                              help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.eyelidAegyoSalSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateEyelidAegyoSal { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

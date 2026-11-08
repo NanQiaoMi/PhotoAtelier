@@ -318,6 +318,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v22.
     /// Absent or disabled body reshaping & posture refinement keeps the pre-v22 path.
     public var bodyReshape: BodyReshapeSettings? = nil
+    /// Optional for exact compatibility with recipes written before v23.
+    /// Absent or disabled double eyelid & aegyo sal refinement keeps the pre-v23 path.
+    public var eyelidAegyoSal: EyelidAegyoSalSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -925,6 +928,133 @@ public struct BodyReshapeReport: Codable, Equatable {
     }
 }
 
+/// The four built-in double eyelid crease style patterns.
+public enum EyelidStyle: String, Codable, CaseIterable, Identifiable {
+    case off
+    /// Classic East Asian in-fold / fan-shaped: narrow at inner canthus, widening toward outer canthus.
+    case fan
+    /// Elegant parallel crease: uniform height from inner to outer canthus.
+    case parallel
+    /// Crescent crease: highest in the center above the pupil, narrower at corners.
+    case crescent
+    /// European deep / wide parallel fold: prominent high elevation crease.
+    case wide
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .off: return "关闭"
+        case .fan: return "开扇型"
+        case .parallel: return "平行型"
+        case .crescent: return "新月型"
+        case .wide: return "欧美型"
+        }
+    }
+}
+
+/// Settings for P2-P smart double eyelid sculpting, eyelid tape concealing & aegyo sal / lower lid micro-contouring.
+public struct EyelidAegyoSalSettings: Codable, Equatable {
+    /// Master toggle for double eyelid and aegyo sal refinement.
+    public var enabled: Bool = false
+    /// Double eyelid fold style template.
+    public var eyelidStyle: EyelidStyle = .off
+    /// Double eyelid crease shadow and fold definition strength (0...1).
+    public var eyelidStrength: Double = 0
+    /// Double eyelid crease relative elevation / height ratio (0.5...2.0, default 1.0).
+    public var eyelidHeight: Double = 1.0
+    /// Double eyelid fold lateral width extension (0...1, default 0.5).
+    public var eyelidWidth: Double = 0.5
+
+    /// Eyelid tape glare suppression, step-edge smoothing & tone blending (0...1).
+    public var tapeConceal: Double = 0
+
+    /// Aegyo sal (tear-trough orbicularis roll) highlight luminance (0...1).
+    public var aegyoSalLuminance: Double = 0
+    /// Aegyo sal lower crease shadow depth (0...1).
+    public var aegyoSalShadow: Double = 0
+    /// Aegyo sal roll width scale (0.5...1.5, default 1.0).
+    public var aegyoSalWidth: Double = 1.0
+
+    public init(enabled: Bool = false,
+                eyelidStyle: EyelidStyle = .off,
+                eyelidStrength: Double = 0,
+                eyelidHeight: Double = 1.0,
+                eyelidWidth: Double = 0.5,
+                tapeConceal: Double = 0,
+                aegyoSalLuminance: Double = 0,
+                aegyoSalShadow: Double = 0,
+                aegyoSalWidth: Double = 1.0) {
+        self.enabled = enabled
+        self.eyelidStyle = eyelidStyle
+        self.eyelidStrength = eyelidStrength
+        self.eyelidHeight = eyelidHeight
+        self.eyelidWidth = eyelidWidth
+        self.tapeConceal = tapeConceal
+        self.aegyoSalLuminance = aegyoSalLuminance
+        self.aegyoSalShadow = aegyoSalShadow
+        self.aegyoSalWidth = aegyoSalWidth
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            (eyelidStyle == .off || eyelidStrength == 0) &&
+            tapeConceal == 0 &&
+            aegyoSalLuminance == 0 &&
+            aegyoSalShadow == 0
+        )
+    }
+
+    public func validated() throws -> EyelidAegyoSalSettings {
+        guard eyelidStrength.isFinite, (0...1).contains(eyelidStrength) else {
+            throw AtelierError.invalidConfiguration("双眼皮强度必须在 0...1 之间。")
+        }
+        guard eyelidHeight.isFinite, (0.5...2.0).contains(eyelidHeight) else {
+            throw AtelierError.invalidConfiguration("双眼皮高度必须在 0.5...2.0 之间。")
+        }
+        guard eyelidWidth.isFinite, (0...1).contains(eyelidWidth) else {
+            throw AtelierError.invalidConfiguration("双眼皮宽度必须在 0...1 之间。")
+        }
+        guard tapeConceal.isFinite, (0...1).contains(tapeConceal) else {
+            throw AtelierError.invalidConfiguration("去双眼皮贴强度必须在 0...1 之间。")
+        }
+        guard aegyoSalLuminance.isFinite, (0...1).contains(aegyoSalLuminance) else {
+            throw AtelierError.invalidConfiguration("卧蚕高光强度必须在 0...1 之间。")
+        }
+        guard aegyoSalShadow.isFinite, (0...1).contains(aegyoSalShadow) else {
+            throw AtelierError.invalidConfiguration("卧蚕阴影强度必须在 0...1 之间。")
+        }
+        guard aegyoSalWidth.isFinite, (0.5...1.5).contains(aegyoSalWidth) else {
+            throw AtelierError.invalidConfiguration("卧蚕宽度必须在 0.5...1.5 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-P double eyelid sculpting, tape concealing and aegyo sal refinement pass.
+public struct EyelidAegyoSalReport: Codable, Equatable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var eyelidApplied: Bool
+    public var tapeConcealApplied: Bool
+    public var aegyoSalApplied: Bool
+    public var note: String?
+
+    public init(applied: Bool,
+                faceCount: Int = 0,
+                eyelidApplied: Bool = false,
+                tapeConcealApplied: Bool = false,
+                aegyoSalApplied: Bool = false,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.eyelidApplied = eyelidApplied
+        self.tapeConcealApplied = tapeConcealApplied
+        self.aegyoSalApplied = aegyoSalApplied
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1159,6 +1289,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var eyeTeethOverride: EyeTeethRefinementSettings?
     /// Independent body reshaping & posture refinement override.
     public var bodyReshapeOverride: BodyReshapeSettings?
+    /// Independent double eyelid & aegyo sal refinement override.
+    public var eyelidAegyoSalOverride: EyelidAegyoSalSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1168,7 +1300,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 makeupOverride: MakeupSettings? = nil,
                 facialZonalOverride: FacialZonalRefinementSettings? = nil,
                 eyeTeethOverride: EyeTeethRefinementSettings? = nil,
-                bodyReshapeOverride: BodyReshapeSettings? = nil) {
+                bodyReshapeOverride: BodyReshapeSettings? = nil,
+                eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1178,6 +1311,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.facialZonalOverride = facialZonalOverride
         self.eyeTeethOverride = eyeTeethOverride
         self.bodyReshapeOverride = bodyReshapeOverride
+        self.eyelidAegyoSalOverride = eyelidAegyoSalOverride
     }
 
     public var isNeutral: Bool {
@@ -1186,7 +1320,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (makeupOverride == nil || makeupOverride!.isNeutral) &&
             (facialZonalOverride == nil || facialZonalOverride!.isNeutral) &&
             (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral) &&
-            (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral)
+            (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral) &&
+            (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral)
         )
     }
 
@@ -1629,8 +1764,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...22).contains(version) else {
+        guard (1...23).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let eyelidGroups = [adjustments.eyelidAegyoSal,
+                            automatic?.baseline.eyelidAegyoSal,
+                            automatic?.referenceSettings.eyelidAegyoSal]
+        guard version >= 23 || eyelidGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的双眼皮雕刻、双眼皮贴修饰与卧蚕塑形需要配方版本 23，不能静默降级。")
         }
         let bodyReshapeGroups = [adjustments.bodyReshape,
                                  automatic?.baseline.bodyReshape,
@@ -2044,6 +2185,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var eyeTeeth: EyeTeethRefinementReport?
     /// Per-photo P2-O body reshaping & skeleton posture refinement status. `nil` when absent or disabled.
     public var bodyReshape: BodyReshapeReport?
+    /// Per-photo P2-P double eyelid sculpting, tape concealing and aegyo sal refinement status. `nil` when absent or disabled.
+    public var eyelidAegyoSal: EyelidAegyoSalReport?
     public init() {}
 }
 

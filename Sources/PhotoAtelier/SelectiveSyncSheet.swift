@@ -85,6 +85,7 @@ struct SelectiveSyncSheet: View {
                             Toggle("面部骨相液化 (7种脸型预设/高颅顶/下巴/五官微整)", isOn: $model.syncOptions.facialReshape)
                             Toggle("面部五区专项祛皱与去油光 (黑眼圈/眼袋/法令纹/抬头纹/哑光)", isOn: $model.syncOptions.facialZonal)
                             Toggle("明眸眼神光与牙齿美学精修 (眼镜去反光/眼白去红血丝/6款眼神光/牙齿污渍与珐琅质光泽)", isOn: $model.syncOptions.eyeTeeth)
+                            Toggle("双眼皮雕刻与卧蚕立体塑形 (4款双眼皮/去双眼皮贴反光/卧蚕高光与阴影)", isOn: $model.syncOptions.eyelidAegyoSal)
                             Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)
                             Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
                         }
