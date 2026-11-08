@@ -321,6 +321,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v23.
     /// Absent or disabled double eyelid & aegyo sal refinement keeps the pre-v23 path.
     public var eyelidAegyoSal: EyelidAegyoSalSettings? = nil
+    /// Optional for exact compatibility with recipes written before v24.
+    /// Absent or disabled bokeh blur & depth-of-field synthesis keeps the pre-v24 path.
+    public var bokehBlur: BokehBlurSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1055,6 +1058,104 @@ public struct EyelidAegyoSalReport: Codable, Equatable {
     }
 }
 
+/// Optical diaphragm aperture shapes for bokeh highlights.
+public enum BokehShape: String, Codable, CaseIterable, Identifiable {
+    /// Modern wide-aperture round disc with spherical aberration edge glow.
+    case circular
+    /// 9-blade mechanical iris aperture with subtle polygonal facets.
+    case polygonal
+    /// Vintage Petzval / Helios style peripheral vortex swirl.
+    case swirly
+    /// Apodization / STF smooth transition creamy bokeh.
+    case creamy
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .circular: return "圆形光斑 (现代大光圈)"
+        case .polygonal: return "多边形光斑 (复古机械)"
+        case .swirly: return "旋焦光斑 (Petzval漩涡)"
+        case .creamy: return "柔焦奶化 (STF超平滑)"
+        }
+    }
+}
+
+/// Settings for P2-Q smart bokeh and optical depth-of-field synthesis.
+public struct BokehBlurSettings: Codable, Equatable {
+    /// Master toggle for bokeh depth of field.
+    public var enabled: Bool = false
+    /// Lens aperture / defocus blur radius (0...1, maps to 0~50px circle of confusion).
+    public var apertureFocalSize: Double = 0
+    /// Optical diaphragm aperture bokeh shape.
+    public var bokehShape: BokehShape = .circular
+    /// Focal plane position offset (-0.5...0.5, default 0: locked on subject).
+    public var focalPlaneOffset: Double = 0
+    /// Depth falloff gradient rate (0.2...2.0, default 1.0).
+    public var depthFalloffRate: Double = 1.0
+    /// Specular highlights brightness and optical burst boost (0...1, default 0.5).
+    public var specularHighlightBoost: Double = 0.5
+    /// Foreground subject edge bleed and fringing protection factor (0...1, default 0.85).
+    public var edgeBleedProtection: Double = 0.85
+
+    public init(enabled: Bool = false,
+                apertureFocalSize: Double = 0,
+                bokehShape: BokehShape = .circular,
+                focalPlaneOffset: Double = 0,
+                depthFalloffRate: Double = 1.0,
+                specularHighlightBoost: Double = 0.5,
+                edgeBleedProtection: Double = 0.85) {
+        self.enabled = enabled
+        self.apertureFocalSize = apertureFocalSize
+        self.bokehShape = bokehShape
+        self.focalPlaneOffset = focalPlaneOffset
+        self.depthFalloffRate = depthFalloffRate
+        self.specularHighlightBoost = specularHighlightBoost
+        self.edgeBleedProtection = edgeBleedProtection
+    }
+
+    public var isNeutral: Bool {
+        !enabled || apertureFocalSize == 0
+    }
+
+    public func validated() throws -> BokehBlurSettings {
+        guard apertureFocalSize.isFinite, (0...1).contains(apertureFocalSize) else {
+            throw AtelierError.invalidConfiguration("光圈虚化大小必须在 0...1 之间。")
+        }
+        guard focalPlaneOffset.isFinite, (-0.5...0.5).contains(focalPlaneOffset) else {
+            throw AtelierError.invalidConfiguration("焦平面偏移必须在 -0.5...0.5 之间。")
+        }
+        guard depthFalloffRate.isFinite, (0.2...2.0).contains(depthFalloffRate) else {
+            throw AtelierError.invalidConfiguration("景深过渡速率必须在 0.2...2.0 之间。")
+        }
+        guard specularHighlightBoost.isFinite, (0...1).contains(specularHighlightBoost) else {
+            throw AtelierError.invalidConfiguration("高光光斑爆发度必须在 0...1 之间。")
+        }
+        guard edgeBleedProtection.isFinite, (0...1).contains(edgeBleedProtection) else {
+            throw AtelierError.invalidConfiguration("主体边缘防溢色保护必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-Q bokeh blur and depth-of-field synthesis pass.
+public struct BokehBlurReport: Codable, Equatable {
+    public var applied: Bool
+    public var bokehShape: BokehShape
+    public var maxBlurRadius: Double
+    public var note: String?
+
+    public init(applied: Bool,
+                bokehShape: BokehShape = .circular,
+                maxBlurRadius: Double = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.bokehShape = bokehShape
+        self.maxBlurRadius = maxBlurRadius
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1764,8 +1865,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...23).contains(version) else {
+        guard (1...24).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let bokehGroups = [adjustments.bokehBlur,
+                           automatic?.baseline.bokehBlur,
+                           automatic?.referenceSettings.bokehBlur]
+        guard version >= 24 || bokehGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的大光圈景深虚化与光斑雕刻需要配方版本 24，不能静默降级。")
         }
         let eyelidGroups = [adjustments.eyelidAegyoSal,
                             automatic?.baseline.eyelidAegyoSal,
@@ -2187,6 +2294,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var bodyReshape: BodyReshapeReport?
     /// Per-photo P2-P double eyelid sculpting, tape concealing and aegyo sal refinement status. `nil` when absent or disabled.
     public var eyelidAegyoSal: EyelidAegyoSalReport?
+    /// Per-photo P2-Q bokeh blur and depth-of-field synthesis status. `nil` when absent or disabled.
+    public var bokehBlur: BokehBlurReport?
     public init() {}
 }
 

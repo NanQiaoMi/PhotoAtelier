@@ -65,6 +65,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart double eyelid sculpting, eyelid tape concealing & aegyo sal sculpting.
     public var eyelidAegyoSal: Bool = true
 
+    /// Smart bokeh and optical depth-of-field synthesis.
+    public var bokehBlur: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -107,6 +110,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         eyeTeeth: Bool = true,
         bodyReshape: Bool = true,
         eyelidAegyoSal: Bool = true,
+        bokehBlur: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -135,6 +139,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.eyeTeeth = eyeTeeth
         self.bodyReshape = bodyReshape
         self.eyelidAegyoSal = eyelidAegyoSal
+        self.bokehBlur = bokehBlur
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -167,6 +172,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyeTeeth: true,
             bodyReshape: true,
             eyelidAegyoSal: true,
+            bokehBlur: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -200,6 +206,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyeTeeth: true,
             bodyReshape: true,
             eyelidAegyoSal: true,
+            bokehBlur: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -231,6 +238,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             skyEnhancement: true,
             bodyReshape: false,
             eyelidAegyoSal: false,
+            bokehBlur: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -262,6 +270,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             skyEnhancement: false,
             bodyReshape: false,
             eyelidAegyoSal: false,
+            bokehBlur: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -293,6 +302,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             skyEnhancement: false,
             bodyReshape: false,
             eyelidAegyoSal: false,
+            bokehBlur: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -449,6 +459,11 @@ public enum AdjustmentSyncEngine {
         // 15e. Smart double eyelid sculpting, eyelid tape concealing & aegyo sal sculpting
         if options.eyelidAegyoSal {
             result.eyelidAegyoSal = source.eyelidAegyoSal
+        }
+
+        // 15f. Smart bokeh & optical depth-of-field synthesis
+        if options.bokehBlur {
+            result.bokehBlur = source.bokehBlur
         }
 
         // 16. Lens effects & corrections

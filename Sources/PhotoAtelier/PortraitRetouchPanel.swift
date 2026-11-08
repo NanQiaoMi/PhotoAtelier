@@ -124,6 +124,8 @@ struct PortraitRetouchPanel: View {
                 petEnhancementSection
                 separator
                 skyEnhancementSection
+                separator
+                bokehBlurSection
             }
 
             Group {
@@ -1172,6 +1174,91 @@ struct PortraitRetouchPanel: View {
                 }
             ),
             range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart bokeh and optical depth-of-field synthesis (P2-Q)
+
+    private var bokehBlurSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("大光圈景深虚化与光斑雕刻", systemImage: "camera.aperture")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.bokehBlurIsActive {
+                    Button("重置") {
+                        model.resetBokehBlur()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("商业人像与影棚镜头虚化：基于物理地面渐变与人物深度场，模拟大光圈镜头光学散焦；支持 4 款光学光圈形状（圆形/多边形/旋焦/柔焦奶化），提取背景点光源爆发通透光斑，并严密锁定主体边缘防止虚化溢色。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用大光圈景深虚化与光斑", isOn: Binding(
+                get: { model.bokehBlurSettings.enabled },
+                set: { model.setBokehBlurEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.bokehBlurSettings.enabled {
+                VStack(spacing: 8) {
+                    Picker("光圈光斑形态", selection: Binding(
+                        get: { model.bokehBlurSettings.bokehShape },
+                        set: { val in
+                            model.updateBokehBlur { $0.bokehShape = val }
+                        }
+                    )) {
+                        ForEach(BokehShape.allCases) { shape in
+                            Text(shape.title).tag(shape)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.system(size: 10))
+
+                    bokehSlider("光圈虚化大小", \.apertureFocalSize,
+                                range: 0...1,
+                                help: "控制模拟光圈孔径与背景散焦模糊半径（等效 0~50px 弥散圆）。")
+                    bokehSlider("焦平面偏移", \.focalPlaneOffset,
+                                range: -0.5...0.5,
+                                help: "前后移动清晰对焦平面（负值靠前，正值向深景深延伸）。")
+                    bokehSlider("景深衰减率", \.depthFalloffRate,
+                                range: 0.2...2.0,
+                                help: "调节随距离延伸的虚化衰减速率（模拟不同焦距镜头的景深过渡）。")
+                    bokehSlider("高光光斑爆发", \.specularHighlightBoost,
+                                range: 0...1,
+                                help: "增强背景小光源与树隙透光的点光源亮度，形成晶莹剔透的高光光斑。")
+                    bokehSlider("主体防溢色保护", \.edgeBleedProtection,
+                                range: 0...1,
+                                help: "强化人物主体轮廓保边滤波，彻底杜绝虚化背景反渗入发丝与边缘。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func bokehSlider(_ title: String,
+                             _ keyPath: WritableKeyPath<BokehBlurSettings, Double>,
+                             range: ClosedRange<Double> = 0...1,
+                             help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.bokehBlurSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateBokehBlur { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
         )
         .help(help)
     }
