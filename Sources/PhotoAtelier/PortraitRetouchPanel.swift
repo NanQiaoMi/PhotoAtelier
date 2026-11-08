@@ -126,6 +126,8 @@ struct PortraitRetouchPanel: View {
                 noseReshapeSection
                 separator
                 jawChinReshapeSection
+                separator
+                facialContourSection
             }
 
             Group {
@@ -1430,6 +1432,75 @@ struct PortraitRetouchPanel: View {
                 get: { model.jawChinReshapeSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateJawChinReshape { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart temples, cheekbones & facial contour smoothness (P2-X)
+
+    private var facialContourSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("太阳穴/颧骨与外轮廓微雕", systemImage: "face.dashed")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.facialContourIsActive {
+                    Button("重置") {
+                        model.resetFacialContour()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.accent)
+                }
+            }
+
+            Text("太阳穴充盈、颧骨内推、面颊丰盈、外轮廓波折平滑、苹果肌提拉与3D立体光影。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用面部外轮廓微雕", isOn: Binding(
+                get: { model.facialContourSettings.enabled },
+                set: { model.setFacialContourEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.facialContourSettings.enabled {
+                VStack(spacing: 8) {
+                    facialContourSlider("太阳穴凹陷饱满", \.templePlump, range: 0...1,
+                                        help: "横向向外充盈双侧太阳穴，平整发际线与颧弓衔接，改善菱形脸与凹陷感。")
+                    facialContourSlider("颧骨外扩内推", \.cheekboneNarrow, range: 0...1,
+                                        help: "横向向内微收双侧颧骨与颧弓最宽处，柔化生硬棱角，弱化骨相突兀感。")
+                    facialContourSlider("面颊凹陷丰盈", \.cheekPlump, range: 0...1,
+                                        help: "向外丰盈颧下与颊部凹陷软组织，消除干瘪吸腮感，恢复胶原蛋白年轻态。")
+                    facialContourSlider("外轮廓波折平滑", \.contourSmoothness, range: 0...1,
+                                        help: "沿太阳穴-颧弓-面颊消除阶梯波折，柔化外凸并充盈凹陷，一键打造流畅鹅蛋脸。")
+                    facialContourSlider("苹果肌立体提拉", \.appleCheekLift, range: -0.5...0.5,
+                                        help: "微调苹果肌高光点：正值向内上方提拉打造减龄幼态笑肌，负值舒缓过于隆起的苹果肌。")
+                    facialContourSlider("3D 轮廓立体光影", \.contour3DShading, range: 0...1,
+                                        help: "在双侧苹果肌渲染柔光立体高光，并在颧弓与颞部边缘叠加柔和微修容阴影。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func facialContourSlider(_ title: String,
+                                     _ keyPath: WritableKeyPath<FacialContourSettings, Double>,
+                                     range: ClosedRange<Double> = 0...1,
+                                     help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.facialContourSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateFacialContour { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

@@ -211,9 +211,9 @@ final class BokehBlurTests: XCTestCase {
         recipe.version = 24
         XCTAssertNoThrow(try recipe.validateVersion(), "Version 24 must validate successfully")
 
-        // Version 31 is future unsupported
-        recipe.version = 31
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version 31 should be rejected")
+        // Version 32 is future unsupported
+        recipe.version = 32
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version 32 should be rejected")
 
         // Required version calculation
         let reqV = PhotoEngine.requiredRecipeVersion(adjustments: recipe.adjustments, automatic: nil)
