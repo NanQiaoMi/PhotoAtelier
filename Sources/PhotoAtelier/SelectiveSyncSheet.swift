@@ -88,6 +88,7 @@ struct SelectiveSyncSheet: View {
                             Toggle("双眼皮雕刻与卧蚕立体塑形 (4款双眼皮/去双眼皮贴反光/卧蚕高光与阴影)", isOn: $model.syncOptions.eyelidAegyoSal)
                             Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)
                             Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
+                            Toggle("智能发色统一与白发消除 (去白发银丝/发色斑驳统一/7款沙龙发色)", isOn: $model.syncOptions.hairColor)
                         }
                         .toggleStyle(.checkbox)
                         .font(.system(size: 11))

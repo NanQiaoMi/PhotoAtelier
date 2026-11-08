@@ -352,6 +352,7 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **P2-O：智能全身身形姿态美化与骨骼点塑形** | ✅ 已交付 (`feat/p2o-body-reshaping-posture`) | 基于 macOS 原生 `VNDetectHumanBodyPoseRequest` 14处关键骨骼点、解剖学形变场映射（天鹅颈/直角肩/整体瘦身/细腰/长腿增高/瘦手臂）与背景形变锚定保护；配方版本升级至 22 | 原生 Core Image GPU Mesh 栅格，单帧 < 8ms，659 测试全绿 |
 | **P2-P：智能双眼皮雕刻、双眼皮贴修饰与卧蚕立体塑形** | ✅ 已交付 (`feat/p2p-eyelid-aegyosal-refinement`) | 基于 Vision 眼周解剖学地标与 CIColorKernel 着色器的 4 款双眼皮折痕微雕（开扇/平行/新月/欧美）、去双眼皮贴强反光与阶梯纹、下睑缘轮匝肌珠光高光与立体下缘修容微雕；配方版本升级至 23 | 原生 CIColorKernel，单帧 < 4ms，670 测试全绿 |
 | **P2-Q：智能全景背景光斑虚化与景深重构** | ✅ 已交付 (`feat/p2q-bokeh-depth-synthesis`) | 基于 Apple Vision 人像抠图与地面透视梯度的连续物理景深场重构、4款经典光学光圈光斑（圆形/多边形/旋焦/奶油STF）、背景点光源高光增强与前景边缘防溢色保护；配方版本升级至 24 | 原生 CIBokehBlur + CIColorKernel，单帧 < 6ms，678 测试全绿 |
+| **P2-R：智能发色统一、白发消除与自然换发色** | ✅ 已交付 (`feat/p2r-hair-color-harmonization`) | 智能识别并压暗散落银白发丝保留原生发流纹理、消除日晒退色斑驳色差收敛发色、7款经典沙龙发色调色（黑茶/栗棕/摩卡/红酒/亚麻/金棕）与明度微调；配方版本升级至 25 | 原生 CIColorKernel，单帧 < 5ms，687 测试全绿 |
 | 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
 | RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |

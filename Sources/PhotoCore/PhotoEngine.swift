@@ -312,6 +312,7 @@ public final class PhotoEngine {
         if let bodyReshape = settings.bodyReshape, !bodyReshape.isNeutral { _ = try bodyReshape.validated() }
         if let eyelid = settings.eyelidAegyoSal, !eyelid.isNeutral { _ = try eyelid.validated() }
         if let bokeh = settings.bokehBlur, !bokeh.isNeutral { _ = try bokeh.validated() }
+        if let hairColor = settings.hairColor, !hairColor.isNeutral { _ = try hairColor.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -573,6 +574,17 @@ public final class PhotoEngine {
                         appliedSteps.append("eyelid_\(idx + 1)")
                     }
 
+                    // 3c. Per-person Hair Color Harmonization & Gray Hair Removal
+                    let effectiveHairColor = (profile?.enabled == true ? profile?.hairColorOverride : nil) ?? settings.hairColor
+                    if let hc = effectiveHairColor, !hc.isNeutral, face.hasUsableGeometry {
+                        let res = HairColorEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            perFaceMask: faceMask, settings: hc
+                        )
+                        working = res
+                        appliedSteps.append("hairColor_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -695,6 +707,27 @@ public final class PhotoEngine {
                     working = eyelidResult.image
                     report.eyelidAegyoSal = eyelidResult.report
                     if let note = eyelidResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-R: Smart hair color harmonization, gray hair removal & recoloring
+            if let hairColor = settings.hairColor, !hairColor.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，发色调整已跳过（原图保持不变）。"
+                    report.hairColor = HairColorReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let hairColorResult = HairColorEngine.apply(
+                        to: working, faces: faces, settings: hairColor,
+                        personMask: preparedPersonMatte?.mask
+                    )
+                    working = hairColorResult.image
+                    report.hairColor = hairColorResult.report
+                    if let note = hairColorResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1212,6 +1245,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let hairColorGroups = [adjustments.hairColor,
+                               automatic?.baseline.hairColor,
+                               automatic?.referenceSettings.hairColor]
+        var hasHairColorOverride = false
+        let multiSettingsForHair = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForHair {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.hairColorOverride, !o.isNeutral { hasHairColorOverride = true; break }
+            }
+            if hasHairColorOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.hairColorOverride, !o.isNeutral { hasHairColorOverride = true; break }
+            }
+            if hasHairColorOverride { break }
+        }
+        if hairColorGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasHairColorOverride { return 25 }
         let bokehGroups = [adjustments.bokehBlur,
                            automatic?.baseline.bokehBlur,
                            automatic?.referenceSettings.bokehBlur]
