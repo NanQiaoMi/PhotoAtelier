@@ -89,6 +89,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart temples, cheekbones & facial contour smoothness.
     public var facialContour: Bool = true
 
+    /// Smart eyebrow reshaping, wild brow texture & symmetry calibration.
+    public var eyebrowReshape: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -139,6 +142,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         noseReshape: Bool = true,
         jawChinReshape: Bool = true,
         facialContour: Bool = true,
+        eyebrowReshape: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -175,6 +179,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.noseReshape = noseReshape
         self.jawChinReshape = jawChinReshape
         self.facialContour = facialContour
+        self.eyebrowReshape = eyebrowReshape
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -215,6 +220,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             noseReshape: true,
             jawChinReshape: true,
             facialContour: true,
+            eyebrowReshape: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -256,6 +262,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             noseReshape: true,
             jawChinReshape: true,
             facialContour: true,
+            eyebrowReshape: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -295,6 +302,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             noseReshape: false,
             jawChinReshape: false,
             facialContour: false,
+            eyebrowReshape: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -334,6 +342,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             noseReshape: false,
             jawChinReshape: false,
             facialContour: false,
+            eyebrowReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -373,6 +382,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             noseReshape: false,
             jawChinReshape: false,
             facialContour: false,
+            eyebrowReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -569,6 +579,11 @@ public enum AdjustmentSyncEngine {
         // 15m. Smart temples, cheekbones & facial contour smoothness
         if options.facialContour {
             result.facialContour = source.facialContour
+        }
+
+        // 15n. Smart eyebrow reshaping, wild brow texture & symmetry calibration
+        if options.eyebrowReshape {
+            result.eyebrowReshape = source.eyebrowReshape
         }
 
         // 16. Lens effects & corrections

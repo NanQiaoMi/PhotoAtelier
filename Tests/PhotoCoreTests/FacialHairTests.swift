@@ -237,9 +237,9 @@ final class FacialHairTests: XCTestCase {
         recipe.version = 26
         XCTAssertNoThrow(try recipe.validateVersion())
 
-        // Future version 32 should fail
-        recipe.version = 32
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version 32 is future unsupported")
+        // Future version 33 should fail
+        recipe.version = 33
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version 33 is future unsupported")
 
         // PhotoEngine requiredRecipeVersion check
         let requiredVersion = PhotoEngine.requiredRecipeVersion(adjustments: recipe.adjustments, automatic: nil)

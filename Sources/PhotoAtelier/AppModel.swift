@@ -3308,6 +3308,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能面部外轮廓微雕设置。"
     }
 
+    // MARK: - Smart eyebrow reshaping, wild brow texture & symmetry calibration (P2-Y)
+
+    var eyebrowReshapeSettings: EyebrowReshapeSettings {
+        adjustments.eyebrowReshape ?? EyebrowReshapeSettings()
+    }
+
+    var eyebrowReshapeIsActive: Bool {
+        adjustments.eyebrowReshape.map { !$0.isNeutral } ?? false
+    }
+
+    func updateEyebrowReshape(_ mutate: (inout EyebrowReshapeSettings) -> Void) {
+        var settings = adjustments.eyebrowReshape ?? EyebrowReshapeSettings()
+        mutate(&settings)
+        adjustments.eyebrowReshape = settings
+    }
+
+    func setEyebrowReshapeEnabled(_ enabled: Bool) {
+        updateEyebrowReshape { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能眉形微雕已启用：眉尾提拉、粗细长短微调、双眉对称性校准、野生眉毛流质感与眉骨3D立体光影。"
+            : "智能眉形微雕已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetEyebrowReshape() {
+        adjustments.eyebrowReshape = nil
+        status = "已重置智能眉形微雕设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
