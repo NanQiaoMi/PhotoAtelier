@@ -3218,6 +3218,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能眼型微雕与眼位平衡设置。"
     }
 
+    // MARK: - Smart nose reshaping, 3D bridge contouring & structural correction (P2-V)
+
+    var noseReshapeSettings: NoseReshapeSettings {
+        adjustments.noseReshape ?? NoseReshapeSettings()
+    }
+
+    var noseReshapeIsActive: Bool {
+        adjustments.noseReshape.map { !$0.isNeutral } ?? false
+    }
+
+    func updateNoseReshape(_ mutate: (inout NoseReshapeSettings) -> Void) {
+        var settings = adjustments.noseReshape ?? NoseReshapeSettings()
+        mutate(&settings)
+        adjustments.noseReshape = settings
+    }
+
+    func setNoseReshapeEnabled(_ enabled: Bool) {
+        updateNoseReshape { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能鼻部微雕与立体塑形已启用：鼻翼收窄、鼻头微缩、鼻梁挺拔、朝天鼻/鹰钩鼻矫正、驼峰抚平与3D立体高光修容。"
+            : "智能鼻部微雕与立体塑形已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetNoseReshape() {
+        adjustments.noseReshape = nil
+        status = "已重置智能鼻部微雕与立体塑形设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

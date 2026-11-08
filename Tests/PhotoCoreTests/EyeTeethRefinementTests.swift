@@ -283,9 +283,9 @@ final class EyeTeethRefinementTests: XCTestCase {
         recipe.version = 21
         XCTAssertNoThrow(try recipe.validateVersion(), "Recipe version 21 should validate successfully")
 
-        // Future version 29 is rejected
-        recipe.version = 29
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version > 28 should be rejected")
+        // Future version 30 is rejected
+        recipe.version = 30
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version > 29 should be rejected")
     }
 
     func testSelectiveSyncEyeTeeth() {

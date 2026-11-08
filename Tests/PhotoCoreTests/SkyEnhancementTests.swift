@@ -69,8 +69,8 @@ final class SkyEnhancementTests: XCTestCase {
         recipe.version = 19
         try recipe.validateVersion()
 
-        // Future version 29 must fail
-        recipe.version = 29
+        // Future version 30 must fail
+        recipe.version = 30
         XCTAssertThrowsError(try recipe.validateVersion())
 
         // Required recipe version calculation
