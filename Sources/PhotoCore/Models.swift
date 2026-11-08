@@ -330,6 +330,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v26.
     /// Absent or disabled facial hair, peach fuzz removal & mole management keeps the pre-v26 path.
     public var facialHair: FacialHairSettings? = nil
+    /// Optional for exact compatibility with recipes written before v27.
+    /// Absent or disabled expression, smile & lip shape enhancement keeps the pre-v27 path.
+    public var expression: ExpressionSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1387,6 +1390,108 @@ public struct FacialHairReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-T smart facial micro-expression, smile uplift & lip shape 3D enhancement.
+public struct ExpressionSettings: Codable, Equatable, Sendable {
+    /// Master toggle for expression & smile adjustments.
+    public var enabled: Bool = false
+    /// Smile degree / lip corner uplift (0...1, default 0).
+    public var smileDegree: Double = 0
+    /// Smile width modulation (-0.5...0.5, default 0).
+    public var smileWidth: Double = 0
+    /// Lip corner symmetry harmonization (0...1, default 0).
+    public var lipSymmetry: Double = 0
+    /// Philtrum shortening (0...1, default 0).
+    public var philtrumShortening: Double = 0
+    /// Upper lip plumping fullness (-0.5...0.5, default 0).
+    public var upperLipPlump: Double = 0
+    /// Lower lip plumping fullness (-0.5...0.5, default 0).
+    public var lowerLipPlump: Double = 0
+    /// 3D vermilion highlight and micro-shading (0...1, default 0).
+    public var lip3DHighlight: Double = 0
+
+    public init(enabled: Bool = false,
+                smileDegree: Double = 0,
+                smileWidth: Double = 0,
+                lipSymmetry: Double = 0,
+                philtrumShortening: Double = 0,
+                upperLipPlump: Double = 0,
+                lowerLipPlump: Double = 0,
+                lip3DHighlight: Double = 0) {
+        self.enabled = enabled
+        self.smileDegree = max(0.0, min(1.0, smileDegree))
+        self.smileWidth = max(-0.5, min(0.5, smileWidth))
+        self.lipSymmetry = max(0.0, min(1.0, lipSymmetry))
+        self.philtrumShortening = max(0.0, min(1.0, philtrumShortening))
+        self.upperLipPlump = max(-0.5, min(0.5, upperLipPlump))
+        self.lowerLipPlump = max(-0.5, min(0.5, lowerLipPlump))
+        self.lip3DHighlight = max(0.0, min(1.0, lip3DHighlight))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            smileDegree <= 0.0001 &&
+            abs(smileWidth) <= 0.0001 &&
+            lipSymmetry <= 0.0001 &&
+            philtrumShortening <= 0.0001 &&
+            abs(upperLipPlump) <= 0.0001 &&
+            abs(lowerLipPlump) <= 0.0001 &&
+            lip3DHighlight <= 0.0001
+        )
+    }
+
+    public func validated() throws -> ExpressionSettings {
+        guard smileDegree.isFinite, (0...1).contains(smileDegree) else {
+            throw AtelierError.invalidConfiguration("微笑嘴角上扬程度必须在 0...1 之间。")
+        }
+        guard smileWidth.isFinite, (-0.5...0.5).contains(smileWidth) else {
+            throw AtelierError.invalidConfiguration("微笑宽度必须在 -0.5...0.5 之间。")
+        }
+        guard lipSymmetry.isFinite, (0...1).contains(lipSymmetry) else {
+            throw AtelierError.invalidConfiguration("唇角对称性校准必须在 0...1 之间。")
+        }
+        guard philtrumShortening.isFinite, (0...1).contains(philtrumShortening) else {
+            throw AtelierError.invalidConfiguration("幼态人中缩短程度必须在 0...1 之间。")
+        }
+        guard upperLipPlump.isFinite, (-0.5...0.5).contains(upperLipPlump) else {
+            throw AtelierError.invalidConfiguration("上唇丰满程度必须在 -0.5...0.5 之间。")
+        }
+        guard lowerLipPlump.isFinite, (-0.5...0.5).contains(lowerLipPlump) else {
+            throw AtelierError.invalidConfiguration("下唇丰满程度必须在 -0.5...0.5 之间。")
+        }
+        guard lip3DHighlight.isFinite, (0...1).contains(lip3DHighlight) else {
+            throw AtelierError.invalidConfiguration("唇峰珠光高光与立体阴影强度必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-T facial micro-expression, smile & lip shape enhancement pass.
+public struct ExpressionReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var averageSmileAdjustment: Double
+    public var averagePlumpAdjustment: Double
+    public var philtrumShortenedFaces: Int
+    public var processingTimeMs: Double
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                averageSmileAdjustment: Double = 0,
+                averagePlumpAdjustment: Double = 0,
+                philtrumShortenedFaces: Int = 0,
+                processingTimeMs: Double = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.averageSmileAdjustment = averageSmileAdjustment
+        self.averagePlumpAdjustment = averagePlumpAdjustment
+        self.philtrumShortenedFaces = philtrumShortenedFaces
+        self.processingTimeMs = processingTimeMs
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1627,6 +1732,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var hairColorOverride: HairColorSettings?
     /// Independent facial hair, peach fuzz removal & mole management override.
     public var facialHairOverride: FacialHairSettings?
+    /// Independent facial micro-expression, smile & lip shape enhancement override.
+    public var expressionOverride: ExpressionSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1639,7 +1746,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 bodyReshapeOverride: BodyReshapeSettings? = nil,
                 eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil,
                 hairColorOverride: HairColorSettings? = nil,
-                facialHairOverride: FacialHairSettings? = nil) {
+                facialHairOverride: FacialHairSettings? = nil,
+                expressionOverride: ExpressionSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1652,6 +1760,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.eyelidAegyoSalOverride = eyelidAegyoSalOverride
         self.hairColorOverride = hairColorOverride
         self.facialHairOverride = facialHairOverride
+        self.expressionOverride = expressionOverride
     }
 
     public var isNeutral: Bool {
@@ -1663,7 +1772,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral) &&
             (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral) &&
             (hairColorOverride == nil || hairColorOverride!.isNeutral) &&
-            (facialHairOverride == nil || facialHairOverride!.isNeutral)
+            (facialHairOverride == nil || facialHairOverride!.isNeutral) &&
+            (expressionOverride == nil || expressionOverride!.isNeutral)
         )
     }
 
@@ -2106,8 +2216,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...26).contains(version) else {
+        guard (1...27).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let expressionGroups = [adjustments.expression,
+                                automatic?.baseline.expression,
+                                automatic?.referenceSettings.expression]
+        var hasExpressionOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.expressionOverride, !o.isNeutral { hasExpressionOverride = true; break }
+            }
+            if !hasExpressionOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.expressionOverride, !o.isNeutral { hasExpressionOverride = true; break }
+                }
+            }
+        }
+        guard version >= 27 || (expressionGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasExpressionOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能面部微表情、微笑嘴角与唇形立体微雕需要配方版本 27，不能静默降级。")
         }
         let facialHairGroups = [adjustments.facialHair,
                                 automatic?.baseline.facialHair,
@@ -2575,6 +2702,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var hairColor: HairColorReport?
     /// Per-photo P2-S facial hair, peach fuzz removal & feature mole management status. `nil` when absent or disabled.
     public var facialHair: FacialHairReport?
+    /// Per-photo P2-T facial micro-expression, smile & lip shape enhancement status. `nil` when absent or disabled.
+    public var expression: ExpressionReport?
     public init() {}
 }
 

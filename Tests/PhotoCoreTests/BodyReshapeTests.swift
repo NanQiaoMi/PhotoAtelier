@@ -322,9 +322,9 @@ final class BodyReshapeTests: XCTestCase {
         recipe.version = 22
         XCTAssertNoThrow(try recipe.validateVersion(), "Version 22 must validate successfully")
 
-        // Version 27 is future unsupported
-        recipe.version = 27
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version 27 should be rejected")
+        // Version 28 is future unsupported
+        recipe.version = 28
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version 28 should be rejected")
 
         // Required version calculation
         let reqV = PhotoEngine.requiredRecipeVersion(adjustments: recipe.adjustments, automatic: nil)

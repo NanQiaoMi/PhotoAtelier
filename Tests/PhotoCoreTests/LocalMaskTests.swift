@@ -126,7 +126,7 @@ final class LocalMaskTests: XCTestCase {
             XCTAssertNotNil(summary.manifestURL)
         }
         // An unknown future version is rejected before any output directory exists.
-        var future = legacy; future.version = 27
+        var future = legacy; future.version = 28
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: root.appendingPathComponent("unsupported"), recipe: future,
             lut: nil, cancellation: CancellationToken(), onEvent: { _ in }))

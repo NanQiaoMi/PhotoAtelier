@@ -3158,6 +3158,36 @@ final class AppModel: ObservableObject {
         status = "已重置唇毛胡青与特征痣精修设置。"
     }
 
+    // MARK: - Smart facial micro-expression, smile & lip shape enhancement (P2-T)
+
+    var expressionSettings: ExpressionSettings {
+        adjustments.expression ?? ExpressionSettings()
+    }
+
+    var expressionIsActive: Bool {
+        adjustments.expression.map { !$0.isNeutral } ?? false
+    }
+
+    func updateExpression(_ mutate: (inout ExpressionSettings) -> Void) {
+        var settings = adjustments.expression ?? ExpressionSettings()
+        mutate(&settings)
+        adjustments.expression = settings
+    }
+
+    func setExpressionEnabled(_ enabled: Bool) {
+        updateExpression { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能微表情与微笑唇形微雕已启用：嘴角自然上扬、微笑宽度调节、唇角对称校准、幼态人中缩短与丰唇高光。"
+            : "智能微表情与微笑唇形微雕已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetExpression() {
+        adjustments.expression = nil
+        status = "已重置智能微表情与微笑唇形微雕设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
