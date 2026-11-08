@@ -89,6 +89,7 @@ struct SelectiveSyncSheet: View {
                             Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)
                             Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
                             Toggle("智能发色统一与白发消除 (去白发银丝/发色斑驳统一/7款沙龙发色)", isOn: $model.syncOptions.hairColor)
+                            Toggle("智能面部唇毛与胡青消除、特征痣管理 (去唇毛/去胡青/胡茬平滑/特征痣保留与消除)", isOn: $model.syncOptions.facialHair)
                         }
                         .toggleStyle(.checkbox)
                         .font(.system(size: 11))

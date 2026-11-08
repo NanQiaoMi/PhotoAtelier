@@ -71,6 +71,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart hair color harmonization, gray hair removal & recoloring.
     public var hairColor: Bool = true
 
+    /// Smart facial hair, peach fuzz removal, beard shadow softening & feature mole management.
+    public var facialHair: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -115,6 +118,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         eyelidAegyoSal: Bool = true,
         bokehBlur: Bool = true,
         hairColor: Bool = true,
+        facialHair: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -145,6 +149,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.eyelidAegyoSal = eyelidAegyoSal
         self.bokehBlur = bokehBlur
         self.hairColor = hairColor
+        self.facialHair = facialHair
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -179,6 +184,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyelidAegyoSal: true,
             bokehBlur: true,
             hairColor: true,
+            facialHair: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -214,6 +220,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyelidAegyoSal: true,
             bokehBlur: true,
             hairColor: true,
+            facialHair: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -247,6 +254,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyelidAegyoSal: false,
             bokehBlur: false,
             hairColor: false,
+            facialHair: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -280,6 +288,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyelidAegyoSal: false,
             bokehBlur: false,
             hairColor: false,
+            facialHair: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -313,6 +322,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             eyelidAegyoSal: false,
             bokehBlur: false,
             hairColor: false,
+            facialHair: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -479,6 +489,11 @@ public enum AdjustmentSyncEngine {
         // 15g. Smart hair color harmonization, gray hair removal & recoloring
         if options.hairColor {
             result.hairColor = source.hairColor
+        }
+
+        // 15h. Smart facial hair, peach fuzz removal & feature mole management
+        if options.facialHair {
+            result.facialHair = source.facialHair
         }
 
         // 16. Lens effects & corrections

@@ -3128,6 +3128,36 @@ final class AppModel: ObservableObject {
         status = "已重置发色统一与白发修整设置。"
     }
 
+    // MARK: - Smart facial hair, peach fuzz removal & feature mole management (P2-S)
+
+    var facialHairSettings: FacialHairSettings {
+        adjustments.facialHair ?? FacialHairSettings()
+    }
+
+    var facialHairIsActive: Bool {
+        adjustments.facialHair.map { !$0.isNeutral } ?? false
+    }
+
+    func updateFacialHair(_ mutate: (inout FacialHairSettings) -> Void) {
+        var settings = adjustments.facialHair ?? FacialHairSettings()
+        mutate(&settings)
+        adjustments.facialHair = settings
+    }
+
+    func setFacialHairEnabled(_ enabled: Bool) {
+        updateFacialHair { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "唇毛胡青与特征痣精修已启用：消除唇毛与胡青、平滑胡茬、智能管理特征痣。"
+            : "唇毛胡青与特征痣精修已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetFacialHair() {
+        adjustments.facialHair = nil
+        status = "已重置唇毛胡青与特征痣精修设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

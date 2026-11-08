@@ -108,8 +108,13 @@ struct PortraitRetouchPanel: View {
                 eyeTeethSection
                 separator
                 eyelidAegyoSalSection
+            }
+
+            Group {
                 separator
                 hairColorSection
+                separator
+                facialHairSection
             }
 
             Group {
@@ -1044,6 +1049,94 @@ struct PortraitRetouchPanel: View {
                 get: { model.hairColorSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateHairColor { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart facial hair, peach fuzz removal & feature mole management (P2-S)
+
+    private var facialHairSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("唇毛胡青与特征痣精修", systemImage: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.facialHairIsActive {
+                    Button("重置") {
+                        model.resetFacialHair()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("面部细节洁净精修：消除女性唇周暗色桃毛绒毛，中和男性剃须后下颌发青暗沉与胡茬颗粒，并提供特征痣保留、淡化或消除管理。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用唇毛胡青与特征痣精修", isOn: Binding(
+                get: { model.facialHairSettings.enabled },
+                set: { model.setFacialHairEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.facialHairSettings.enabled {
+                VStack(spacing: 8) {
+                    facialHairSlider("唇毛消除强度", \.lipFuzzRemoval, range: 0...1,
+                                     help: "消除上唇微细暗色绒毛，保留唇红缘锐利度与自然毛孔质感。")
+                    facialHairSlider("胡青消除与提亮", \.beardShadowReduction, range: 0...1,
+                                     help: "消除下巴与下颌骨剃须后冷调发青发暗区域，补充暖润肤色并提升明度。")
+                    facialHairSlider("胡茬黑点平滑", \.stubbleSmoothing, range: 0...1,
+                                     help: "平滑下颌微小胡茬斑点，减少粗糙颗粒感。")
+
+                    HStack {
+                        Text("特征痣管理")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.8))
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { model.facialHairSettings.moleManagement },
+                            set: { mode in
+                                model.updateFacialHair { $0.moleManagement = mode }
+                            }
+                        )) {
+                            ForEach(MoleManagementMode.allCases, id: \.self) { mode in
+                                Text(mode.localizedName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 130)
+                    }
+
+                    if model.facialHairSettings.moleManagement != .preserve {
+                        facialHairSlider("特征痣修饰强度", \.moleRemovalIntensity, range: 0...1,
+                                         help: "淡化或彻底消除面部深色特征痣的强度。")
+                    }
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func facialHairSlider(_ title: String,
+                                  _ keyPath: WritableKeyPath<FacialHairSettings, Double>,
+                                  range: ClosedRange<Double> = 0...1,
+                                  help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.facialHairSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateFacialHair { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

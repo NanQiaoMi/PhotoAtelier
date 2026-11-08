@@ -313,6 +313,7 @@ public final class PhotoEngine {
         if let eyelid = settings.eyelidAegyoSal, !eyelid.isNeutral { _ = try eyelid.validated() }
         if let bokeh = settings.bokehBlur, !bokeh.isNeutral { _ = try bokeh.validated() }
         if let hairColor = settings.hairColor, !hairColor.isNeutral { _ = try hairColor.validated() }
+        if let facialHair = settings.facialHair, !facialHair.isNeutral { _ = try facialHair.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -585,6 +586,17 @@ public final class PhotoEngine {
                         appliedSteps.append("hairColor_\(idx + 1)")
                     }
 
+                    // 3d. Per-person Facial Hair, Peach Fuzz & Mole Refinement
+                    let effectiveFacialHair = (profile?.enabled == true ? profile?.facialHairOverride : nil) ?? settings.facialHair
+                    if let fh = effectiveFacialHair, !fh.isNeutral, face.hasUsableGeometry {
+                        let res = FacialHairEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            perFaceMask: faceMask, settings: fh
+                        )
+                        working = res
+                        appliedSteps.append("facialHair_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -728,6 +740,26 @@ public final class PhotoEngine {
                     working = hairColorResult.image
                     report.hairColor = hairColorResult.report
                     if let note = hairColorResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-S: Smart facial hair, peach fuzz removal & feature mole management
+            if let facialHair = settings.facialHair, !facialHair.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，唇毛胡青与特征痣精修已跳过（原图保持不变）。"
+                    report.facialHair = FacialHairReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let facialHairResult = FacialHairEngine.apply(
+                        to: working, faces: faces, settings: facialHair
+                    )
+                    working = facialHairResult.image
+                    report.facialHair = facialHairResult.report
+                    if let note = facialHairResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1245,6 +1277,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let facialHairGroups = [adjustments.facialHair,
+                                automatic?.baseline.facialHair,
+                                automatic?.referenceSettings.facialHair]
+        var hasFacialHairOverride = false
+        let multiSettingsForFacialHair = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForFacialHair {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.facialHairOverride, !o.isNeutral { hasFacialHairOverride = true; break }
+            }
+            if hasFacialHairOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.facialHairOverride, !o.isNeutral { hasFacialHairOverride = true; break }
+            }
+            if hasFacialHairOverride { break }
+        }
+        if facialHairGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasFacialHairOverride { return 26 }
         let hairColorGroups = [adjustments.hairColor,
                                automatic?.baseline.hairColor,
                                automatic?.referenceSettings.hairColor]
