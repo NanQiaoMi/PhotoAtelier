@@ -318,6 +318,7 @@ public final class PhotoEngine {
         if let eyeShape = settings.eyeShape, !eyeShape.isNeutral { _ = try eyeShape.validated() }
         if let noseReshape = settings.noseReshape, !noseReshape.isNeutral { _ = try noseReshape.validated() }
         if let jawChinReshape = settings.jawChinReshape, !jawChinReshape.isNeutral { _ = try jawChinReshape.validated() }
+        if let facialContour = settings.facialContour, !facialContour.isNeutral { _ = try facialContour.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -645,6 +646,17 @@ public final class PhotoEngine {
                         appliedSteps.append("jawChinReshape_\(idx + 1)")
                     }
 
+                    // 3i. Per-person Temples, Cheekbones & Facial Contour Smoothness
+                    let effectiveFacialContour = (profile?.enabled == true ? profile?.facialContourOverride : nil) ?? settings.facialContour
+                    if let fc = effectiveFacialContour, !fc.isNeutral, face.hasUsableGeometry {
+                        let res = FacialContourEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            settings: fc, perFaceMask: faceMask
+                        )
+                        working = res.image
+                        appliedSteps.append("facialContour_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -888,6 +900,26 @@ public final class PhotoEngine {
                     working = jawResult.image
                     report.jawChinReshape = jawResult.report
                     if let note = jawResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-X: Smart temples, cheekbones & facial contour smoothness
+            if let facialContour = settings.facialContour, !facialContour.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，面部外轮廓微雕已跳过（原图保持不变）。"
+                    report.facialContour = FacialContourReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let contourResult = FacialContourEngine.apply(
+                        to: working, faces: faces, settings: facialContour
+                    )
+                    working = contourResult.image
+                    report.facialContour = contourResult.report
+                    if let note = contourResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1405,6 +1437,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let facialContourGroups = [adjustments.facialContour,
+                                   automatic?.baseline.facialContour,
+                                   automatic?.referenceSettings.facialContour]
+        var hasFacialContourOverride = false
+        let multiSettingsForFacialContour = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForFacialContour {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.facialContourOverride, !o.isNeutral { hasFacialContourOverride = true; break }
+            }
+            if hasFacialContourOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.facialContourOverride, !o.isNeutral { hasFacialContourOverride = true; break }
+            }
+            if hasFacialContourOverride { break }
+        }
+        if facialContourGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasFacialContourOverride { return 31 }
         let jawChinReshapeGroups = [adjustments.jawChinReshape,
                                     automatic?.baseline.jawChinReshape,
                                     automatic?.referenceSettings.jawChinReshape]

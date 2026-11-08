@@ -97,6 +97,7 @@ struct SelectiveSyncSheet: View {
                                 Toggle("智能眼型微雕与眼位平衡 (开内眼角/开外眼角眼尾下至/圆润猫眼/眼位倾斜/眼距微调/中庭比例缩短/双眼对称)", isOn: $model.syncOptions.eyeShape)
                                 Toggle("智能鼻部微雕与立体塑形 (鼻翼收窄/鼻头微缩/鼻梁挺拔/朝天鼻鹰钩鼻矫正/驼峰抚平/鼻长中庭平衡/3D立体高光修容)", isOn: $model.syncOptions.noseReshape)
                                 Toggle("智能下颌角与下巴微雕重塑 (下颌角收窄/下巴长短翘度/精致V脸幼态圆下巴/下颌缘紧致/下巴3D立体高光修容)", isOn: $model.syncOptions.jawChinReshape)
+                                Toggle("智能太阳穴/颧骨与面部外轮廓微雕 (太阳穴充盈/颧骨内推/面颊丰盈/外轮廓平滑/苹果肌提拉/3D轮廓立体光影)", isOn: $model.syncOptions.facialContour)
                             }
                         }
                         .toggleStyle(.checkbox)

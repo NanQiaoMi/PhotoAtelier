@@ -3278,6 +3278,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能下颌与下巴微雕设置。"
     }
 
+    // MARK: - Smart temples, cheekbones & facial contour smoothness (P2-X)
+
+    var facialContourSettings: FacialContourSettings {
+        adjustments.facialContour ?? FacialContourSettings()
+    }
+
+    var facialContourIsActive: Bool {
+        adjustments.facialContour.map { !$0.isNeutral } ?? false
+    }
+
+    func updateFacialContour(_ mutate: (inout FacialContourSettings) -> Void) {
+        var settings = adjustments.facialContour ?? FacialContourSettings()
+        mutate(&settings)
+        adjustments.facialContour = settings
+    }
+
+    func setFacialContourEnabled(_ enabled: Bool) {
+        updateFacialContour { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能面部外轮廓微雕已启用：太阳穴充盈、颧骨内推、面颊丰盈、外轮廓波折平滑、苹果肌提拉与3D立体光影。"
+            : "智能面部外轮廓微雕已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetFacialContour() {
+        adjustments.facialContour = nil
+        status = "已重置智能面部外轮廓微雕设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
