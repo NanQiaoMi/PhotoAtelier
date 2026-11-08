@@ -3068,6 +3068,36 @@ final class AppModel: ObservableObject {
         status = "已重置双眼皮与卧蚕微雕设置。"
     }
 
+    // MARK: - Smart bokeh and optical depth-of-field synthesis (P2-Q)
+
+    var bokehBlurSettings: BokehBlurSettings {
+        adjustments.bokehBlur ?? BokehBlurSettings()
+    }
+
+    var bokehBlurIsActive: Bool {
+        adjustments.bokehBlur.map { !$0.isNeutral } ?? false
+    }
+
+    func updateBokehBlur(_ mutate: (inout BokehBlurSettings) -> Void) {
+        var settings = adjustments.bokehBlur ?? BokehBlurSettings()
+        mutate(&settings)
+        adjustments.bokehBlur = settings
+    }
+
+    func setBokehBlurEnabled(_ enabled: Bool) {
+        updateBokehBlur { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "大光圈景深虚化与光斑雕刻已启用：4款光学光圈形状、连续物理景深场、高光光斑爆发与主体防溢色保护。"
+            : "大光圈景深虚化与光斑雕刻已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetBokehBlur() {
+        adjustments.bokehBlur = nil
+        status = "已重置大光圈景深虚化与光斑雕刻设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

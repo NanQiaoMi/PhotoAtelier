@@ -113,6 +113,7 @@ struct SelectiveSyncSheet: View {
                     GroupBox(label: Label("镜头效果与风格质感", systemImage: "camera.aperture").font(.system(size: 12, weight: .semibold))) {
                         VStack(alignment: .leading, spacing: 6) {
                             Toggle("镜头光学 (暗角/横向色差校正)", isOn: $model.syncOptions.lensAndVignette)
+                            Toggle("智能大光圈景深虚化与光斑雕刻 (4款光圈形状/高光光斑爆发/边缘防溢色)", isOn: $model.syncOptions.bokehBlur)
                             Toggle("胶片颗粒与柔光高光 (Grain & Bloom)", isOn: $model.syncOptions.creativeEffects)
                         }
                         .toggleStyle(.checkbox)
