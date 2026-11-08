@@ -203,8 +203,8 @@ final class MultiPersonPortraitTests: XCTestCase {
         recipe.version = 20
         XCTAssertNoThrow(try recipe.validateVersion(), "Recipe version 20 should validate successfully")
 
-        // Version 26 is currently invalid
-        recipe.version = 26
+        // Version 27 is currently invalid
+        recipe.version = 27
         XCTAssertThrowsError(try recipe.validateVersion(), "Version > 25 should be rejected")
     }
 

@@ -283,8 +283,8 @@ final class EyeTeethRefinementTests: XCTestCase {
         recipe.version = 21
         XCTAssertNoThrow(try recipe.validateVersion(), "Recipe version 21 should validate successfully")
 
-        // Future version 26 is rejected
-        recipe.version = 26
+        // Future version 27 is rejected
+        recipe.version = 27
         XCTAssertThrowsError(try recipe.validateVersion(), "Version > 25 should be rejected")
     }
 

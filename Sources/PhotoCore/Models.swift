@@ -327,6 +327,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v25.
     /// Absent or disabled hair color harmonization & gray hair removal keeps the pre-v25 path.
     public var hairColor: HairColorSettings? = nil
+    /// Optional for exact compatibility with recipes written before v26.
+    /// Absent or disabled facial hair, peach fuzz removal & mole management keeps the pre-v26 path.
+    public var facialHair: FacialHairSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1287,6 +1290,103 @@ public struct HairColorReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Mode for P2-S feature mole management.
+public enum MoleManagementMode: String, Codable, Sendable, CaseIterable {
+    case preserve = "preserve" // 默认保留特征痣
+    case soften = "soften"     // 轻度淡化特征痣
+    case remove = "remove"     // 完全消除特征痣
+
+    public var localizedName: String {
+        switch self {
+        case .preserve: return "保留特征痣 (默认)"
+        case .soften: return "轻度淡化"
+        case .remove: return "完全消除"
+        }
+    }
+}
+
+/// Settings for P2-S smart facial hair, peach fuzz removal, beard shadow softening & feature mole management.
+public struct FacialHairSettings: Codable, Equatable, Sendable {
+    /// Master toggle for facial hair adjustments.
+    public var enabled: Bool = false
+    /// Upper lip peach fuzz removal strength (0...1, default 0).
+    public var lipFuzzRemoval: Double = 0
+    /// Beard shadow reduction / warming strength (0...1, default 0).
+    public var beardShadowReduction: Double = 0
+    /// Shaven stubble micro-speckle smoothing strength (0...1, default 0).
+    public var stubbleSmoothing: Double = 0
+    /// Feature mole management mode (.preserve, .soften, .remove).
+    public var moleManagement: MoleManagementMode = .preserve
+    /// Feature mole softening / removal intensity (0...1, default 0.5).
+    public var moleRemovalIntensity: Double = 0.5
+
+    public init(enabled: Bool = false,
+                lipFuzzRemoval: Double = 0,
+                beardShadowReduction: Double = 0,
+                stubbleSmoothing: Double = 0,
+                moleManagement: MoleManagementMode = .preserve,
+                moleRemovalIntensity: Double = 0.5) {
+        self.enabled = enabled
+        self.lipFuzzRemoval = max(0.0, min(1.0, lipFuzzRemoval))
+        self.beardShadowReduction = max(0.0, min(1.0, beardShadowReduction))
+        self.stubbleSmoothing = max(0.0, min(1.0, stubbleSmoothing))
+        self.moleManagement = moleManagement
+        self.moleRemovalIntensity = max(0.0, min(1.0, moleRemovalIntensity))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            lipFuzzRemoval <= 0.0001 &&
+            beardShadowReduction <= 0.0001 &&
+            stubbleSmoothing <= 0.0001 &&
+            (moleManagement == .preserve || moleRemovalIntensity <= 0.0001)
+        )
+    }
+
+    public func validated() throws -> FacialHairSettings {
+        guard lipFuzzRemoval.isFinite, (0...1).contains(lipFuzzRemoval) else {
+            throw AtelierError.invalidConfiguration("唇毛消除强度必须在 0...1 之间。")
+        }
+        guard beardShadowReduction.isFinite, (0...1).contains(beardShadowReduction) else {
+            throw AtelierError.invalidConfiguration("胡青消除强度必须在 0...1 之间。")
+        }
+        guard stubbleSmoothing.isFinite, (0...1).contains(stubbleSmoothing) else {
+            throw AtelierError.invalidConfiguration("胡茬平滑强度必须在 0...1 之间。")
+        }
+        guard moleRemovalIntensity.isFinite, (0...1).contains(moleRemovalIntensity) else {
+            throw AtelierError.invalidConfiguration("特征痣处理强度必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-S facial hair, beard shadow & feature mole management pass.
+public struct FacialHairReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var lipFuzzApplied: Bool
+    public var beardShadowApplied: Bool
+    public var stubbleApplied: Bool
+    public var moleApplied: Bool
+    public var note: String?
+
+    public init(applied: Bool,
+                faceCount: Int = 0,
+                lipFuzzApplied: Bool = false,
+                beardShadowApplied: Bool = false,
+                stubbleApplied: Bool = false,
+                moleApplied: Bool = false,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.lipFuzzApplied = lipFuzzApplied
+        self.beardShadowApplied = beardShadowApplied
+        self.stubbleApplied = stubbleApplied
+        self.moleApplied = moleApplied
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1525,6 +1625,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var eyelidAegyoSalOverride: EyelidAegyoSalSettings?
     /// Independent hair color harmonization & gray hair removal override.
     public var hairColorOverride: HairColorSettings?
+    /// Independent facial hair, peach fuzz removal & mole management override.
+    public var facialHairOverride: FacialHairSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1536,7 +1638,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 eyeTeethOverride: EyeTeethRefinementSettings? = nil,
                 bodyReshapeOverride: BodyReshapeSettings? = nil,
                 eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil,
-                hairColorOverride: HairColorSettings? = nil) {
+                hairColorOverride: HairColorSettings? = nil,
+                facialHairOverride: FacialHairSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1548,6 +1651,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.bodyReshapeOverride = bodyReshapeOverride
         self.eyelidAegyoSalOverride = eyelidAegyoSalOverride
         self.hairColorOverride = hairColorOverride
+        self.facialHairOverride = facialHairOverride
     }
 
     public var isNeutral: Bool {
@@ -1558,7 +1662,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral) &&
             (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral) &&
             (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral) &&
-            (hairColorOverride == nil || hairColorOverride!.isNeutral)
+            (hairColorOverride == nil || hairColorOverride!.isNeutral) &&
+            (facialHairOverride == nil || facialHairOverride!.isNeutral)
         )
     }
 
@@ -2001,8 +2106,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...25).contains(version) else {
+        guard (1...26).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let facialHairGroups = [adjustments.facialHair,
+                                automatic?.baseline.facialHair,
+                                automatic?.referenceSettings.facialHair]
+        var hasFacialHairOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.facialHairOverride, !o.isNeutral { hasFacialHairOverride = true; break }
+            }
+            if !hasFacialHairOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.facialHairOverride, !o.isNeutral { hasFacialHairOverride = true; break }
+                }
+            }
+        }
+        guard version >= 26 || (facialHairGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasFacialHairOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的唇毛消除、胡青净化与特征痣管理需要配方版本 26，不能静默降级。")
         }
         let hairColorGroups = [adjustments.hairColor,
                                automatic?.baseline.hairColor,
@@ -2451,6 +2573,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var bokehBlur: BokehBlurReport?
     /// Per-photo P2-R hair color harmonization & gray hair removal status. `nil` when absent or disabled.
     public var hairColor: HairColorReport?
+    /// Per-photo P2-S facial hair, peach fuzz removal & feature mole management status. `nil` when absent or disabled.
+    public var facialHair: FacialHairReport?
     public init() {}
 }
 
