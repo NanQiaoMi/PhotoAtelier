@@ -333,6 +333,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v27.
     /// Absent or disabled expression, smile & lip shape enhancement keeps the pre-v27 path.
     public var expression: ExpressionSettings? = nil
+    /// Optional for exact compatibility with recipes written before v28.
+    /// Absent or disabled eye shape reshaping & mid-face balance keeps the pre-v28 path.
+    public var eyeShape: EyeShapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1492,6 +1495,108 @@ public struct ExpressionReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-U smart eye shape reshaping, canthoplasty & mid-face proportion balancing.
+public struct EyeShapeSettings: Codable, Equatable, Sendable {
+    /// Master toggle for eye shape adjustments.
+    public var enabled: Bool = false
+    /// Inner canthoplasty / 开内眼角 (0...1, default 0).
+    public var innerCanthoplasty: Double = 0
+    /// Outer canthoplasty & lower lid drop / 开外眼角与眼尾下至 (0...1, default 0).
+    public var outerCanthoplasty: Double = 0
+    /// Eye roundness vs almond/cat eye / 眼型圆润/猫眼微调 (-0.5...0.5, default 0).
+    public var eyeRoundness: Double = 0
+    /// Eye tilt / 眼位倾斜与走势校准 (-0.5...0.5, default 0).
+    public var eyeTilt: Double = 0
+    /// Interpupillary distance / 眼距微调 (-0.5...0.5, default 0).
+    public var interpupillaryDistance: Double = 0
+    /// Eye vertical position & mid-face balance / 眼位垂直微调与中庭比例缩短 (-0.5...0.5, default 0).
+    public var eyeVerticalPosition: Double = 0
+    /// Eye size and horizontal symmetry harmonization / 双眼大小与水平对称性校准 (0...1, default 0).
+    public var eyeSymmetry: Double = 0
+
+    public init(enabled: Bool = false,
+                innerCanthoplasty: Double = 0,
+                outerCanthoplasty: Double = 0,
+                eyeRoundness: Double = 0,
+                eyeTilt: Double = 0,
+                interpupillaryDistance: Double = 0,
+                eyeVerticalPosition: Double = 0,
+                eyeSymmetry: Double = 0) {
+        self.enabled = enabled
+        self.innerCanthoplasty = max(0.0, min(1.0, innerCanthoplasty))
+        self.outerCanthoplasty = max(0.0, min(1.0, outerCanthoplasty))
+        self.eyeRoundness = max(-0.5, min(0.5, eyeRoundness))
+        self.eyeTilt = max(-0.5, min(0.5, eyeTilt))
+        self.interpupillaryDistance = max(-0.5, min(0.5, interpupillaryDistance))
+        self.eyeVerticalPosition = max(-0.5, min(0.5, eyeVerticalPosition))
+        self.eyeSymmetry = max(0.0, min(1.0, eyeSymmetry))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            innerCanthoplasty <= 0.0001 &&
+            outerCanthoplasty <= 0.0001 &&
+            abs(eyeRoundness) <= 0.0001 &&
+            abs(eyeTilt) <= 0.0001 &&
+            abs(interpupillaryDistance) <= 0.0001 &&
+            abs(eyeVerticalPosition) <= 0.0001 &&
+            eyeSymmetry <= 0.0001
+        )
+    }
+
+    public func validated() throws -> EyeShapeSettings {
+        guard innerCanthoplasty.isFinite, (0...1).contains(innerCanthoplasty) else {
+            throw AtelierError.invalidConfiguration("开内眼角程度必须在 0...1 之间。")
+        }
+        guard outerCanthoplasty.isFinite, (0...1).contains(outerCanthoplasty) else {
+            throw AtelierError.invalidConfiguration("开外眼角程度必须在 0...1 之间。")
+        }
+        guard eyeRoundness.isFinite, (-0.5...0.5).contains(eyeRoundness) else {
+            throw AtelierError.invalidConfiguration("眼型圆润度调节必须在 -0.5...0.5 之间。")
+        }
+        guard eyeTilt.isFinite, (-0.5...0.5).contains(eyeTilt) else {
+            throw AtelierError.invalidConfiguration("眼位倾斜校准必须在 -0.5...0.5 之间。")
+        }
+        guard interpupillaryDistance.isFinite, (-0.5...0.5).contains(interpupillaryDistance) else {
+            throw AtelierError.invalidConfiguration("眼距微调必须在 -0.5...0.5 之间。")
+        }
+        guard eyeVerticalPosition.isFinite, (-0.5...0.5).contains(eyeVerticalPosition) else {
+            throw AtelierError.invalidConfiguration("眼位垂直与中庭微调必须在 -0.5...0.5 之间。")
+        }
+        guard eyeSymmetry.isFinite, (0...1).contains(eyeSymmetry) else {
+            throw AtelierError.invalidConfiguration("双眼对称性校准必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-U smart eye shape reshaping, canthoplasty & mid-face proportion balancing pass.
+public struct EyeShapeReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var averageCanthoplasty: Double
+    public var averageRoundness: Double
+    public var averageTilt: Double
+    public var processingTimeMs: Double
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                averageCanthoplasty: Double = 0,
+                averageRoundness: Double = 0,
+                averageTilt: Double = 0,
+                processingTimeMs: Double = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.averageCanthoplasty = averageCanthoplasty
+        self.averageRoundness = averageRoundness
+        self.averageTilt = averageTilt
+        self.processingTimeMs = processingTimeMs
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1734,6 +1839,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var facialHairOverride: FacialHairSettings?
     /// Independent facial micro-expression, smile & lip shape enhancement override.
     public var expressionOverride: ExpressionSettings?
+    /// Independent eye shape reshaping, canthoplasty & mid-face proportion balance override.
+    public var eyeShapeOverride: EyeShapeSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1747,7 +1854,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 eyelidAegyoSalOverride: EyelidAegyoSalSettings? = nil,
                 hairColorOverride: HairColorSettings? = nil,
                 facialHairOverride: FacialHairSettings? = nil,
-                expressionOverride: ExpressionSettings? = nil) {
+                expressionOverride: ExpressionSettings? = nil,
+                eyeShapeOverride: EyeShapeSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1761,6 +1869,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.hairColorOverride = hairColorOverride
         self.facialHairOverride = facialHairOverride
         self.expressionOverride = expressionOverride
+        self.eyeShapeOverride = eyeShapeOverride
     }
 
     public var isNeutral: Bool {
@@ -1773,7 +1882,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (eyelidAegyoSalOverride == nil || eyelidAegyoSalOverride!.isNeutral) &&
             (hairColorOverride == nil || hairColorOverride!.isNeutral) &&
             (facialHairOverride == nil || facialHairOverride!.isNeutral) &&
-            (expressionOverride == nil || expressionOverride!.isNeutral)
+            (expressionOverride == nil || expressionOverride!.isNeutral) &&
+            (eyeShapeOverride == nil || eyeShapeOverride!.isNeutral)
         )
     }
 
@@ -2216,8 +2326,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...27).contains(version) else {
+        guard (1...28).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let eyeShapeGroups = [adjustments.eyeShape,
+                              automatic?.baseline.eyeShape,
+                              automatic?.referenceSettings.eyeShape]
+        var hasEyeShapeOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.eyeShapeOverride, !o.isNeutral { hasEyeShapeOverride = true; break }
+            }
+            if !hasEyeShapeOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.eyeShapeOverride, !o.isNeutral { hasEyeShapeOverride = true; break }
+                }
+            }
+        }
+        guard version >= 28 || (eyeShapeGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasEyeShapeOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能眼型微雕、开眼角与眼位中庭平衡需要配方版本 28，不能静默降级。")
         }
         let expressionGroups = [adjustments.expression,
                                 automatic?.baseline.expression,
@@ -2704,6 +2831,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var facialHair: FacialHairReport?
     /// Per-photo P2-T facial micro-expression, smile & lip shape enhancement status. `nil` when absent or disabled.
     public var expression: ExpressionReport?
+    /// Per-photo P2-U eye shape reshaping, canthoplasty & mid-face balance status. `nil` when absent or disabled.
+    public var eyeShape: EyeShapeReport?
     public init() {}
 }
 

@@ -315,6 +315,7 @@ public final class PhotoEngine {
         if let hairColor = settings.hairColor, !hairColor.isNeutral { _ = try hairColor.validated() }
         if let facialHair = settings.facialHair, !facialHair.isNeutral { _ = try facialHair.validated() }
         if let expression = settings.expression, !expression.isNeutral { _ = try expression.validated() }
+        if let eyeShape = settings.eyeShape, !eyeShape.isNeutral { _ = try eyeShape.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -609,6 +610,17 @@ public final class PhotoEngine {
                         appliedSteps.append("expression_\(idx + 1)")
                     }
 
+                    // 3f. Per-person Eye Shape Reshaping & Canthoplasty
+                    let effectiveEyeShape = (profile?.enabled == true ? profile?.eyeShapeOverride : nil) ?? settings.eyeShape
+                    if let es = effectiveEyeShape, !es.isNeutral, face.hasUsableGeometry {
+                        let res = EyeShapeEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            settings: es, perFaceMask: faceMask
+                        )
+                        working = res.image
+                        appliedSteps.append("eyeShape_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -792,6 +804,26 @@ public final class PhotoEngine {
                     working = expressionResult.image
                     report.expression = expressionResult.report
                     if let note = expressionResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-U: Smart eye shape reshaping, canthoplasty & mid-face proportion balancing
+            if let eyeShape = settings.eyeShape, !eyeShape.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，智能眼型微雕与眼位平衡已跳过（原图保持不变）。"
+                    report.eyeShape = EyeShapeReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let eyeShapeResult = EyeShapeEngine.apply(
+                        to: working, faces: faces, settings: eyeShape
+                    )
+                    working = eyeShapeResult.image
+                    report.eyeShape = eyeShapeResult.report
+                    if let note = eyeShapeResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1309,6 +1341,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let eyeShapeGroups = [adjustments.eyeShape,
+                              automatic?.baseline.eyeShape,
+                              automatic?.referenceSettings.eyeShape]
+        var hasEyeShapeOverride = false
+        let multiSettingsForEyeShape = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForEyeShape {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.eyeShapeOverride, !o.isNeutral { hasEyeShapeOverride = true; break }
+            }
+            if hasEyeShapeOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.eyeShapeOverride, !o.isNeutral { hasEyeShapeOverride = true; break }
+            }
+            if hasEyeShapeOverride { break }
+        }
+        if eyeShapeGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasEyeShapeOverride { return 28 }
         let expressionGroups = [adjustments.expression,
                                 automatic?.baseline.expression,
                                 automatic?.referenceSettings.expression]

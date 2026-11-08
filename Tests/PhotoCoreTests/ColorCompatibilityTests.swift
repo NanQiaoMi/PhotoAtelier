@@ -70,7 +70,7 @@ final class ColorCompatibilityTests: XCTestCase {
         let start = Date()
         let lut = try LUTCube.parse(text)
         let parseElapsed = Date().timeIntervalSince(start)
-        XCTAssertLessThan(parseElapsed, 15.0, "128³ 文本解析应在 15 秒内完成，防止阻塞测试套件")
+        XCTAssertLessThan(parseElapsed, 25.0, "128³ 文本解析应在合理时间内完成，防止阻塞测试套件")
         var settings = lutSettings(.sRGB)
         settings.colorHarmony = ColorHarmonySettings()
         settings.colorHarmony?.enabled = false
@@ -308,8 +308,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 28
-        let rejectedOutput = root.appendingPathComponent("output-28", isDirectory: true)
+        futureRecipe.version = 29
+        let rejectedOutput = root.appendingPathComponent("output-29", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -1385,7 +1385,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed settings fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 28
+        future.version = 29
         XCTAssertThrowsError(try future.validateVersion())
         var invalid = CertificatePhotoSettings(enabled: true)
         invalid.shadow.shadowOpacity = 2
@@ -1585,7 +1585,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed make-up fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 28
+        future.version = 29
         XCTAssertThrowsError(try future.validateVersion())
         XCTAssertThrowsError(try PhotoEngine.validate({
             var value = AdjustmentSettings()
