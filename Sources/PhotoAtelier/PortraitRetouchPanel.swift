@@ -124,6 +124,8 @@ struct PortraitRetouchPanel: View {
                 eyeShapeSection
                 separator
                 noseReshapeSection
+                separator
+                jawChinReshapeSection
             }
 
             Group {
@@ -1359,6 +1361,75 @@ struct PortraitRetouchPanel: View {
                 get: { model.noseReshapeSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateNoseReshape { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart jawline sculpting, chin reshaping & lower-face proportions (P2-W)
+
+    private var jawChinReshapeSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("下颌角与下巴微雕", systemImage: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.jawChinReshapeIsActive {
+                    Button("重置") {
+                        model.resetJawChinReshape()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("下庭轮廓与骨相微雕：下颌角宽窄收放修饰方脸、下巴长短微调平衡下庭三庭比例、下巴微翘解决下巴后缩、精致小V脸与幼态圆下巴形态塑形、下颌缘吸脂感微紧致消除双下巴，叠加 3D 颏部高光与下颌修容阴影。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用下颌与下巴微雕", isOn: Binding(
+                get: { model.jawChinReshapeSettings.enabled },
+                set: { model.setJawChinReshapeEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.jawChinReshapeSettings.enabled {
+                VStack(spacing: 8) {
+                    jawChinReshapeSlider("下颌角收窄", \.jawWidth, range: -0.5...0.5,
+                                         help: "横向内收双侧下颌角，柔化方脸国字脸棱角；正值微拓宽增强骨相感。")
+                    jawChinReshapeSlider("下巴长度调节", \.chinLength, range: -0.5...0.5,
+                                         help: "纵向微调颏下点位置：负值收短过长下巴平衡下庭，正值拉长后缩短下巴。")
+                    jawChinReshapeSlider("下巴微翘立体感", \.chinProjection, range: -0.5...0.5,
+                                         help: "微调下巴向前微翘立体感，改善下巴后缩痛点；负值柔化前突。")
+                    jawChinReshapeSlider("下巴形态微雕", \.chinShape, range: -0.5...0.5,
+                                         help: "微调下巴弧度：负值收尖雕琢精致小V脸，正值圆润饱满打造减龄幼态圆下巴。")
+                    jawChinReshapeSlider("下颌缘紧致清晰", \.jawlineTighten, range: 0...1,
+                                         help: "沿下颌缘向心紧致提拉，收紧双下巴与软组织松弛，凸显清晰下颌线。")
+                    jawChinReshapeSlider("3D 下巴高光与修容", \.chinContour, range: 0...1,
+                                         help: "在颏部中心渲染珍珠立体高光，并在下颌边缘叠加柔和修容阴影。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func jawChinReshapeSlider(_ title: String,
+                                      _ keyPath: WritableKeyPath<JawChinReshapeSettings, Double>,
+                                      range: ClosedRange<Double> = 0...1,
+                                      help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.jawChinReshapeSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateJawChinReshape { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

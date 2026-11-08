@@ -202,8 +202,8 @@ final class HairColorTests: XCTestCase {
         recipe.version = 25
         XCTAssertNoThrow(try recipe.validateVersion())
 
-        // Future version (e.g. 30) should fail
-        recipe.version = 30
+        // Future version (e.g. 31) should fail
+        recipe.version = 31
         XCTAssertThrowsError(try recipe.validateVersion())
     }
 
