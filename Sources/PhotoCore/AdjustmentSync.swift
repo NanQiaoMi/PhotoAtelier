@@ -59,6 +59,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Eye catchlight, eyeglass anti-glare, sclera clarity and teeth aesthetic restoration.
     public var eyeTeeth: Bool = true
 
+    /// Smart body reshaping & skeleton posture refinement.
+    public var bodyReshape: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -99,6 +102,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         skyEnhancement: Bool = true,
         multiPerson: Bool = true,
         eyeTeeth: Bool = true,
+        bodyReshape: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -125,6 +129,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.skyEnhancement = skyEnhancement
         self.multiPerson = multiPerson
         self.eyeTeeth = eyeTeeth
+        self.bodyReshape = bodyReshape
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -155,6 +160,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             skyEnhancement: true,
             multiPerson: true,
             eyeTeeth: true,
+            bodyReshape: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -186,6 +192,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             skyEnhancement: false,
             multiPerson: true,
             eyeTeeth: true,
+            bodyReshape: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -215,6 +222,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             backdrop: false,
             petEnhancement: false,
             skyEnhancement: true,
+            bodyReshape: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -244,6 +252,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             backdrop: false,
             petEnhancement: false,
             skyEnhancement: false,
+            bodyReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -273,6 +282,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             backdrop: false,
             petEnhancement: false,
             skyEnhancement: false,
+            bodyReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -419,6 +429,11 @@ public enum AdjustmentSyncEngine {
         // 15c. Eye catchlight & aesthetic teeth refinement
         if options.eyeTeeth {
             result.eyeTeeth = source.eyeTeeth
+        }
+
+        // 15d. Smart body reshaping & skeleton posture refinement
+        if options.bodyReshape {
+            result.bodyReshape = source.bodyReshape
         }
 
         // 16. Lens effects & corrections

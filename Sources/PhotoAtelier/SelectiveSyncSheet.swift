@@ -96,6 +96,7 @@ struct SelectiveSyncSheet: View {
                     // Group 3: 身体、衣物与背景
                     GroupBox(label: Label("身体、衣物与环境", systemImage: "tshirt").font(.system(size: 12, weight: .semibold))) {
                         VStack(alignment: .leading, spacing: 6) {
+                            Toggle("智能全身身形与姿态塑形 (天鹅颈/直角肩/全身瘦身/细腰/长腿增高/瘦手臂/背景保护)", isOn: $model.syncOptions.bodyReshape)
                             Toggle("智能衣物褶皱平整", isOn: $model.syncOptions.clothing)
                             Toggle("身体与手部美肤 (颈纹淡化/手背青筋/身体磨皮/肤色统一)", isOn: $model.syncOptions.bodySkin)
                             Toggle("影棚纯色背景修复 (折痕消除/污渍清理/色调统一)", isOn: $model.syncOptions.backdrop)

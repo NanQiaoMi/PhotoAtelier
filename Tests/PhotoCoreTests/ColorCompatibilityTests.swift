@@ -308,8 +308,8 @@ final class ColorCompatibilityTests: XCTestCase {
         }
 
         var futureRecipe = Recipe()
-        futureRecipe.version = 22
-        let rejectedOutput = root.appendingPathComponent("output-22", isDirectory: true)
+        futureRecipe.version = 23
+        let rejectedOutput = root.appendingPathComponent("output-23", isDirectory: true)
         XCTAssertThrowsError(try processor.run(items: [], inputRoot: input, outputRoot: rejectedOutput,
                                                recipe: futureRecipe, lut: nil,
                                                cancellation: CancellationToken(), onEvent: { _ in }))
@@ -1385,7 +1385,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed settings fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 22
+        future.version = 23
         XCTAssertThrowsError(try future.validateVersion())
         var invalid = CertificatePhotoSettings(enabled: true)
         invalid.shadow.shadowOpacity = 2
@@ -1585,7 +1585,7 @@ final class ColorCompatibilityTests: XCTestCase {
 
         // Version range and malformed make-up fail loudly.
         var future = Recipe(adjustments: AdjustmentSettings())
-        future.version = 22
+        future.version = 23
         XCTAssertThrowsError(try future.validateVersion())
         XCTAssertThrowsError(try PhotoEngine.validate({
             var value = AdjustmentSettings()

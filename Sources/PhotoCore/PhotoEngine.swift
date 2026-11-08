@@ -309,6 +309,7 @@ public final class PhotoEngine {
         if let makeup = settings.makeup, !makeup.isNeutral { _ = try makeup.validated() }
         if let facialZonal = settings.facialZonal, !facialZonal.isNeutral { _ = try facialZonal.validated() }
         if let eyeTeeth = settings.eyeTeeth, !eyeTeeth.isNeutral { _ = try eyeTeeth.validated() }
+        if let bodyReshape = settings.bodyReshape, !bodyReshape.isNeutral { _ = try bodyReshape.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -730,6 +731,26 @@ public final class PhotoEngine {
         }
         try cancellation?.check()
 
+        // P2-O: Smart body reshaping & skeletal posture refinement.
+        let hasActiveBodyReshape = (settings.bodyReshape != nil && !settings.bodyReshape!.isNeutral)
+            || (settings.multiPerson?.enabled == true && (settings.multiPerson?.individualProfiles.contains { $0.bodyReshapeOverride != nil && !$0.bodyReshapeOverride!.isNeutral } ?? false))
+        if hasActiveBodyReshape {
+            let activeSettings = settings.bodyReshape ?? BodyReshapeSettings(enabled: true)
+            let bodyReshapeResult = try BodyReshapeEngine.apply(
+                working, settings: activeSettings,
+                personMatte: preparedPersonMatte,
+                multiPerson: settings.multiPerson,
+                faceLandmarks: detectedFaces.isEmpty ? nil : detectedFaces,
+                context: context, cancellation: cancellation
+            )
+            working = bodyReshapeResult.image
+            report.bodyReshape = bodyReshapeResult.report
+            if let note = bodyReshapeResult.report.note, !bodyReshapeResult.report.applied {
+                report.warnings.append(note)
+            }
+        }
+        try cancellation?.check()
+
         // P2-G: Smart body and hand skin refinement (neck smoothing, vein reduction, body tone harmonization).
         if let bodySkin = settings.bodySkin, !bodySkin.isNeutral {
             let bodySkinResult = try BodySkinRefinementEngine.apply(
@@ -1142,6 +1163,10 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let bodyReshapeGroups = [adjustments.bodyReshape,
+                                 automatic?.baseline.bodyReshape,
+                                 automatic?.referenceSettings.bodyReshape]
+        if bodyReshapeGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) { return 22 }
         let eyeTeethGroups = [adjustments.eyeTeeth,
                               automatic?.baseline.eyeTeeth,
                               automatic?.referenceSettings.eyeTeeth]

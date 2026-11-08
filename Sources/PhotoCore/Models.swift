@@ -315,6 +315,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v21.
     /// Absent or disabled eye & teeth refinement keeps the pre-v21 path.
     public var eyeTeeth: EyeTeethRefinementSettings? = nil
+    /// Optional for exact compatibility with recipes written before v22.
+    /// Absent or disabled body reshaping & posture refinement keeps the pre-v22 path.
+    public var bodyReshape: BodyReshapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -833,6 +836,95 @@ public struct EyeTeethRefinementReport: Codable, Equatable {
     }
 }
 
+/// Settings for P2-O smart body reshaping & skeleton posture refinement.
+public struct BodyReshapeSettings: Codable, Equatable {
+    /// Master toggle for body reshaping. `false` leaves pixels unchanged.
+    public var enabled: Bool = false
+    /// Swan neck elongation and lateral narrowing (0...1).
+    public var swanNeck: Double = 0
+    /// Trapezius contraction and right-angle shoulder contouring (0...1).
+    public var trapeziusContraction: Double = 0
+    /// Overall body slimming and lateral torso reduction (0...1).
+    public var bodySlimming: Double = 0
+    /// Waist cinching and hourglass curve accentuation (0...1).
+    public var waistCinching: Double = 0
+    /// Leg lengthening and height proportion stretching (0...1).
+    public var legLengthening: Double = 0
+    /// Arm slimming and bicep/tricep width contraction (0...1).
+    public var armSlimming: Double = 0
+    /// Background distortion protection factor (0...1, default 0.8).
+    public var backgroundProtection: Double = 0.8
+
+    public init(enabled: Bool = false,
+                swanNeck: Double = 0,
+                trapeziusContraction: Double = 0,
+                bodySlimming: Double = 0,
+                waistCinching: Double = 0,
+                legLengthening: Double = 0,
+                armSlimming: Double = 0,
+                backgroundProtection: Double = 0.8) {
+        self.enabled = enabled
+        self.swanNeck = swanNeck
+        self.trapeziusContraction = trapeziusContraction
+        self.bodySlimming = bodySlimming
+        self.waistCinching = waistCinching
+        self.legLengthening = legLengthening
+        self.armSlimming = armSlimming
+        self.backgroundProtection = backgroundProtection
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            swanNeck == 0 &&
+            trapeziusContraction == 0 &&
+            bodySlimming == 0 &&
+            waistCinching == 0 &&
+            legLengthening == 0 &&
+            armSlimming == 0
+        )
+    }
+
+    public func validated() throws -> BodyReshapeSettings {
+        guard swanNeck.isFinite, (0...1).contains(swanNeck) else {
+            throw AtelierError.invalidConfiguration("天鹅颈强度必须在 0...1 之间。")
+        }
+        guard trapeziusContraction.isFinite, (0...1).contains(trapeziusContraction) else {
+            throw AtelierError.invalidConfiguration("直角肩/斜方肌收敛强度必须在 0...1 之间。")
+        }
+        guard bodySlimming.isFinite, (0...1).contains(bodySlimming) else {
+            throw AtelierError.invalidConfiguration("整体瘦身强度必须在 0...1 之间。")
+        }
+        guard waistCinching.isFinite, (0...1).contains(waistCinching) else {
+            throw AtelierError.invalidConfiguration("细腰收腹强度必须在 0...1 之间。")
+        }
+        guard legLengthening.isFinite, (0...1).contains(legLengthening) else {
+            throw AtelierError.invalidConfiguration("腿部拉长强度必须在 0...1 之间。")
+        }
+        guard armSlimming.isFinite, (0...1).contains(armSlimming) else {
+            throw AtelierError.invalidConfiguration("瘦手臂强度必须在 0...1 之间。")
+        }
+        guard backgroundProtection.isFinite, (0...1).contains(backgroundProtection) else {
+            throw AtelierError.invalidConfiguration("背景保护系数必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-O body reshaping & skeleton posture refinement pass.
+public struct BodyReshapeReport: Codable, Equatable {
+    public var applied: Bool
+    public var skeletonsDetected: Int
+    public var note: String?
+
+    public init(applied: Bool,
+                skeletonsDetected: Int = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.skeletonsDetected = skeletonsDetected
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1065,6 +1157,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var facialZonalOverride: FacialZonalRefinementSettings?
     /// Independent eye & teeth aesthetic refinement override.
     public var eyeTeethOverride: EyeTeethRefinementSettings?
+    /// Independent body reshaping & posture refinement override.
+    public var bodyReshapeOverride: BodyReshapeSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1073,7 +1167,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 portraitOverride: PortraitRefinementSettings? = nil,
                 makeupOverride: MakeupSettings? = nil,
                 facialZonalOverride: FacialZonalRefinementSettings? = nil,
-                eyeTeethOverride: EyeTeethRefinementSettings? = nil) {
+                eyeTeethOverride: EyeTeethRefinementSettings? = nil,
+                bodyReshapeOverride: BodyReshapeSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1082,6 +1177,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.makeupOverride = makeupOverride
         self.facialZonalOverride = facialZonalOverride
         self.eyeTeethOverride = eyeTeethOverride
+        self.bodyReshapeOverride = bodyReshapeOverride
     }
 
     public var isNeutral: Bool {
@@ -1089,7 +1185,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (portraitOverride == nil || portraitOverride!.isNeutral) &&
             (makeupOverride == nil || makeupOverride!.isNeutral) &&
             (facialZonalOverride == nil || facialZonalOverride!.isNeutral) &&
-            (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral)
+            (eyeTeethOverride == nil || eyeTeethOverride!.isNeutral) &&
+            (bodyReshapeOverride == nil || bodyReshapeOverride!.isNeutral)
         )
     }
 
@@ -1532,8 +1629,14 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...21).contains(version) else {
+        guard (1...22).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let bodyReshapeGroups = [adjustments.bodyReshape,
+                                 automatic?.baseline.bodyReshape,
+                                 automatic?.referenceSettings.bodyReshape]
+        guard version >= 22 || bodyReshapeGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) else {
+            throw AtelierError.invalidConfiguration("非中性的全身身形美化与姿态骨骼点塑形需要配方版本 22，不能静默降级。")
         }
         let eyeTeethGroups = [adjustments.eyeTeeth,
                               automatic?.baseline.eyeTeeth,
@@ -1939,6 +2042,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var multiPerson: MultiPersonReport?
     /// Per-photo P2-N eye catchlight, glare suppression and teeth refinement status. `nil` when absent or disabled.
     public var eyeTeeth: EyeTeethRefinementReport?
+    /// Per-photo P2-O body reshaping & skeleton posture refinement status. `nil` when absent or disabled.
+    public var bodyReshape: BodyReshapeReport?
     public init() {}
 }
 
