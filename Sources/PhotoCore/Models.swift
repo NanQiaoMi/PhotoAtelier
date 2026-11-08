@@ -345,6 +345,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v31.
     /// Absent or disabled facial contour keeps the pre-v31 path.
     public var facialContour: FacialContourSettings? = nil
+    /// Optional for exact compatibility with recipes written before v32.
+    /// Absent or disabled eyebrow reshaping keeps the pre-v32 path.
+    public var eyebrowReshape: EyebrowReshapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1879,6 +1882,92 @@ public struct FacialContourReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-Y smart eyebrow reshaping, wild brow hair-stroke texture & symmetry calibration.
+public struct EyebrowReshapeSettings: Codable, Equatable, Sendable {
+    /// Master toggle for eyebrow reshaping adjustments.
+    public var enabled: Bool = false
+    /// Eyebrow tail lift / 眉尾高度与走势提拉 (-0.5...0.5, default 0).
+    public var browTailLift: Double = 0
+    /// Eyebrow thickness modulation / 眉毛粗细饱满度微调 (-0.5...0.5, default 0).
+    public var browThickness: Double = 0
+    /// Eyebrow length & tail extension / 眉身长度与眉梢延展 (-0.5...0.5, default 0).
+    public var browLength: Double = 0
+    /// Bilateral eyebrow symmetry calibration / 双眉对称性智能校准 (0...1.0, default 0).
+    public var browSymmetry: Double = 0
+    /// Wild brow hair-stroke texture & density / 根根分明野生眉毛流感与密度充盈 (0...1.0, default 0).
+    public var wildBrowTexture: Double = 0
+    /// Brow bone 3D highlight & sub-brow shading / 眉骨 3D 立体高光与眉下阴影 (0...1.0, default 0).
+    public var brow3DContour: Double = 0
+
+    public init(enabled: Bool = false,
+                browTailLift: Double = 0,
+                browThickness: Double = 0,
+                browLength: Double = 0,
+                browSymmetry: Double = 0,
+                wildBrowTexture: Double = 0,
+                brow3DContour: Double = 0) {
+        self.enabled = enabled
+        self.browTailLift = max(-0.5, min(0.5, browTailLift))
+        self.browThickness = max(-0.5, min(0.5, browThickness))
+        self.browLength = max(-0.5, min(0.5, browLength))
+        self.browSymmetry = max(0.0, min(1.0, browSymmetry))
+        self.wildBrowTexture = max(0.0, min(1.0, wildBrowTexture))
+        self.brow3DContour = max(0.0, min(1.0, brow3DContour))
+    }
+
+    /// True when the settings cannot change pixels; the stage is skipped completely.
+    public var isNeutral: Bool {
+        !enabled || (
+            abs(browTailLift) <= 0.0001 &&
+            abs(browThickness) <= 0.0001 &&
+            abs(browLength) <= 0.0001 &&
+            browSymmetry <= 0.0001 &&
+            wildBrowTexture <= 0.0001 &&
+            brow3DContour <= 0.0001
+        )
+    }
+
+    public func validated() throws -> EyebrowReshapeSettings {
+        guard browTailLift.isFinite, (-0.5...0.5).contains(browTailLift) else {
+            throw AtelierError.invalidConfiguration("眉尾高度提拉程度必须在 -0.5...0.5 之间。")
+        }
+        guard browThickness.isFinite, (-0.5...0.5).contains(browThickness) else {
+            throw AtelierError.invalidConfiguration("眉毛粗细调节程度必须在 -0.5...0.5 之间。")
+        }
+        guard browLength.isFinite, (-0.5...0.5).contains(browLength) else {
+            throw AtelierError.invalidConfiguration("眉毛长度调节程度必须在 -0.5...0.5 之间。")
+        }
+        guard browSymmetry.isFinite, (0...1).contains(browSymmetry) else {
+            throw AtelierError.invalidConfiguration("双眉对称性校准强度必须在 0...1 之间。")
+        }
+        guard wildBrowTexture.isFinite, (0...1).contains(wildBrowTexture) else {
+            throw AtelierError.invalidConfiguration("野生眉毛流质感强度必须在 0...1 之间。")
+        }
+        guard brow3DContour.isFinite, (0...1).contains(brow3DContour) else {
+            throw AtelierError.invalidConfiguration("眉骨立体光影强度必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-Y smart eyebrow reshaping, wild brow hair-stroke texture & symmetry calibration pass.
+public struct EyebrowReshapeReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var executionTime: Double?
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                executionTime: Double? = nil,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.executionTime = executionTime
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -2129,6 +2218,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var jawChinReshapeOverride: JawChinReshapeSettings?
     /// Independent temples, cheekbones & facial contour smoothness micro-sculpting override.
     public var facialContourOverride: FacialContourSettings?
+    /// Independent eyebrow reshaping, wild brow texture & symmetry calibration override.
+    public var eyebrowReshapeOverride: EyebrowReshapeSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -2146,7 +2237,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 eyeShapeOverride: EyeShapeSettings? = nil,
                 noseReshapeOverride: NoseReshapeSettings? = nil,
                 jawChinReshapeOverride: JawChinReshapeSettings? = nil,
-                facialContourOverride: FacialContourSettings? = nil) {
+                facialContourOverride: FacialContourSettings? = nil,
+                eyebrowReshapeOverride: EyebrowReshapeSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -2164,6 +2256,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.noseReshapeOverride = noseReshapeOverride
         self.jawChinReshapeOverride = jawChinReshapeOverride
         self.facialContourOverride = facialContourOverride
+        self.eyebrowReshapeOverride = eyebrowReshapeOverride
     }
 
     public var isNeutral: Bool {
@@ -2180,7 +2273,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (eyeShapeOverride == nil || eyeShapeOverride!.isNeutral) &&
             (noseReshapeOverride == nil || noseReshapeOverride!.isNeutral) &&
             (jawChinReshapeOverride == nil || jawChinReshapeOverride!.isNeutral) &&
-            (facialContourOverride == nil || facialContourOverride!.isNeutral)
+            (facialContourOverride == nil || facialContourOverride!.isNeutral) &&
+            (eyebrowReshapeOverride == nil || eyebrowReshapeOverride!.isNeutral)
         )
     }
 
@@ -2623,8 +2717,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...31).contains(version) else {
+        guard (1...32).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let eyebrowReshapeGroups = [adjustments.eyebrowReshape,
+                                    automatic?.baseline.eyebrowReshape,
+                                    automatic?.referenceSettings.eyebrowReshape]
+        var hasEyebrowReshapeOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.eyebrowReshapeOverride, !o.isNeutral { hasEyebrowReshapeOverride = true; break }
+            }
+            if !hasEyebrowReshapeOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.eyebrowReshapeOverride, !o.isNeutral { hasEyebrowReshapeOverride = true; break }
+                }
+            }
+        }
+        guard version >= 32 || (eyebrowReshapeGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasEyebrowReshapeOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能眉形微雕、根根分明野生眉毛流感与双眉对称性矫正需要配方版本 32，不能静默降级。")
         }
         let facialContourGroups = [adjustments.facialContour,
                                    automatic?.baseline.facialContour,
@@ -3187,6 +3298,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var jawChinReshape: JawChinReshapeReport?
     /// Per-photo P2-X temples, cheekbones & facial contour smoothness status. `nil` when absent or disabled.
     public var facialContour: FacialContourReport?
+    /// Per-photo P2-Y eyebrow reshaping, wild brow texture & symmetry calibration status. `nil` when absent or disabled.
+    public var eyebrowReshape: EyebrowReshapeReport?
     public init() {}
 }
 

@@ -124,10 +124,15 @@ struct PortraitRetouchPanel: View {
                 eyeShapeSection
                 separator
                 noseReshapeSection
+            }
+
+            Group {
                 separator
                 jawChinReshapeSection
                 separator
                 facialContourSection
+                separator
+                eyebrowReshapeSection
             }
 
             Group {
@@ -1501,6 +1506,75 @@ struct PortraitRetouchPanel: View {
                 get: { model.facialContourSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateFacialContour { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart eyebrow reshaping, wild brow texture & symmetry calibration (P2-Y)
+
+    private var eyebrowReshapeSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("眉形微雕与野生眉", systemImage: "paintbrush.pointed")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.eyebrowReshapeIsActive {
+                    Button("重置") {
+                        model.resetEyebrowReshape()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.accent)
+                }
+            }
+
+            Text("眉尾提拉、粗细长短微调、双眉对称性校准、野生眉毛流质感与眉骨3D立体光影。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用智能眉形微雕", isOn: Binding(
+                get: { model.eyebrowReshapeSettings.enabled },
+                set: { model.setEyebrowReshapeEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.eyebrowReshapeSettings.enabled {
+                VStack(spacing: 8) {
+                    eyebrowReshapeSlider("眉尾走势提拉", \.browTailLift, range: -0.5...0.5,
+                                         help: "微调双侧眉尾高度：正值向上提拉抚平八字眉疲态提振眼神，负值舒缓过于上挑的眉毛。")
+                    eyebrowReshapeSlider("眉毛粗细饱满", \.browThickness, range: -0.5...0.5,
+                                         help: "微调眉毛上下厚度：正值增粗饱满稀疏细弱眉毛，负值纤细化生硬浓黑粗眉。")
+                    eyebrowReshapeSlider("眉身长度延展", \.browLength, range: -0.5...0.5,
+                                         help: "沿眉弓向外延伸短眉眉梢，协调三庭五眼外侧横向比例；负值适度收敛短眉梢。")
+                    eyebrowReshapeSlider("双眉对称校准", \.browSymmetry, range: 0...1,
+                                         help: "智能检测左右眉毛高度与曲率差异，平滑向平衡中轴对称态微调，矫正高低眉。")
+                    eyebrowReshapeSlider("野生眉毛流感", \.wildBrowTexture, range: 0...1,
+                                         help: "强化微观毛流边缘对比与毛发立体质感，智能填补断眉与稀疏缺口，重塑羽状野生眉。")
+                    eyebrowReshapeSlider("3D 眉骨立体光影", \.brow3DContour, range: 0...1,
+                                         help: "在眉弓外侧迎光面渲染珍珠柔光高光，并在眉下眼窝凹陷处叠加柔和深邃微阴影。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func eyebrowReshapeSlider(_ title: String,
+                                      _ keyPath: WritableKeyPath<EyebrowReshapeSettings, Double>,
+                                      range: ClosedRange<Double> = 0...1,
+                                      help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.eyebrowReshapeSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateEyebrowReshape { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

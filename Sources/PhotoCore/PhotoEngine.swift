@@ -319,6 +319,7 @@ public final class PhotoEngine {
         if let noseReshape = settings.noseReshape, !noseReshape.isNeutral { _ = try noseReshape.validated() }
         if let jawChinReshape = settings.jawChinReshape, !jawChinReshape.isNeutral { _ = try jawChinReshape.validated() }
         if let facialContour = settings.facialContour, !facialContour.isNeutral { _ = try facialContour.validated() }
+        if let eyebrowReshape = settings.eyebrowReshape, !eyebrowReshape.isNeutral { _ = try eyebrowReshape.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -657,6 +658,17 @@ public final class PhotoEngine {
                         appliedSteps.append("facialContour_\(idx + 1)")
                     }
 
+                    // 3j. Per-person Eyebrow Reshaping, Wild Brow Texture & Symmetry Calibration
+                    let effectiveEyebrowReshape = (profile?.enabled == true ? profile?.eyebrowReshapeOverride : nil) ?? settings.eyebrowReshape
+                    if let eb = effectiveEyebrowReshape, !eb.isNeutral, face.hasUsableGeometry {
+                        let res = EyebrowReshapeEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            settings: eb, perFaceMask: faceMask
+                        )
+                        working = res.image
+                        appliedSteps.append("eyebrowReshape_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -920,6 +932,26 @@ public final class PhotoEngine {
                     working = contourResult.image
                     report.facialContour = contourResult.report
                     if let note = contourResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-Y: Smart eyebrow reshaping, wild brow texture & symmetry calibration
+            if let eyebrowReshape = settings.eyebrowReshape, !eyebrowReshape.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，智能眉部微雕已跳过（原图保持不变）。"
+                    report.eyebrowReshape = EyebrowReshapeReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let ebResult = EyebrowReshapeEngine.apply(
+                        to: working, faces: faces, settings: eyebrowReshape
+                    )
+                    working = ebResult.image
+                    report.eyebrowReshape = ebResult.report
+                    if let note = ebResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1437,6 +1469,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let eyebrowReshapeGroups = [adjustments.eyebrowReshape,
+                                    automatic?.baseline.eyebrowReshape,
+                                    automatic?.referenceSettings.eyebrowReshape]
+        var hasEyebrowReshapeOverride = false
+        let multiSettingsForEyebrowReshape = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForEyebrowReshape {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.eyebrowReshapeOverride, !o.isNeutral { hasEyebrowReshapeOverride = true; break }
+            }
+            if hasEyebrowReshapeOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.eyebrowReshapeOverride, !o.isNeutral { hasEyebrowReshapeOverride = true; break }
+            }
+            if hasEyebrowReshapeOverride { break }
+        }
+        if eyebrowReshapeGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasEyebrowReshapeOverride { return 32 }
         let facialContourGroups = [adjustments.facialContour,
                                    automatic?.baseline.facialContour,
                                    automatic?.referenceSettings.facialContour]

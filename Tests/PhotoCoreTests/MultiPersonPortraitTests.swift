@@ -203,9 +203,9 @@ final class MultiPersonPortraitTests: XCTestCase {
         recipe.version = 20
         XCTAssertNoThrow(try recipe.validateVersion(), "Recipe version 20 should validate successfully")
 
-        // Version 32 is currently invalid
-        recipe.version = 32
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version > 31 should be rejected")
+        // Version 33 is currently invalid
+        recipe.version = 33
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version > 32 should be rejected")
     }
 
     func testDefaultProfilesForAllDemographicRoles() {
