@@ -3188,6 +3188,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能微表情与微笑唇形微雕设置。"
     }
 
+    // MARK: - Smart eye shape reshaping & mid-face balance (P2-U)
+
+    var eyeShapeSettings: EyeShapeSettings {
+        adjustments.eyeShape ?? EyeShapeSettings()
+    }
+
+    var eyeShapeIsActive: Bool {
+        adjustments.eyeShape.map { !$0.isNeutral } ?? false
+    }
+
+    func updateEyeShape(_ mutate: (inout EyeShapeSettings) -> Void) {
+        var settings = adjustments.eyeShape ?? EyeShapeSettings()
+        mutate(&settings)
+        adjustments.eyeShape = settings
+    }
+
+    func setEyeShapeEnabled(_ enabled: Bool) {
+        updateEyeShape { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能眼型微雕与眼位平衡已启用：开内外眼角、眼型圆润度、眼位倾斜校准、眼距微调与中庭缩短。"
+            : "智能眼型微雕与眼位平衡已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetEyeShape() {
+        adjustments.eyeShape = nil
+        status = "已重置智能眼型微雕与眼位平衡设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

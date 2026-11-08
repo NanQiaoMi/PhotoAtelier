@@ -77,6 +77,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart facial micro-expression, smile & lip shape enhancement.
     public var expression: Bool = true
 
+    /// Smart eye shape reshaping, canthoplasty & mid-face proportion balance.
+    public var eyeShape: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -123,6 +126,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         hairColor: Bool = true,
         facialHair: Bool = true,
         expression: Bool = true,
+        eyeShape: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -155,6 +159,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.hairColor = hairColor
         self.facialHair = facialHair
         self.expression = expression
+        self.eyeShape = eyeShape
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -191,6 +196,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             hairColor: true,
             facialHair: true,
             expression: true,
+            eyeShape: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -228,6 +234,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             hairColor: true,
             facialHair: true,
             expression: true,
+            eyeShape: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -263,6 +270,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             hairColor: false,
             facialHair: false,
             expression: false,
+            eyeShape: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -298,6 +306,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             hairColor: false,
             facialHair: false,
             expression: false,
+            eyeShape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -333,6 +342,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             hairColor: false,
             facialHair: false,
             expression: false,
+            eyeShape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -509,6 +519,11 @@ public enum AdjustmentSyncEngine {
         // 15i. Smart facial micro-expression, smile & lip shape enhancement
         if options.expression {
             result.expression = source.expression
+        }
+
+        // 15j. Smart eye shape reshaping, canthoplasty & mid-face proportion balance
+        if options.eyeShape {
+            result.eyeShape = source.eyeShape
         }
 
         // 16. Lens effects & corrections

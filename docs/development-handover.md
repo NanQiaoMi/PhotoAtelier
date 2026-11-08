@@ -168,6 +168,12 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 | v20 | 多人脸属性感知与分组独立精修（`multiPerson`） |
 | v21 | 智能眼神光、眼镜去反光与牙齿美学精修（`eyeTeeth`） |
 | v22 | 智能全身身形姿态美化与骨骼点塑形（`bodyReshape`） |
+| v23 | 智能双眼皮雕刻、双眼皮贴修饰与卧蚕立体塑形（`eyelidAegyoSal`） |
+| v24 | 智能全景背景光斑虚化与景深重构（`bokehBlur`） |
+| v25 | 智能发色统一、白发消除与自然换发色（`hairColor`） |
+| v26 | 智能面部唇毛与胡青消除、特征痣管理（`facialHair`） |
+| v27 | 智能面部微表情、微笑嘴角与唇形立体微雕（`expression`） |
+| v28 | 智能眼型微雕、开眼角与眼位中庭平衡（`eyeShape`） |
 
 ---
 

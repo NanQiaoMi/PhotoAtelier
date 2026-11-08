@@ -235,9 +235,9 @@ final class ExpressionTests: XCTestCase {
         recipe.version = 27
         XCTAssertNoThrow(try recipe.validateVersion())
 
-        // Future version 28 should fail
-        recipe.version = 28
-        XCTAssertThrowsError(try recipe.validateVersion(), "Version 28 is future unsupported")
+        // Future version 29 should fail
+        recipe.version = 29
+        XCTAssertThrowsError(try recipe.validateVersion(), "Version 29 is future unsupported")
 
         // PhotoEngine requiredRecipeVersion check
         let requiredVersion = PhotoEngine.requiredRecipeVersion(adjustments: recipe.adjustments, automatic: nil)

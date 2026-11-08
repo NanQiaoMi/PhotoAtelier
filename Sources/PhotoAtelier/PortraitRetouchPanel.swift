@@ -117,6 +117,8 @@ struct PortraitRetouchPanel: View {
                 facialHairSection
                 separator
                 expressionSection
+                separator
+                eyeShapeSection
             }
 
             Group {
@@ -1210,6 +1212,77 @@ struct PortraitRetouchPanel: View {
                 get: { model.expressionSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateExpression { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart eye shape reshaping & mid-face balance (P2-U)
+
+    private var eyeShapeSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("眼型微雕与眼位平衡", systemImage: "eye")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.eyeShapeIsActive {
+                    Button("重置") {
+                        model.resetEyeShape()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("眼部解剖学美学微雕：智能微开内外眼角，无辜眼尾下至延展，调节眼型圆润度与猫眼走势，校准眼位倾斜与高低眼，优化双眼间距与中庭垂直比例（幼态短中庭），平衡双眼对称性。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用眼型微雕与眼位平衡", isOn: Binding(
+                get: { model.eyeShapeSettings.enabled },
+                set: { model.setEyeShapeEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.eyeShapeSettings.enabled {
+                VStack(spacing: 8) {
+                    eyeShapeSlider("开内眼角", \.innerCanthoplasty, range: 0...1,
+                                   help: "适度向鼻侧微开内眼角，平缓内眦赘皮，拉近内眼角距离。")
+                    eyeShapeSlider("开外眼角与眼尾下至", \.outerCanthoplasty, range: 0...1,
+                                   help: "向外横向延展外眼角并轻微向下微调，打造混血无辜大眼轮廓。")
+                    eyeShapeSlider("眼型圆润度 (小鹿眼/猫眼)", \.eyeRoundness, range: -0.5...0.5,
+                                   help: "正值增加上下眼睑弧度打造灵动小鹿圆眼，负值收紧眼睑形成狭长高级猫眼。")
+                    eyeShapeSlider("眼位倾斜校准 (吊眼/下垂眼)", \.eyeTilt, range: -0.5...0.5,
+                                   help: "旋转校准内外眼角倾斜轴：正值上扬外眼角（上扬魅惑），负值下垂外眼角（温柔无辜）。")
+                    eyeShapeSlider("眼距微调", \.interpupillaryDistance, range: -0.5...0.5,
+                                   help: "整体微调双眼间距：正值拉开眼距，负值聚拢眼距，协调三庭五眼。")
+                    eyeShapeSlider("眼位垂直与中庭缩短", \.eyeVerticalPosition, range: -0.5...0.5,
+                                   help: "整体垂直移动双眼：正值下移双眼缩短中庭打造幼态比例，负值上移双眼。")
+                    eyeShapeSlider("双眼大小与对称性", \.eyeSymmetry, range: 0...1,
+                                   help: "自动探测左右眼大小与高低差异，平抑倾斜高低眼与不对称大小眼。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func eyeShapeSlider(_ title: String,
+                                _ keyPath: WritableKeyPath<EyeShapeSettings, Double>,
+                                range: ClosedRange<Double> = 0...1,
+                                help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.eyeShapeSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateEyeShape { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range
