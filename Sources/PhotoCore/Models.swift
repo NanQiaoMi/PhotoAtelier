@@ -339,6 +339,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v29.
     /// Absent or disabled nose reshaping & 3D bridge contouring keeps the pre-v29 path.
     public var noseReshape: NoseReshapeSettings? = nil
+    /// Optional for exact compatibility with recipes written before v30.
+    /// Absent or disabled jawline & chin reshaping keeps the pre-v30 path.
+    public var jawChinReshape: JawChinReshapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1702,6 +1705,91 @@ public struct NoseReshapeReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-W smart jawline sculpting, chin reshaping & lower-face proportions.
+public struct JawChinReshapeSettings: Codable, Equatable, Sendable {
+    /// Master toggle for jaw & chin reshaping adjustments.
+    public var enabled: Bool = false
+    /// Narrow or broaden jaw angles & gonial width / 下颌角收窄与折角微雕 (-0.5...0.5, default 0).
+    public var jawWidth: Double = 0
+    /// Chin length modulation / 下巴长度调节与下庭平衡 (-0.5...0.5, default 0).
+    public var chinLength: Double = 0
+    /// Chin forward projection & perkiness / 下巴翘度微调（解决下巴后缩） (-0.5...0.5, default 0).
+    public var chinProjection: Double = 0
+    /// Chin shape sculpting / 下巴形态微雕（圆幼下巴 vs 精致V脸） (-0.5...0.5, default 0).
+    public var chinShape: Double = 0
+    /// Mandibular jawline tightening / 下颌缘紧致与线条清晰度 (0...1, default 0).
+    public var jawlineTighten: Double = 0
+    /// Chin 3D specular highlight & submental micro-shading / 下巴微光立体修容 (0...1, default 0).
+    public var chinContour: Double = 0
+
+    public init(enabled: Bool = false,
+                jawWidth: Double = 0,
+                chinLength: Double = 0,
+                chinProjection: Double = 0,
+                chinShape: Double = 0,
+                jawlineTighten: Double = 0,
+                chinContour: Double = 0) {
+        self.enabled = enabled
+        self.jawWidth = max(-0.5, min(0.5, jawWidth))
+        self.chinLength = max(-0.5, min(0.5, chinLength))
+        self.chinProjection = max(-0.5, min(0.5, chinProjection))
+        self.chinShape = max(-0.5, min(0.5, chinShape))
+        self.jawlineTighten = max(0.0, min(1.0, jawlineTighten))
+        self.chinContour = max(0.0, min(1.0, chinContour))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            abs(jawWidth) <= 0.0001 &&
+            abs(chinLength) <= 0.0001 &&
+            abs(chinProjection) <= 0.0001 &&
+            abs(chinShape) <= 0.0001 &&
+            jawlineTighten <= 0.0001 &&
+            chinContour <= 0.0001
+        )
+    }
+
+    public func validated() throws -> JawChinReshapeSettings {
+        guard jawWidth.isFinite, (-0.5...0.5).contains(jawWidth) else {
+            throw AtelierError.invalidConfiguration("下颌角收窄调节程度必须在 -0.5...0.5 之间。")
+        }
+        guard chinLength.isFinite, (-0.5...0.5).contains(chinLength) else {
+            throw AtelierError.invalidConfiguration("下巴长度调节程度必须在 -0.5...0.5 之间。")
+        }
+        guard chinProjection.isFinite, (-0.5...0.5).contains(chinProjection) else {
+            throw AtelierError.invalidConfiguration("下巴翘度微调程度必须在 -0.5...0.5 之间。")
+        }
+        guard chinShape.isFinite, (-0.5...0.5).contains(chinShape) else {
+            throw AtelierError.invalidConfiguration("下巴形态微雕程度必须在 -0.5...0.5 之间。")
+        }
+        guard jawlineTighten.isFinite, (0...1).contains(jawlineTighten) else {
+            throw AtelierError.invalidConfiguration("下颌缘紧致强度必须在 0...1 之间。")
+        }
+        guard chinContour.isFinite, (0...1).contains(chinContour) else {
+            throw AtelierError.invalidConfiguration("下巴立体高光与修容强度必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-W smart jawline sculpting, chin reshaping & lower-face proportions pass.
+public struct JawChinReshapeReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var executionTime: Double?
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                executionTime: Double? = nil,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.executionTime = executionTime
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1948,6 +2036,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var eyeShapeOverride: EyeShapeSettings?
     /// Independent nose reshaping, 3D bridge contouring & structural correction override.
     public var noseReshapeOverride: NoseReshapeSettings?
+    /// Independent jawline sculpting, chin reshaping & lower-face proportions override.
+    public var jawChinReshapeOverride: JawChinReshapeSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1963,7 +2053,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 facialHairOverride: FacialHairSettings? = nil,
                 expressionOverride: ExpressionSettings? = nil,
                 eyeShapeOverride: EyeShapeSettings? = nil,
-                noseReshapeOverride: NoseReshapeSettings? = nil) {
+                noseReshapeOverride: NoseReshapeSettings? = nil,
+                jawChinReshapeOverride: JawChinReshapeSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1979,6 +2070,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.expressionOverride = expressionOverride
         self.eyeShapeOverride = eyeShapeOverride
         self.noseReshapeOverride = noseReshapeOverride
+        self.jawChinReshapeOverride = jawChinReshapeOverride
     }
 
     public var isNeutral: Bool {
@@ -1993,7 +2085,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (facialHairOverride == nil || facialHairOverride!.isNeutral) &&
             (expressionOverride == nil || expressionOverride!.isNeutral) &&
             (eyeShapeOverride == nil || eyeShapeOverride!.isNeutral) &&
-            (noseReshapeOverride == nil || noseReshapeOverride!.isNeutral)
+            (noseReshapeOverride == nil || noseReshapeOverride!.isNeutral) &&
+            (jawChinReshapeOverride == nil || jawChinReshapeOverride!.isNeutral)
         )
     }
 
@@ -2436,8 +2529,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...29).contains(version) else {
+        guard (1...30).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let jawChinReshapeGroups = [adjustments.jawChinReshape,
+                                    automatic?.baseline.jawChinReshape,
+                                    automatic?.referenceSettings.jawChinReshape]
+        var hasJawChinReshapeOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.jawChinReshapeOverride, !o.isNeutral { hasJawChinReshapeOverride = true; break }
+            }
+            if !hasJawChinReshapeOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.jawChinReshapeOverride, !o.isNeutral { hasJawChinReshapeOverride = true; break }
+                }
+            }
+        }
+        guard version >= 30 || (jawChinReshapeGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasJawChinReshapeOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能下颌角/下巴微雕与面部下庭轮廓重塑需要配方版本 30，不能静默降级。")
         }
         let noseReshapeGroups = [adjustments.noseReshape,
                                  automatic?.baseline.noseReshape,
@@ -2962,6 +3072,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var eyeShape: EyeShapeReport?
     /// Per-photo P2-V nose reshaping, 3D bridge contouring & structural correction status. `nil` when absent or disabled.
     public var noseReshape: NoseReshapeReport?
+    /// Per-photo P2-W jawline sculpting, chin reshaping & lower-face proportions status. `nil` when absent or disabled.
+    public var jawChinReshape: JawChinReshapeReport?
     public init() {}
 }
 

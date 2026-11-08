@@ -317,6 +317,7 @@ public final class PhotoEngine {
         if let expression = settings.expression, !expression.isNeutral { _ = try expression.validated() }
         if let eyeShape = settings.eyeShape, !eyeShape.isNeutral { _ = try eyeShape.validated() }
         if let noseReshape = settings.noseReshape, !noseReshape.isNeutral { _ = try noseReshape.validated() }
+        if let jawChinReshape = settings.jawChinReshape, !jawChinReshape.isNeutral { _ = try jawChinReshape.validated() }
         if let pet = settings.petEnhancement, !pet.isNeutral { _ = try pet.validated() }
         if let sky = settings.sky, !sky.isNeutral { _ = try sky.validated() }
         if let portrait = settings.portrait { try PortraitRefinementEngine.validate(portrait) }
@@ -633,6 +634,17 @@ public final class PhotoEngine {
                         appliedSteps.append("noseReshape_\(idx + 1)")
                     }
 
+                    // 3h. Per-person Jawline Sculpting, Chin Reshaping & Lower-Face Proportions
+                    let effectiveJawChinReshape = (profile?.enabled == true ? profile?.jawChinReshapeOverride : nil) ?? settings.jawChinReshape
+                    if let jc = effectiveJawChinReshape, !jc.isNeutral, face.hasUsableGeometry {
+                        let res = JawChinReshapeEngine.applyPerPerson(
+                            to: working, face: face, faceIndex: idx,
+                            settings: jc, perFaceMask: faceMask
+                        )
+                        working = res.image
+                        appliedSteps.append("jawChinReshape_\(idx + 1)")
+                    }
+
                     // 4. Per-person Makeup
                     let effectiveMakeup = (profile?.enabled == true ? profile?.makeupOverride : nil) ?? settings.makeup
                     if let m = effectiveMakeup, !m.isNeutral, face.hasUsableGeometry {
@@ -856,6 +868,26 @@ public final class PhotoEngine {
                     working = noseResult.image
                     report.noseReshape = noseResult.report
                     if let note = noseResult.report.note {
+                        report.warnings.append(note)
+                    }
+                }
+            }
+            try cancellation?.check()
+
+            // P2-W: Smart jawline sculpting, chin reshaping & lower-face proportions
+            if let jawChin = settings.jawChinReshape, !jawChin.isNeutral {
+                let faces = detectedFaces
+                if faces.isEmpty {
+                    let note = "未检测到可用人脸，智能下颌与下巴微雕已跳过（原图保持不变）。"
+                    report.jawChinReshape = JawChinReshapeReport(applied: false, faceCount: 0, note: note)
+                    report.warnings.append(note)
+                } else {
+                    let jawResult = JawChinReshapeEngine.apply(
+                        to: working, faces: faces, settings: jawChin
+                    )
+                    working = jawResult.image
+                    report.jawChinReshape = jawResult.report
+                    if let note = jawResult.report.note {
                         report.warnings.append(note)
                     }
                 }
@@ -1373,6 +1405,23 @@ public final class PhotoEngine {
         let lensEffects = [adjustments.lensEffects,
                            automatic?.baseline.lensEffects,
                            automatic?.referenceSettings.lensEffects]
+        let jawChinReshapeGroups = [adjustments.jawChinReshape,
+                                    automatic?.baseline.jawChinReshape,
+                                    automatic?.referenceSettings.jawChinReshape]
+        var hasJawChinReshapeOverride = false
+        let multiSettingsForJawChinReshape = [adjustments.multiPerson, automatic?.baseline.multiPerson, automatic?.referenceSettings.multiPerson]
+        for mp in multiSettingsForJawChinReshape {
+            guard let mp, mp.enabled else { continue }
+            for p in mp.individualProfiles where p.enabled {
+                if let o = p.jawChinReshapeOverride, !o.isNeutral { hasJawChinReshapeOverride = true; break }
+            }
+            if hasJawChinReshapeOverride { break }
+            for p in mp.demographicDefaults.values where p.enabled {
+                if let o = p.jawChinReshapeOverride, !o.isNeutral { hasJawChinReshapeOverride = true; break }
+            }
+            if hasJawChinReshapeOverride { break }
+        }
+        if jawChinReshapeGroups.contains(where: { $0.map { !$0.isNeutral } ?? false }) || hasJawChinReshapeOverride { return 30 }
         let noseReshapeGroups = [adjustments.noseReshape,
                                  automatic?.baseline.noseReshape,
                                  automatic?.referenceSettings.noseReshape]

@@ -3248,6 +3248,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能鼻部微雕与立体塑形设置。"
     }
 
+    // MARK: - Smart jawline sculpting, chin reshaping & lower-face proportions (P2-W)
+
+    var jawChinReshapeSettings: JawChinReshapeSettings {
+        adjustments.jawChinReshape ?? JawChinReshapeSettings()
+    }
+
+    var jawChinReshapeIsActive: Bool {
+        adjustments.jawChinReshape.map { !$0.isNeutral } ?? false
+    }
+
+    func updateJawChinReshape(_ mutate: (inout JawChinReshapeSettings) -> Void) {
+        var settings = adjustments.jawChinReshape ?? JawChinReshapeSettings()
+        mutate(&settings)
+        adjustments.jawChinReshape = settings
+    }
+
+    func setJawChinReshapeEnabled(_ enabled: Bool) {
+        updateJawChinReshape { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "智能下颌与下巴微雕已启用：下颌角收窄、下巴长短翘度微调、精致V脸/幼态圆下巴塑形、下颌缘紧致与3D立体高光修容。"
+            : "智能下颌与下巴微雕已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetJawChinReshape() {
+        adjustments.jawChinReshape = nil
+        status = "已重置智能下颌与下巴微雕设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
