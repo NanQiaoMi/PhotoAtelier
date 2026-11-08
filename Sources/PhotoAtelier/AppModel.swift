@@ -3338,6 +3338,36 @@ final class AppModel: ObservableObject {
         status = "已重置智能眉形微雕设置。"
     }
 
+    // MARK: - Smart facial bone 3D contour shading, facial folding angle & studio lighting (P2-Z)
+
+    var facialBoneContourSettings: FacialBoneContourSettings {
+        adjustments.facialBoneContour ?? FacialBoneContourSettings()
+    }
+
+    var facialBoneContourIsActive: Bool {
+        adjustments.facialBoneContour.map { !$0.isNeutral } ?? false
+    }
+
+    func updateFacialBoneContour(_ mutate: (inout FacialBoneContourSettings) -> Void) {
+        var settings = adjustments.facialBoneContour ?? FacialBoneContourSettings()
+        mutate(&settings)
+        adjustments.facialBoneContour = settings
+    }
+
+    func setFacialBoneContourEnabled(_ enabled: Bool) {
+        updateFacialBoneContour { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "全脸骨相光影修容已启用：面部折叠度、T区/C区立体高光、面颊与下颌修容阴影、人中高光与修容色温。"
+            : "全脸骨相光影修容已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetFacialBoneContour() {
+        adjustments.facialBoneContour = nil
+        status = "已重置全脸骨相光影修容设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {

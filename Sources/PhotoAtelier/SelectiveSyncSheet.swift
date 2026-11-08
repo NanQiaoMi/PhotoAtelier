@@ -93,12 +93,15 @@ struct SelectiveSyncSheet: View {
                                 Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
                                 Toggle("智能发色统一与白发消除 (去白发银丝/发色斑驳统一/7款沙龙发色)", isOn: $model.syncOptions.hairColor)
                                 Toggle("智能面部唇毛与胡青消除、特征痣管理 (去唇毛/去胡青/胡茬平滑/特征痣保留与消除)", isOn: $model.syncOptions.facialHair)
+                            }
+                            Group {
                                 Toggle("智能面部微表情与微笑唇形立体微雕 (微笑嘴角上扬/微笑宽度/唇角对称/幼态人中缩短/丰唇/唇峰珠光立体)", isOn: $model.syncOptions.expression)
                                 Toggle("智能眼型微雕与眼位平衡 (开内眼角/开外眼角眼尾下至/圆润猫眼/眼位倾斜/眼距微调/中庭比例缩短/双眼对称)", isOn: $model.syncOptions.eyeShape)
                                 Toggle("智能鼻部微雕与立体塑形 (鼻翼收窄/鼻头微缩/鼻梁挺拔/朝天鼻鹰钩鼻矫正/驼峰抚平/鼻长中庭平衡/3D立体高光修容)", isOn: $model.syncOptions.noseReshape)
                                 Toggle("智能下颌角与下巴微雕重塑 (下颌角收窄/下巴长短翘度/精致V脸幼态圆下巴/下颌缘紧致/下巴3D立体高光修容)", isOn: $model.syncOptions.jawChinReshape)
                                 Toggle("智能太阳穴/颧骨与面部外轮廓微雕 (太阳穴充盈/颧骨内推/面颊丰盈/外轮廓平滑/苹果肌提拉/3D轮廓立体光影)", isOn: $model.syncOptions.facialContour)
                                 Toggle("智能眉形微雕与野生眉毛流质感 (眉尾提拉/眉毛粗细长短/双眉对称性校准/野生眉毛流质感/眉骨3D立体光影)", isOn: $model.syncOptions.eyebrowReshape)
+                                Toggle("智能全脸骨相光影与面部折叠度微雕 (面部折叠度/T区立体高光/C区珍珠光泽/面颊侧影/下颌线下阴影/人中唇峰高光/修容色温)", isOn: $model.syncOptions.facialBoneContour)
                             }
                         }
                         .toggleStyle(.checkbox)
