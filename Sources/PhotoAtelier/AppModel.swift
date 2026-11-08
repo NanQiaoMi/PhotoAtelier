@@ -2948,6 +2948,66 @@ final class AppModel: ObservableObject {
         status = "已重置眼神光与牙齿美学精修设置。"
     }
 
+    // MARK: - Smart body reshaping & skeleton posture refinement (P2-O)
+
+    var bodyReshapeSettings: BodyReshapeSettings {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            return effectiveBodyReshape(forPersonIndex: idx)
+        }
+        return adjustments.bodyReshape ?? BodyReshapeSettings()
+    }
+
+    var bodyReshapeIsActive: Bool {
+        adjustments.bodyReshape.map { !$0.isNeutral } ?? false
+    }
+
+    func updateBodyReshape(_ mutate: (inout BodyReshapeSettings) -> Void) {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            var mp = adjustments.multiPerson ?? MultiPersonSettings(enabled: true)
+            mp.enabled = true
+            let role = assignedRole(forPersonIndex: idx)
+            if let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                var br = mp.individualProfiles[pIdx].bodyReshapeOverride ?? adjustments.bodyReshape ?? BodyReshapeSettings()
+                mutate(&br)
+                mp.individualProfiles[pIdx].bodyReshapeOverride = br
+            } else {
+                var br = adjustments.bodyReshape ?? BodyReshapeSettings()
+                mutate(&br)
+                var prof = PersonPortraitProfile.defaultProfile(for: role)
+                prof.faceIndex = idx
+                prof.bodyReshapeOverride = br
+                mp.individualProfiles.append(prof)
+            }
+            adjustments.multiPerson = mp
+        } else {
+            var settings = adjustments.bodyReshape ?? BodyReshapeSettings()
+            mutate(&settings)
+            adjustments.bodyReshape = settings
+        }
+    }
+
+    func setBodyReshapeEnabled(_ enabled: Bool) {
+        updateBodyReshape { settings in
+            settings.enabled = enabled
+        }
+        status = enabled
+            ? "全身身形与姿态塑形已启用：天鹅颈、直角肩、整体瘦身、细腰、长腿增高、瘦手臂与背景保护。"
+            : "全身身形与姿态塑形已关闭（显式中性）：不改像素，原有路径保持不变。"
+    }
+
+    func resetBodyReshape() {
+        if let idx = selectedPersonIndex, (adjustments.multiPerson?.enabled ?? false) {
+            if var mp = adjustments.multiPerson,
+               let pIdx = mp.individualProfiles.firstIndex(where: { $0.faceIndex == idx }) {
+                mp.individualProfiles[pIdx].bodyReshapeOverride = nil
+                adjustments.multiPerson = mp
+            }
+        } else {
+            adjustments.bodyReshape = nil
+        }
+        status = "已重置全身身形与姿态塑形设置。"
+    }
+
     // MARK: - Smart pet enhancement (P2-I)
 
     var petEnhancementSettings: PetEnhancementSettings {
@@ -3390,6 +3450,16 @@ final class AppModel: ObservableObject {
             }
         }
         return adjustments.eyeTeeth ?? EyeTeethRefinementSettings()
+    }
+
+    func effectiveBodyReshape(forPersonIndex idx: Int?) -> BodyReshapeSettings {
+        if let idx, let multiPerson = adjustments.multiPerson, multiPerson.enabled {
+            let role = assignedRole(forPersonIndex: idx)
+            if let profile = multiPerson.profile(for: idx, detectedRole: role), let br = profile.bodyReshapeOverride {
+                return br
+            }
+        }
+        return adjustments.bodyReshape ?? BodyReshapeSettings()
     }
 
     func assignedRole(forPersonIndex idx: Int) -> PersonDemographicRole {

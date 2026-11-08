@@ -167,6 +167,7 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 | v19 | 智能天空识别、氛围增强与置换 |
 | v20 | 多人脸属性感知与分组独立精修（`multiPerson`） |
 | v21 | 智能眼神光、眼镜去反光与牙齿美学精修（`eyeTeeth`） |
+| v22 | 智能全身身形姿态美化与骨骼点塑形（`bodyReshape`） |
 
 ---
 
@@ -346,6 +347,9 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **P2-J：智能天空识别、氛围增强与置换** | ✅ 已交付 (`feat/p2j-sky-enhancement-relighting`) | 基于 Vision 地平线检测结合人物遮罩切分、Core Image 湛蓝天色还原、积云立体反差增强、地平线晚霞金橙氛围、5种程序化天空置换预设与前景环境光照匹配；配方版本升级至 19 | 原生 CIColorKernel，单帧 < 5ms，613 测试全绿 |
 | **P2-K：选择性参数复制与多选批量同步** | ✅ 已交付 (`feat/p2k-selective-sync-per-photo-adjustments`) | 细粒度 12+ 模块选择性参数复制、多选批量同步、单图独立配方目录持久化（FolderCatalog v2）与单步批量撤销 | 纯 Swift 原生合并引擎，零模型开销，620 测试全绿 |
 | **P2-L：虚拟副本与多版本对比** | ✅ 已交付 (`feat/p2l-virtual-copies-version-branching`) | 零额外磁盘开销多版本派生、跨会话目录持久化（FolderCatalog v3）、前后对比双维度（原片/主版本 vs 副本）、多版本展开批量导出与胶片条快速切换 | 纯元数据驱动，零额外磁盘开销，630 测试全绿 |
+| **P2-M：多人脸属性感知与分组独立精修** | ✅ 已交付 (`feat/p2m-multi-person-demographic-retouch`) | 基于 Vision 人脸属性的多人独立分组（男女童老）、独立人像/妆容/五区覆盖、多人肤色锚点统一与批量复制同步；配方版本升级至 20 | 原生 CIColorKernel，单帧 < 5ms，638 测试全绿 |
+| **P2-N：智能眼神光、眼镜去反光与牙齿美学精修** | ✅ 已交付 (`feat/p2n-smart-eye-clarity-teeth-restoration`) | 基于 Vision 地标的眼镜镜片去反光、眼白去红血丝浊黄、虹膜明眸深邃、6款摄影级眼神光图案光栅化、牙齿茶渍口红印净化与半透明珐琅质微光注入；配方版本升级至 21 | 原生 CIColorKernel，单帧 < 5ms，647 测试全绿 |
+| **P2-O：智能全身身形姿态美化与骨骼点塑形** | ✅ 已交付 (`feat/p2o-body-reshaping-posture`) | 基于 macOS 原生 `VNDetectHumanBodyPoseRequest` 14处关键骨骼点、解剖学形变场映射（天鹅颈/直角肩/整体瘦身/细腰/长腿增高/瘦手臂）与背景形变锚定保护；配方版本升级至 22 | 原生 Core Image GPU Mesh 栅格，单帧 < 8ms，659 测试全绿 |
 | 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
 | RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |

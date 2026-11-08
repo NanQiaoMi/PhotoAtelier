@@ -337,6 +337,50 @@ public struct WarpField: Equatable {
         }
     }
 
+    /// Background protection: keeps the displacement full inside the envelope of
+    /// anatomical body joint segments and fades it to zero outside `radius + feather`
+    /// proportional to `protection` (0...1).
+    public mutating func attenuateOutsideEnvelope(segments: [(CGPoint, CGPoint, Double)],
+                                                   protection: Double,
+                                                   feather: Double) {
+        guard protection > 0, !segments.isEmpty, feather > 0 else { return }
+        let p = Float(min(1, max(0, protection)))
+        for row in 0..<rows {
+            let y = 1 - (Double(row) + 0.5) / Double(rows)
+            for column in 0..<columns {
+                let x = (Double(column) + 0.5) / Double(columns)
+                let pt = CGPoint(x: x, y: y)
+                var minExcess = Double.greatestFiniteMagnitude
+                for (a, b, radius) in segments {
+                    let abx = b.x - a.x
+                    let aby = b.y - a.y
+                    let abLenSq = abx * abx + aby * aby
+                    let t: Double
+                    if abLenSq > 1e-9 {
+                        let apx = pt.x - a.x
+                        let apy = pt.y - a.y
+                        t = max(0, min(1, (apx * abx + apy * aby) / abLenSq))
+                    } else {
+                        t = 0
+                    }
+                    let projX = a.x + t * abx
+                    let projY = a.y + t * aby
+                    let dx = pt.x - projX
+                    let dy = pt.y - projY
+                    let dist = (dx * dx + dy * dy).squareRoot()
+                    let excess = dist - radius
+                    if excess < minExcess { minExcess = excess }
+                }
+                if minExcess > 0 {
+                    let t = min(1.0, minExcess / feather)
+                    let weight = Float(1.0 - Double(p) * (t * t * (3 - 2 * t)))
+                    let index = row * columns + column
+                    offsets[index] *= max(0, weight)
+                }
+            }
+        }
+    }
+
     private func smoothedOffsets(passes: Int) -> [SIMD2<Float>] {
         var source = offsets
         for _ in 0..<max(1, passes) {

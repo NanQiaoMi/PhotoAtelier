@@ -113,6 +113,8 @@ struct PortraitRetouchPanel: View {
                 bodySkinSection
                 separator
                 clothingSection
+                separator
+                bodyReshapeSection
             }
 
             Group {
@@ -587,6 +589,78 @@ struct PortraitRetouchPanel: View {
                 }
             ),
             range: 0...1
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart body reshaping & posture refinement (P2-O)
+
+    private var bodyReshapeSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("智能全身身形与姿态微调", systemImage: "figure.walk")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.bodyReshapeIsActive {
+                    Button("重置") {
+                        model.resetBodyReshape()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("基于 Vision 3D 骨骼关节与中轴线拟合，解剖学平滑塑形：天鹅颈、直角肩、躯干内收纤细、细腰收腹、腿部拉长增高与瘦手臂，严格保护背景直线不发生弯曲变形。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用全身身形与姿态微调", isOn: Binding(
+                get: { model.bodyReshapeSettings.enabled },
+                set: { model.setBodyReshapeEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.bodyReshapeSettings.enabled {
+                VStack(spacing: 8) {
+                    bodyReshapeSlider("天鹅颈 (颈部拉伸收细)", \.swanNeck,
+                                      help: "拉长颈部线条并收细颈部横向宽度。")
+                    bodyReshapeSlider("直角肩 (斜方肌收敛平整)", \.trapeziusContraction,
+                                      help: "下压收敛斜方肌鼓包，平整肩峰轮廓。")
+                    bodyReshapeSlider("整体瘦身 (躯干双侧收敛)", \.bodySlimming,
+                                      help: "沿脊柱中轴线平滑内收躯干两侧轮廓。")
+                    bodyReshapeSlider("细腰收腹 (沙漏曲线雕刻)", \.waistCinching,
+                                      help: "腰部黄金分割点向心收拢，塑造优雅沙漏身材。")
+                    bodyReshapeSlider("长腿增高 (下肢比例拉长)", \.legLengthening,
+                                      help: "从骨盆髋部以下渐进向下延伸腿部比例。")
+                    bodyReshapeSlider("瘦手臂 (大臂宽度收细)", \.armSlimming,
+                                      help: "向肱骨中轴收拢大臂外侧宽度，消除蝴蝶袖。")
+                    bodyReshapeSlider("背景保护 (防止背景线条扭曲)", \.backgroundProtection,
+                                      range: 0...1,
+                                      help: "限制形变场向背景边缘扩散，保护门窗地平线平直。")
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    private func bodyReshapeSlider(_ title: String,
+                                   _ keyPath: WritableKeyPath<BodyReshapeSettings, Double>,
+                                   range: ClosedRange<Double> = 0...1,
+                                   help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.bodyReshapeSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateBodyReshape { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
         )
         .help(help)
     }
