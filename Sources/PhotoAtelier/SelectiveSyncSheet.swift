@@ -95,6 +95,7 @@ struct SelectiveSyncSheet: View {
                                 Toggle("智能面部唇毛与胡青消除、特征痣管理 (去唇毛/去胡青/胡茬平滑/特征痣保留与消除)", isOn: $model.syncOptions.facialHair)
                                 Toggle("智能面部微表情与微笑唇形立体微雕 (微笑嘴角上扬/微笑宽度/唇角对称/幼态人中缩短/丰唇/唇峰珠光立体)", isOn: $model.syncOptions.expression)
                                 Toggle("智能眼型微雕与眼位平衡 (开内眼角/开外眼角眼尾下至/圆润猫眼/眼位倾斜/眼距微调/中庭比例缩短/双眼对称)", isOn: $model.syncOptions.eyeShape)
+                                Toggle("智能鼻部微雕与立体塑形 (鼻翼收窄/鼻头微缩/鼻梁挺拔/朝天鼻鹰钩鼻矫正/驼峰抚平/鼻长中庭平衡/3D立体高光修容)", isOn: $model.syncOptions.noseReshape)
                             }
                         }
                         .toggleStyle(.checkbox)

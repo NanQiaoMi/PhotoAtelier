@@ -115,10 +115,15 @@ struct PortraitRetouchPanel: View {
                 hairColorSection
                 separator
                 facialHairSection
+            }
+
+            Group {
                 separator
                 expressionSection
                 separator
                 eyeShapeSection
+                separator
+                noseReshapeSection
             }
 
             Group {
@@ -1283,6 +1288,77 @@ struct PortraitRetouchPanel: View {
                 get: { model.eyeShapeSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateEyeShape { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart nose reshaping, 3D bridge contouring & structural correction (P2-V)
+
+    private var noseReshapeSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("鼻部微雕与立体塑形", systemImage: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.noseReshapeIsActive {
+                    Button("重置") {
+                        model.resetNoseReshape()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("鼻部骨相精细微雕与立体光影重构：鼻翼宽窄收放、鼻头立体微缩聚拢、鼻梁山根挺拔收紧、朝天鼻下拉与鹰钩鼻微翘矫正、驼峰鼻背平缓抚平、鼻长中庭平衡调节，叠加 3D 鼻背珍珠高光与双侧修容阴影。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用鼻部微雕与立体塑形", isOn: Binding(
+                get: { model.noseReshapeSettings.enabled },
+                set: { model.setNoseReshapeEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.noseReshapeSettings.enabled {
+                VStack(spacing: 8) {
+                    noseReshapeSlider("鼻翼收窄", \.narrowNoseWing, range: -0.5...0.5,
+                                      help: "横向内收鼻翼基底，改善鼻翼肥大外扩；负值适度放宽。")
+                    noseReshapeSlider("鼻头立体微缩", \.noseTipSize, range: -0.5...0.5,
+                                      help: "聚拢微缩圆钝鼻头肉感，雕刻小巧水滴鼻尖；负值适度饱满。")
+                    noseReshapeSlider("鼻梁挺拔收窄", \.noseBridgeWidth, range: -0.5...0.5,
+                                      help: "收紧鼻骨侧壁与山根宽度，打造挺拔骨相感；负值放宽。")
+                    noseReshapeSlider("鼻尖仰俯角矫正", \.nosePitchAngle, range: -0.5...0.5,
+                                      help: "纵向校准鼻尖走势：正值下拉鼻尖延长鼻小柱（矫正朝天鼻），负值微翘鼻尖（矫正鹰钩鼻与下垂）。")
+                    noseReshapeSlider("驼峰鼻背抚平", \.humpSmoothing, range: 0...1,
+                                      help: "平缓抚平鼻背中段骨性突出，呈现平直顺滑微弧侧颜。")
+                    noseReshapeSlider("鼻长中庭平衡", \.noseLength, range: -0.5...0.5,
+                                      help: "纵向微调鼻部长度：负值缩短鼻长打造幼态短中庭，正值拉长鼻梁。")
+                    noseReshapeSlider("3D 鼻梁高光与修容", \.nose3DContour, range: 0...1,
+                                      help: "沿鼻梁中轴线与鼻尖渲染立体珍珠高光，并在鼻骨两侧叠加柔和修容阴影。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func noseReshapeSlider(_ title: String,
+                                   _ keyPath: WritableKeyPath<NoseReshapeSettings, Double>,
+                                   range: ClosedRange<Double> = 0...1,
+                                   help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.noseReshapeSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateNoseReshape { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

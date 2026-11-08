@@ -69,8 +69,8 @@ final class PetEnhancementTests: XCTestCase {
         recipe.version = 18
         try recipe.validateVersion()
 
-        // Unsupported future version 29 must fail
-        recipe.version = 29
+        // Unsupported future version 30 must fail
+        recipe.version = 30
         XCTAssertThrowsError(try recipe.validateVersion())
 
         // Required recipe version calculation

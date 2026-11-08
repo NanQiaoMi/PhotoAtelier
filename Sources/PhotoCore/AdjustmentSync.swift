@@ -80,6 +80,9 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
     /// Smart eye shape reshaping, canthoplasty & mid-face proportion balance.
     public var eyeShape: Bool = true
 
+    /// Smart nose reshaping, 3D bridge contouring & structural correction.
+    public var noseReshape: Bool = true
+
     /// Lens effects and corrections (vignette, chromatic aberration, profile correction).
     public var lensAndVignette: Bool = true
 
@@ -127,6 +130,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         facialHair: Bool = true,
         expression: Bool = true,
         eyeShape: Bool = true,
+        noseReshape: Bool = true,
         lensAndVignette: Bool = true,
         creativeEffects: Bool = true,
         localMasks: Bool = false,
@@ -160,6 +164,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
         self.facialHair = facialHair
         self.expression = expression
         self.eyeShape = eyeShape
+        self.noseReshape = noseReshape
         self.lensAndVignette = lensAndVignette
         self.creativeEffects = creativeEffects
         self.localMasks = localMasks
@@ -197,6 +202,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             facialHair: true,
             expression: true,
             eyeShape: true,
+            noseReshape: true,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -235,6 +241,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             facialHair: true,
             expression: true,
             eyeShape: true,
+            noseReshape: true,
             lensAndVignette: true,
             creativeEffects: false,
             localMasks: false,
@@ -271,6 +278,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             facialHair: false,
             expression: false,
             eyeShape: false,
+            noseReshape: false,
             lensAndVignette: true,
             creativeEffects: true,
             localMasks: false,
@@ -307,6 +315,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             facialHair: false,
             expression: false,
             eyeShape: false,
+            noseReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -343,6 +352,7 @@ public struct AdjustmentSyncOptions: Codable, Equatable {
             facialHair: false,
             expression: false,
             eyeShape: false,
+            noseReshape: false,
             lensAndVignette: false,
             creativeEffects: false,
             localMasks: false,
@@ -524,6 +534,11 @@ public enum AdjustmentSyncEngine {
         // 15j. Smart eye shape reshaping, canthoplasty & mid-face proportion balance
         if options.eyeShape {
             result.eyeShape = source.eyeShape
+        }
+
+        // 15k. Smart nose reshaping, 3D bridge contouring & structural correction
+        if options.noseReshape {
+            result.noseReshape = source.noseReshape
         }
 
         // 16. Lens effects & corrections

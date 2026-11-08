@@ -336,6 +336,9 @@ public struct AdjustmentSettings: Codable, Equatable {
     /// Optional for exact compatibility with recipes written before v28.
     /// Absent or disabled eye shape reshaping & mid-face balance keeps the pre-v28 path.
     public var eyeShape: EyeShapeSettings? = nil
+    /// Optional for exact compatibility with recipes written before v29.
+    /// Absent or disabled nose reshaping & 3D bridge contouring keeps the pre-v29 path.
+    public var noseReshape: NoseReshapeSettings? = nil
     public var masks: [LocalMask] = []
     public init() {}
 }
@@ -1597,6 +1600,108 @@ public struct EyeShapeReport: Codable, Equatable, Sendable {
     }
 }
 
+/// Settings for P2-V smart nose reshaping, 3D bridge contouring & structural correction.
+public struct NoseReshapeSettings: Codable, Equatable, Sendable {
+    /// Master toggle for nose reshaping adjustments.
+    public var enabled: Bool = false
+    /// Narrow nose wings / 鼻翼收窄与精雕 (-0.5...0.5, default 0).
+    public var narrowNoseWing: Double = 0
+    /// Nose tip size / 鼻头立体微缩与塑形 (-0.5...0.5, default 0).
+    public var noseTipSize: Double = 0
+    /// Nose bridge width / 鼻梁挺拔度与骨骼收窄 (-0.5...0.5, default 0).
+    public var noseBridgeWidth: Double = 0
+    /// Nose pitch angle / 鼻唇角与仰俯角调节 (-0.5...0.5, default 0).
+    public var nosePitchAngle: Double = 0
+    /// Dorsal hump smoothing / 驼峰鼻背平缓抚平 (0...1, default 0).
+    public var humpSmoothing: Double = 0
+    /// Nose length modulation / 鼻长调节与中庭平衡 (-0.5...0.5, default 0).
+    public var noseLength: Double = 0
+    /// 3D dorsal highlight & sidewall micro-shading / 鼻梁立体高光与双侧修容 (0...1, default 0).
+    public var nose3DContour: Double = 0
+
+    public init(enabled: Bool = false,
+                narrowNoseWing: Double = 0,
+                noseTipSize: Double = 0,
+                noseBridgeWidth: Double = 0,
+                nosePitchAngle: Double = 0,
+                humpSmoothing: Double = 0,
+                noseLength: Double = 0,
+                nose3DContour: Double = 0) {
+        self.enabled = enabled
+        self.narrowNoseWing = max(-0.5, min(0.5, narrowNoseWing))
+        self.noseTipSize = max(-0.5, min(0.5, noseTipSize))
+        self.noseBridgeWidth = max(-0.5, min(0.5, noseBridgeWidth))
+        self.nosePitchAngle = max(-0.5, min(0.5, nosePitchAngle))
+        self.humpSmoothing = max(0.0, min(1.0, humpSmoothing))
+        self.noseLength = max(-0.5, min(0.5, noseLength))
+        self.nose3DContour = max(0.0, min(1.0, nose3DContour))
+    }
+
+    public var isNeutral: Bool {
+        !enabled || (
+            abs(narrowNoseWing) <= 0.0001 &&
+            abs(noseTipSize) <= 0.0001 &&
+            abs(noseBridgeWidth) <= 0.0001 &&
+            abs(nosePitchAngle) <= 0.0001 &&
+            humpSmoothing <= 0.0001 &&
+            abs(noseLength) <= 0.0001 &&
+            nose3DContour <= 0.0001
+        )
+    }
+
+    public func validated() throws -> NoseReshapeSettings {
+        guard narrowNoseWing.isFinite, (-0.5...0.5).contains(narrowNoseWing) else {
+            throw AtelierError.invalidConfiguration("鼻翼收窄程度必须在 -0.5...0.5 之间。")
+        }
+        guard noseTipSize.isFinite, (-0.5...0.5).contains(noseTipSize) else {
+            throw AtelierError.invalidConfiguration("鼻头大小微调必须在 -0.5...0.5 之间。")
+        }
+        guard noseBridgeWidth.isFinite, (-0.5...0.5).contains(noseBridgeWidth) else {
+            throw AtelierError.invalidConfiguration("鼻梁宽度调节必须在 -0.5...0.5 之间。")
+        }
+        guard nosePitchAngle.isFinite, (-0.5...0.5).contains(nosePitchAngle) else {
+            throw AtelierError.invalidConfiguration("鼻尖仰俯角调节必须在 -0.5...0.5 之间。")
+        }
+        guard humpSmoothing.isFinite, (0...1).contains(humpSmoothing) else {
+            throw AtelierError.invalidConfiguration("驼峰抚平强度必须在 0...1 之间。")
+        }
+        guard noseLength.isFinite, (-0.5...0.5).contains(noseLength) else {
+            throw AtelierError.invalidConfiguration("鼻长微调程度必须在 -0.5...0.5 之间。")
+        }
+        guard nose3DContour.isFinite, (0...1).contains(nose3DContour) else {
+            throw AtelierError.invalidConfiguration("鼻梁立体高光与修容强度必须在 0...1 之间。")
+        }
+        return self
+    }
+}
+
+/// Report for P2-V smart nose reshaping, 3D bridge contouring & structural correction pass.
+public struct NoseReshapeReport: Codable, Equatable, Sendable {
+    public var applied: Bool
+    public var faceCount: Int
+    public var averageNoseWingAdjustment: Double
+    public var averageBridgeAdjustment: Double
+    public var humpSmoothedFaces: Int
+    public var processingTimeMs: Double
+    public var note: String?
+
+    public init(applied: Bool = false,
+                faceCount: Int = 0,
+                averageNoseWingAdjustment: Double = 0,
+                averageBridgeAdjustment: Double = 0,
+                humpSmoothedFaces: Int = 0,
+                processingTimeMs: Double = 0,
+                note: String? = nil) {
+        self.applied = applied
+        self.faceCount = faceCount
+        self.averageNoseWingAdjustment = averageNoseWingAdjustment
+        self.averageBridgeAdjustment = averageBridgeAdjustment
+        self.humpSmoothedFaces = humpSmoothedFaces
+        self.processingTimeMs = processingTimeMs
+        self.note = note
+    }
+}
+
 /// Settings for P2-I smart pet enhancement (fur fluffiness, eye brightening, muzzle moisture, coat dehaze, coat whiten).
 public struct PetEnhancementSettings: Codable, Equatable {
     /// Master toggle for pet enhancement. `false` leaves pixels unchanged.
@@ -1841,6 +1946,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
     public var expressionOverride: ExpressionSettings?
     /// Independent eye shape reshaping, canthoplasty & mid-face proportion balance override.
     public var eyeShapeOverride: EyeShapeSettings?
+    /// Independent nose reshaping, 3D bridge contouring & structural correction override.
+    public var noseReshapeOverride: NoseReshapeSettings?
 
     public init(id: UUID = UUID(),
                 faceIndex: Int? = nil,
@@ -1855,7 +1962,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
                 hairColorOverride: HairColorSettings? = nil,
                 facialHairOverride: FacialHairSettings? = nil,
                 expressionOverride: ExpressionSettings? = nil,
-                eyeShapeOverride: EyeShapeSettings? = nil) {
+                eyeShapeOverride: EyeShapeSettings? = nil,
+                noseReshapeOverride: NoseReshapeSettings? = nil) {
         self.id = id
         self.faceIndex = faceIndex
         self.role = role
@@ -1870,6 +1978,7 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
         self.facialHairOverride = facialHairOverride
         self.expressionOverride = expressionOverride
         self.eyeShapeOverride = eyeShapeOverride
+        self.noseReshapeOverride = noseReshapeOverride
     }
 
     public var isNeutral: Bool {
@@ -1883,7 +1992,8 @@ public struct PersonPortraitProfile: Identifiable, Codable, Equatable {
             (hairColorOverride == nil || hairColorOverride!.isNeutral) &&
             (facialHairOverride == nil || facialHairOverride!.isNeutral) &&
             (expressionOverride == nil || expressionOverride!.isNeutral) &&
-            (eyeShapeOverride == nil || eyeShapeOverride!.isNeutral)
+            (eyeShapeOverride == nil || eyeShapeOverride!.isNeutral) &&
+            (noseReshapeOverride == nil || noseReshapeOverride!.isNeutral)
         )
     }
 
@@ -2326,8 +2436,25 @@ public struct Recipe: Codable, Equatable {
     }
 
     public func validateVersion() throws {
-        guard (1...28).contains(version) else {
+        guard (1...29).contains(version) else {
             throw AtelierError.invalidConfiguration("不支持的配方版本：\(version)")
+        }
+        let noseReshapeGroups = [adjustments.noseReshape,
+                                 automatic?.baseline.noseReshape,
+                                 automatic?.referenceSettings.noseReshape]
+        var hasNoseReshapeOverride = false
+        if let multi = adjustments.multiPerson, multi.enabled {
+            for p in multi.individualProfiles where p.enabled {
+                if let o = p.noseReshapeOverride, !o.isNeutral { hasNoseReshapeOverride = true; break }
+            }
+            if !hasNoseReshapeOverride {
+                for p in multi.demographicDefaults.values where p.enabled {
+                    if let o = p.noseReshapeOverride, !o.isNeutral { hasNoseReshapeOverride = true; break }
+                }
+            }
+        }
+        guard version >= 29 || (noseReshapeGroups.allSatisfy({ $0 == nil || $0!.isNeutral }) && !hasNoseReshapeOverride) else {
+            throw AtelierError.invalidConfiguration("非中性的智能鼻部精致微雕、立体鼻梁高光与驼峰鼻/朝天鼻矫正需要配方版本 29，不能静默降级。")
         }
         let eyeShapeGroups = [adjustments.eyeShape,
                               automatic?.baseline.eyeShape,
@@ -2833,6 +2960,8 @@ public struct ProcessingReport: Codable, Equatable {
     public var expression: ExpressionReport?
     /// Per-photo P2-U eye shape reshaping, canthoplasty & mid-face balance status. `nil` when absent or disabled.
     public var eyeShape: EyeShapeReport?
+    /// Per-photo P2-V nose reshaping, 3D bridge contouring & structural correction status. `nil` when absent or disabled.
+    public var noseReshape: NoseReshapeReport?
     public init() {}
 }
 
