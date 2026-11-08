@@ -80,16 +80,21 @@ struct SelectiveSyncSheet: View {
                     // Group 2: 人像美颜与微整形
                     GroupBox(label: Label("人像美颜与微整形", systemImage: "person.crop.circle.dashed").font(.system(size: 12, weight: .semibold))) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Toggle("基础人像精修 (中性灰/平整/祛斑/美白/亮眼/肤色统一)", isOn: $model.syncOptions.portraitRetouch)
-                            Toggle("多人分人属性感知与独立精修 (男女童老分组/独立参数/肤色统一)", isOn: $model.syncOptions.multiPerson)
-                            Toggle("面部骨相液化 (7种脸型预设/高颅顶/下巴/五官微整)", isOn: $model.syncOptions.facialReshape)
-                            Toggle("面部五区专项祛皱与去油光 (黑眼圈/眼袋/法令纹/抬头纹/哑光)", isOn: $model.syncOptions.facialZonal)
-                            Toggle("明眸眼神光与牙齿美学精修 (眼镜去反光/眼白去红血丝/6款眼神光/牙齿污渍与珐琅质光泽)", isOn: $model.syncOptions.eyeTeeth)
-                            Toggle("双眼皮雕刻与卧蚕立体塑形 (4款双眼皮/去双眼皮贴反光/卧蚕高光与阴影)", isOn: $model.syncOptions.eyelidAegyoSal)
-                            Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)
-                            Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
-                            Toggle("智能发色统一与白发消除 (去白发银丝/发色斑驳统一/7款沙龙发色)", isOn: $model.syncOptions.hairColor)
-                            Toggle("智能面部唇毛与胡青消除、特征痣管理 (去唇毛/去胡青/胡茬平滑/特征痣保留与消除)", isOn: $model.syncOptions.facialHair)
+                            Group {
+                                Toggle("基础人像精修 (中性灰/平整/祛斑/美白/亮眼/肤色统一)", isOn: $model.syncOptions.portraitRetouch)
+                                Toggle("多人分人属性感知与独立精修 (男女童老分组/独立参数/肤色统一)", isOn: $model.syncOptions.multiPerson)
+                                Toggle("面部骨相液化 (7种脸型预设/高颅顶/下巴/五官微整)", isOn: $model.syncOptions.facialReshape)
+                                Toggle("面部五区专项祛皱与去油光 (黑眼圈/眼袋/法令纹/抬头纹/哑光)", isOn: $model.syncOptions.facialZonal)
+                                Toggle("明眸眼神光与牙齿美学精修 (眼镜去反光/眼白去红血丝/6款眼神光/牙齿污渍与珐琅质光泽)", isOn: $model.syncOptions.eyeTeeth)
+                                Toggle("双眼皮雕刻与卧蚕立体塑形 (4款双眼皮/去双眼皮贴反光/卧蚕高光与阴影)", isOn: $model.syncOptions.eyelidAegyoSal)
+                            }
+                            Group {
+                                Toggle("人像妆容精修 (唇色/眉毛/腮红/眼影/眼线/美瞳/高光)", isOn: $model.syncOptions.makeup)
+                                Toggle("秀发质感精修 (发缝填充/秀发光泽/柔顺/去碎发)", isOn: $model.syncOptions.hair)
+                                Toggle("智能发色统一与白发消除 (去白发银丝/发色斑驳统一/7款沙龙发色)", isOn: $model.syncOptions.hairColor)
+                                Toggle("智能面部唇毛与胡青消除、特征痣管理 (去唇毛/去胡青/胡茬平滑/特征痣保留与消除)", isOn: $model.syncOptions.facialHair)
+                                Toggle("智能面部微表情与微笑唇形立体微雕 (微笑嘴角上扬/微笑宽度/唇角对称/幼态人中缩短/丰唇/唇峰珠光立体)", isOn: $model.syncOptions.expression)
+                            }
                         }
                         .toggleStyle(.checkbox)
                         .font(.system(size: 11))

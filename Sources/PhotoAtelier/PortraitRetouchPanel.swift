@@ -115,6 +115,8 @@ struct PortraitRetouchPanel: View {
                 hairColorSection
                 separator
                 facialHairSection
+                separator
+                expressionSection
             }
 
             Group {
@@ -1137,6 +1139,77 @@ struct PortraitRetouchPanel: View {
                 get: { model.facialHairSettings[keyPath: keyPath] },
                 set: { val in
                     model.updateFacialHair { $0[keyPath: keyPath] = val }
+                }
+            ),
+            range: range
+        )
+        .help(help)
+    }
+
+    // MARK: - Smart facial micro-expression, smile & lip shape enhancement (P2-T)
+
+    private var expressionSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("微表情与微笑唇形微雕", systemImage: "face.smiling")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Spacer()
+                if model.expressionIsActive {
+                    Button("重置") {
+                        model.resetExpression()
+                    }
+                    .font(.system(size: 9))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.muted)
+                }
+            }
+
+            Text("面部微表情与唇形美学微雕：通过解剖学笑肌动力学上扬口角，调整微笑舒展宽度与左右唇角对称性，提拉丘比特弓实现幼态人中缩短，微雕上下唇丰满度，并叠加唇峰立体珠光高光。")
+                .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Toggle("启用微表情与微笑唇形微雕", isOn: Binding(
+                get: { model.expressionSettings.enabled },
+                set: { model.setExpressionEnabled($0) }
+            ))
+            .font(.system(size: 10))
+            .toggleStyle(.checkbox)
+            .padding(.top, 10)
+
+            if model.expressionSettings.enabled {
+                VStack(spacing: 8) {
+                    expressionSlider("微笑嘴角上扬", \.smileDegree, range: 0...1,
+                                     help: "模拟笑肌牵拉双侧口角自然向上、向外抬升，改善苦相嘴角下垂。")
+                    expressionSlider("微笑宽度调节", \.smileWidth, range: -0.5...0.5,
+                                     help: "横向微调嘴角舒展宽度：正值舒展大方，负值适度收紧。")
+                    expressionSlider("唇角对称校准", \.lipSymmetry, range: 0...1,
+                                     help: "自动平衡左右口角高低差，校准歪嘴笑与不对称表情。")
+                    expressionSlider("幼态人中缩短", \.philtrumShortening, range: 0...1,
+                                     help: "向上提拉上唇峰丘比特弓，缩短鼻底与唇峰距离，打造年轻幼态感。")
+                    expressionSlider("上唇丰满度", \.upperLipPlump, range: -0.5...0.5,
+                                     help: "独立调节上唇厚度与饱满弧度。")
+                    expressionSlider("下唇丰满度", \.lowerLipPlump, range: -0.5...0.5,
+                                     help: "独立调节下唇嘟嘟厚度与下边缘弧线。")
+                    expressionSlider("唇峰珠光高光", \.lip3DHighlight, range: 0...1,
+                                     help: "在唇珠及下唇微隆起处增加立体柔光高光，并增强下唇窝自然微阴影。")
+                }
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func expressionSlider(_ title: String,
+                                  _ keyPath: WritableKeyPath<ExpressionSettings, Double>,
+                                  range: ClosedRange<Double> = 0...1,
+                                  help: String) -> some View {
+        AdjustmentSlider(
+            title: title,
+            value: Binding(
+                get: { model.expressionSettings[keyPath: keyPath] },
+                set: { val in
+                    model.updateExpression { $0[keyPath: keyPath] = val }
                 }
             ),
             range: range

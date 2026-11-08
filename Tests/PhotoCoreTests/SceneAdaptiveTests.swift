@@ -431,8 +431,8 @@ final class SceneAdaptiveTests: XCTestCase {
         }
         // Unknown future versions are rejected before the output directory is created.
         var unsupported = Recipe()
-        unsupported.version = 27
-        let rejectedOutput = root.appendingPathComponent("version-27")
+        unsupported.version = 28
+        let rejectedOutput = root.appendingPathComponent("version-28")
         XCTAssertThrowsError(try BatchProcessor().run(items: [], inputRoot: input,
             outputRoot: rejectedOutput, recipe: unsupported, lut: nil,
             cancellation: CancellationToken(), onEvent: { _ in }))
