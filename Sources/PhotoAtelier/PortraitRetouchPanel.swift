@@ -23,14 +23,10 @@ struct PortraitRetouchPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
-                Label("人像精修 v1", systemImage: "person.crop.circle.badge.checkmark")
+                Label("人像精修 · 场景化工作台", systemImage: "person.crop.circle.badge.checkmark")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white.opacity(0.9))
                     .padding(.bottom, 10)
-                Text("基于本机 Vision 人脸地标与颜色规则的启发式处理：不是完整人脸分割，不保证真实照片效果。本机最多处理前 \(AppModel.portraitMaximumFaces) 张人脸；若检测到人脸但皮肤蒙版覆盖不足，人像整段跳过且不改像素。合成测试只验证区域约束与有界变化，未做真实照片审美验收。")
-                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                    .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, 13)
                 statusCard
 
                 if status.detectedFaceCount > 1 || (model.adjustments.multiPerson?.enabled ?? false) {
@@ -38,56 +34,238 @@ struct PortraitRetouchPanel: View {
                     multiPersonSection
                 }
 
-                HStack(spacing: 8) {
-                    Button("轻度精修起点") { model.applyLightPortraitStart() }
-                        .font(.system(size: 10))
-                        .buttonStyle(.bordered)
-                        .disabled(!canEdit)
-                    Button("归零") { model.resetPortraitSettings() }
-                        .font(.system(size: 10))
-                        .buttonStyle(.plain)
-                        .foregroundColor(model.adjustments.portrait == nil ? AtelierPalette.muted : AtelierPalette.accent)
-                        .disabled(model.batchRunning || model.adjustments.portrait == nil)
-                    Spacer(minLength: 0)
-                }.padding(.top, 12)
-                    .help("轻度起点只给出保守数值；是否适合本张照片需要你自己判断。")
+                separator
+                PortraitActiveHUD(model: model, selectedCategory: $model.portraitSelectedCategory)
+                PortraitCategoryTabBar(selectedCategory: $model.portraitSelectedCategory, model: model)
+                    .padding(.bottom, 12)
             }
 
             VStack(alignment: .leading, spacing: 0) {
-                portraitSlider("祛瑕疵", \.blemishStrength)
-                Toggle("保留痣 / 斑", isOn: keepSpotsBinding)
-                    .toggleStyle(.switch).controlSize(.mini)
-                    .font(.system(size: 11)).padding(.bottom, 13)
-                    .help("开启后保留明显暗于周围皮肤的痣/斑，只修小瑕疵。")
-                separator
-                Group {
+                switch model.portraitSelectedCategory {
+                case .quickStyles:
+                    quickStylesCategoryView
+                case .skin:
+                    skinCategoryView
+                case .bone:
+                    boneCategoryView
+                case .features:
+                    featuresCategoryView
+                case .makeup:
+                    makeupCategoryView
+                case .body:
+                    bodyCategoryView
+                }
+            }
+            .disabled(!canEdit && model.portraitSelectedCategory != .quickStyles)
+            .opacity((canEdit || model.portraitSelectedCategory == .quickStyles) ? 1 : 0.45)
+
+            separator
+            Text("提示：点击卡片右上角 👁️ 眼睛图标可临时旁路此效果；长按 👁️ 可即时闪现对比关闭效果。")
+                .font(.system(size: 8.5)).foregroundColor(AtelierPalette.muted)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+        }
+        .onAppear { model.requestPortraitDetection(force: false) }
+    }
+
+    // MARK: - Category Views
+
+    private var quickStylesCategoryView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("人像效果总控倍率", systemImage: "slider.horizontal.2.square")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text("\(Int((model.portraitMasterIntensity * 100).rounded()))%")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(AtelierPalette.accent)
+                }
+                Slider(value: Binding(
+                    get: { model.portraitMasterIntensity },
+                    set: { model.setPortraitMasterIntensity($0) }
+                ), in: 0...1.5, step: 0.05)
+                .controlSize(.small)
+                HStack {
+                    Text("0% (无效果)").font(.system(size: 8)).foregroundColor(AtelierPalette.muted)
+                    Spacer()
+                    Text("100% (标准)").font(.system(size: 8)).foregroundColor(AtelierPalette.muted)
+                    Spacer()
+                    Text("150% (强化)").font(.system(size: 8)).foregroundColor(AtelierPalette.muted)
+                }
+            }
+            .padding(10)
+            .background(Color.black.opacity(0.2))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(AtelierPalette.accent.opacity(0.3), lineWidth: 1)
+            )
+
+            Text("大师级商业人像预设")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.85))
+                .padding(.top, 4)
+
+            ForEach(PortraitPreset.builtIns) { preset in
+                presetRow(preset)
+            }
+
+            HStack(spacing: 8) {
+                Button("轻度精修起点") { model.applyLightPortraitStart() }
+                    .font(.system(size: 10))
+                    .buttonStyle(.bordered)
+                    .disabled(!canEdit)
+                Button("全部人像复位") { model.resetAllPortraitAdjustments() }
+                    .font(.system(size: 10))
+                    .buttonStyle(.plain)
+                    .foregroundColor(AtelierPalette.accent)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    private func presetRow(_ preset: PortraitPreset) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: preset.icon)
+                    .font(.system(size: 10))
+                    .foregroundColor(AtelierPalette.accent)
+                Text(preset.title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white)
+                Text("· \(preset.subtitle)")
+                    .font(.system(size: 9))
+                    .foregroundColor(AtelierPalette.muted)
+                Spacer()
+                Button("应用") {
+                    model.applyPortraitPreset(preset)
+                }
+                .font(.system(size: 9, weight: .medium))
+                .buttonStyle(.borderedProminent)
+                .tint(AtelierPalette.accent)
+                .controlSize(.mini)
+                .disabled(!canEdit)
+            }
+            Text(preset.description)
+                .font(.system(size: 8.5))
+                .foregroundColor(AtelierPalette.muted)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 4) {
+                ForEach(preset.tags, id: \.self) { tag in
+                    Text(tag)
+                        .font(.system(size: 7.5))
+                        .foregroundColor(.white.opacity(0.65))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.white.opacity(0.06))
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.16))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var skinCategoryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PortraitCard(module: .skinRetouch, model: model) {
+                VStack(alignment: .leading, spacing: 0) {
+                    portraitSlider("祛瑕疵", \.blemishStrength)
+                    Toggle("保留痣 / 斑", isOn: keepSpotsBinding)
+                        .toggleStyle(.switch).controlSize(.mini)
+                        .font(.system(size: 11)).padding(.bottom, 10)
+                    separator
                     portraitSlider("光影平整", \.dodgeBurn)
                     portraitSlider("立体感", \.structure)
                     portraitSlider("纹理", \.texture)
                     portraitSlider("光泽", \.gloss)
                 }
-                separator
-                Group {
-                    portraitSlider("牙齿美白", \.teethWhiten)
-                    portraitSlider("眼白提亮", \.eyeBrighten)
-                }
-                separator
-                Group {
+            }
+
+            PortraitCard(module: .facialZonal, model: model) {
+                facialZonalSection
+            }
+
+            PortraitCard(module: .skinToneUnify, model: model) {
+                VStack(alignment: .leading, spacing: 0) {
                     portraitSlider("面部肤色统一", \.skinToneUnify)
                     Picker("肤色参考", selection: toneReferenceBinding) {
                         ForEach(PortraitToneReference.allCases, id: \.self) { reference in
                             Text(reference.title).tag(reference)
                         }
-                    }.font(.system(size: 10))
-                        .disabled(settings.skinToneUnify == 0)
-                        .help("自动/中位取中位肤色；最亮取最亮人脸作参考。")
+                    }
+                    .font(.system(size: 10))
+                    .disabled(settings.skinToneUnify == 0)
                 }
-                separator
-                Group {
-                    Text("秀发精修与发缝")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.85))
-                        .padding(.vertical, 4)
+            }
+
+            PortraitCard(module: .bodySkin, model: model) {
+                bodySkinSection
+            }
+        }
+    }
+
+    private var boneCategoryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PortraitCard(module: .facialBoneContour, model: model) {
+                facialBoneContourSection
+            }
+
+            PortraitCard(module: .facialContour, model: model) {
+                facialContourSection
+            }
+
+            PortraitCard(module: .jawChinReshape, model: model) {
+                jawChinReshapeSection
+            }
+        }
+    }
+
+    private var featuresCategoryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PortraitCard(module: .noseReshape, model: model) {
+                noseReshapeSection
+            }
+
+            PortraitCard(module: .eyebrowReshape, model: model) {
+                eyebrowReshapeSection
+            }
+
+            PortraitCard(module: .eyeShape, model: model) {
+                eyeShapeSection
+            }
+
+            PortraitCard(module: .eyelidAegyoSal, model: model) {
+                eyelidAegyoSalSection
+            }
+
+            PortraitCard(module: .eyeTeeth, model: model) {
+                eyeTeethSection
+            }
+
+            PortraitCard(module: .expression, model: model) {
+                expressionSection
+            }
+        }
+    }
+
+    private var makeupCategoryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PortraitCard(module: .makeup, model: model) {
+                makeupSection
+            }
+
+            PortraitCard(module: .hairRefine, model: model) {
+                VStack(alignment: .leading, spacing: 0) {
                     portraitSlider("发缝填充", \.hairGapFilling)
                     portraitSlider("秀发光泽", \.hairGloss)
                     portraitSlider("发色深邃", \.hairDarkening)
@@ -95,81 +273,37 @@ struct PortraitRetouchPanel: View {
                     portraitSlider("边缘去碎发", \.flyawayRemoval)
                 }
             }
-            .padding(.top, 16)
-            .disabled(!canEdit)
-            .opacity(canEdit ? 1 : 0.45)
 
-            Group {
-                separator
-                makeupSection
-                separator
-                facialZonalSection
-                separator
-                eyeTeethSection
-                separator
-                eyelidAegyoSalSection
+            PortraitCard(module: .hairColor, model: model) {
+                hairColorSection
             }
 
-            Group {
-                separator
-                hairColorSection
-                separator
+            PortraitCard(module: .facialHair, model: model) {
                 facialHairSection
             }
+        }
+    }
 
-            Group {
-                separator
-                expressionSection
-                separator
-                eyeShapeSection
-                separator
-                noseReshapeSection
-            }
-
-            Group {
-                separator
-                jawChinReshapeSection
-                separator
-                facialContourSection
-                separator
-                eyebrowReshapeSection
-                separator
-                facialBoneContourSection
-            }
-
-            Group {
-                separator
-                bodySkinSection
-                separator
-                clothingSection
-                separator
+    private var bodyCategoryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PortraitCard(module: .bodyReshape, model: model) {
                 bodyReshapeSection
             }
 
-            Group {
-                separator
-                petEnhancementSection
-                separator
-                skyEnhancementSection
-                separator
+            PortraitCard(module: .clothing, model: model) {
+                clothingSection
+            }
+
+            PortraitCard(module: .bokehBlur, model: model) {
                 bokehBlurSection
             }
 
-            Group {
-                separator
+            VStack(alignment: .leading, spacing: 0) {
                 liquifySection
                 separator
                 repairSection
             }
-
-            Group {
-                separator
-                Text("限制：眼镜、浓妆、遮挡、侧脸、极端白平衡、灰低彩度虹膜、闭嘴无牙齿会降低或取消对应步骤；未检测到人脸、或皮肤蒙版覆盖不足（低于 \(String(format: "%.2f", AppModel.portraitMinimumSkinCoverage * 100))%% 画面）时整段跳过且不改像素，控件保持禁用。效果不保证，请逐张预览。")
-                    .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
-                    .lineSpacing(4).fixedSize(horizontal: false, vertical: true)
-            }
         }
-        .onAppear { model.requestPortraitDetection(force: false) }
     }
 
     private var statusCard: some View {
@@ -187,10 +321,31 @@ struct PortraitRetouchPanel: View {
                     .foregroundColor(status.hasUsableSkinMask ? .white.opacity(0.8) : AtelierPalette.muted)
                     .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
-            if !status.isDetecting {
-                Button("重新检测人脸") { model.requestPortraitDetection() }
-                    .font(.system(size: 9)).buttonStyle(.plain)
-                    .foregroundColor(AtelierPalette.accent)
+            HStack(spacing: 8) {
+                if !status.isDetecting {
+                    Button("重新检测人脸") { model.requestPortraitDetection() }
+                        .font(.system(size: 9)).buttonStyle(.plain)
+                        .foregroundColor(AtelierPalette.accent)
+                }
+                Spacer()
+                if status.detectedFaceCount > 0 {
+                    Button {
+                        model.triggerFocusOnFace()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "face.dashed")
+                            Text("面部特写 (1:1)")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(AtelierPalette.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(AtelierPalette.accent.opacity(0.12))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("一键缩放居中至面部五官，便于精细对比微雕细节")
+                }
             }
         }
         .padding(10)

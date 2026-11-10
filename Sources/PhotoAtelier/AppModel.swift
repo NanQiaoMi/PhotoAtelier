@@ -239,6 +239,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var sceneIntent: PhotoSceneIntent = .automatic
     /// Background face-detection state for the portrait inspector tab.
     @Published private(set) var portraitFaceStatus = PortraitFaceStatus()
+    /// Portrait UX revamp state: scenario category, per-module temporary bypass, master intensity & face loupe
+    @Published public var portraitSelectedCategory: PortraitCategory = .quickStyles
+    @Published public var portraitBypassedModules: Set<PortraitModuleType> = []
+    @Published public var portraitMasterIntensity: Double = 1.0
+    @Published public var focusOnFaceEvent: Int = 0
+    @Published public var primaryFaceBoundingBox: CGRect? = nil
     /// Reference-color ("AI 追色") UI state. The profile itself lives in
     /// `adjustments.referenceColor`; these are display-only and never persisted.
     /// The thumbnail is only shown while `referenceColorThumbnailProfile` still
@@ -887,7 +893,7 @@ final class AppModel: ObservableObject {
             status = "先依作者说明确认此自定义 LUT 的输入／输出空间，再进行逐图适配。"
             return
         }
-        let settings = adjustments; let cube = selectedOption?.cube
+        let settings = effectiveAdjustmentsForPreview(adjustments); let cube = selectedOption?.cube
         let outputSpace = exportSettings.colorSpace
         let selectedMask = selectedLocalMask
         let needsMaskOverlay = showMaskCoverage
@@ -2010,7 +2016,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Runs a command that touches several properties as one undo step.
-    private func performUndoableEdit(_ key: String, _ body: () -> Void) {
+    func performUndoableEdit(_ key: String, _ body: () -> Void) {
         guard !undoSuppressed else { body(); return }
         let previous = currentUndoSnapshot
         let now = Date()
@@ -3737,6 +3743,7 @@ final class AppModel: ObservableObject {
                 case .success(let detection):
                     let confidence = detection.faces.map(\.confidence).max() ?? 0
                     let coveragePercent = String(format: "%.3f%%", detection.maximumCoverage * 100)
+                    self.primaryFaceBoundingBox = detection.faces.first?.boundingBox
                     if detection.faces.isEmpty {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedDemographics: [], summary:
@@ -3766,6 +3773,7 @@ final class AppModel: ObservableObject {
         portraitDetectionGeneration = UUID()
         portraitFaceStatus = PortraitFaceStatus()
         selectedPersonIndex = nil
+        primaryFaceBoundingBox = nil
     }
 
     // MARK: - P2-M: Multi-Person Face Demographic Grouping & Profiles
@@ -4158,3 +4166,513 @@ final class AppModel: ObservableObject {
 
     func present(_ error: Error) { errorMessage = error.localizedDescription; status = error.localizedDescription }
 }
+
+// MARK: - Portrait UX Revamp & Comparison System Extension
+
+extension AppModel {
+    /// Produces effective preview settings taking temporary module bypasses and master intensity scaling into account.
+    public func effectiveAdjustmentsForPreview(_ base: AdjustmentSettings) -> AdjustmentSettings {
+        var settings = base
+
+        // 1. Scale portrait intensity if master multiplier is not 1.0
+        if portraitMasterIntensity != 1.0 {
+            scalePortraitIntensity(&settings, factor: portraitMasterIntensity)
+        }
+
+        // 2. Apply per-module bypasses
+        if !portraitBypassedModules.isEmpty {
+            applyPortraitBypasses(&settings)
+        }
+
+        return settings
+    }
+
+    private func clamp(_ val: Double, _ minVal: Double, _ maxVal: Double) -> Double {
+        min(max(val, minVal), maxVal)
+    }
+
+    private func scalePortraitIntensity(_ settings: inout AdjustmentSettings, factor: Double) {
+        if var p = settings.portrait {
+            p.blemishStrength = clamp(p.blemishStrength * factor, 0, 1)
+            p.dodgeBurn = clamp(p.dodgeBurn * factor, 0, 1)
+            p.structure = clamp(p.structure * factor, 0, 1)
+            p.texture = clamp(p.texture * factor, 0, 1)
+            p.gloss = clamp(p.gloss * factor, 0, 1)
+            p.skinToneUnify = clamp(p.skinToneUnify * factor, 0, 1)
+            settings.portrait = p
+        }
+
+        if var fbc = settings.facialBoneContour, fbc.enabled {
+            fbc.facialFolding = clamp(fbc.facialFolding * factor, 0, 1)
+            fbc.tZoneHighlight = clamp(fbc.tZoneHighlight * factor, 0, 1)
+            fbc.cZoneHighlight = clamp(fbc.cZoneHighlight * factor, 0, 1)
+            fbc.cheekContourShadow = clamp(fbc.cheekContourShadow * factor, 0, 1)
+            fbc.jawlineShadow = clamp(fbc.jawlineShadow * factor, 0, 1)
+            fbc.philtrumHighlight = clamp(fbc.philtrumHighlight * factor, 0, 1)
+            settings.facialBoneContour = fbc
+        }
+
+        if var fc = settings.facialContour, fc.enabled {
+            fc.templePlump = clamp(fc.templePlump * factor, 0, 1)
+            fc.cheekboneNarrow = clamp(fc.cheekboneNarrow * factor, 0, 1)
+            fc.cheekPlump = clamp(fc.cheekPlump * factor, 0, 1)
+            fc.contourSmoothness = clamp(fc.contourSmoothness * factor, 0, 1)
+            fc.appleCheekLift = clamp(fc.appleCheekLift * factor, -0.5, 0.5)
+            fc.contour3DShading = clamp(fc.contour3DShading * factor, 0, 1)
+            settings.facialContour = fc
+        }
+
+        if var jc = settings.jawChinReshape, jc.enabled {
+            jc.jawWidth = clamp(jc.jawWidth * factor, -0.5, 0.5)
+            jc.chinLength = clamp(jc.chinLength * factor, -0.5, 0.5)
+            jc.chinProjection = clamp(jc.chinProjection * factor, -0.5, 0.5)
+            jc.chinShape = clamp(jc.chinShape * factor, -0.5, 0.5)
+            jc.jawlineTighten = clamp(jc.jawlineTighten * factor, 0, 1)
+            jc.chinContour = clamp(jc.chinContour * factor, 0, 1)
+            settings.jawChinReshape = jc
+        }
+
+        if var nose = settings.noseReshape, nose.enabled {
+            nose.narrowNoseWing = clamp(nose.narrowNoseWing * factor, -0.5, 0.5)
+            nose.noseTipSize = clamp(nose.noseTipSize * factor, -0.5, 0.5)
+            nose.noseBridgeWidth = clamp(nose.noseBridgeWidth * factor, -0.5, 0.5)
+            nose.nosePitchAngle = clamp(nose.nosePitchAngle * factor, -0.5, 0.5)
+            nose.humpSmoothing = clamp(nose.humpSmoothing * factor, 0, 1)
+            nose.noseLength = clamp(nose.noseLength * factor, -0.5, 0.5)
+            nose.nose3DContour = clamp(nose.nose3DContour * factor, 0, 1)
+            settings.noseReshape = nose
+        }
+
+        if var eb = settings.eyebrowReshape, eb.enabled {
+            eb.browTailLift = clamp(eb.browTailLift * factor, -0.5, 0.5)
+            eb.browThickness = clamp(eb.browThickness * factor, -0.5, 0.5)
+            eb.browLength = clamp(eb.browLength * factor, -0.5, 0.5)
+            eb.browSymmetry = clamp(eb.browSymmetry * factor, 0, 1)
+            eb.wildBrowTexture = clamp(eb.wildBrowTexture * factor, 0, 1)
+            eb.brow3DContour = clamp(eb.brow3DContour * factor, 0, 1)
+            settings.eyebrowReshape = eb
+        }
+
+        if var eye = settings.eyeShape, eye.enabled {
+            eye.innerCanthoplasty = clamp(eye.innerCanthoplasty * factor, 0, 1)
+            eye.outerCanthoplasty = clamp(eye.outerCanthoplasty * factor, 0, 1)
+            eye.eyeRoundness = clamp(eye.eyeRoundness * factor, -0.5, 0.5)
+            eye.eyeTilt = clamp(eye.eyeTilt * factor, -0.5, 0.5)
+            eye.interpupillaryDistance = clamp(eye.interpupillaryDistance * factor, -0.5, 0.5)
+            eye.eyeVerticalPosition = clamp(eye.eyeVerticalPosition * factor, -0.5, 0.5)
+            eye.eyeSymmetry = clamp(eye.eyeSymmetry * factor, 0, 1)
+            settings.eyeShape = eye
+        }
+
+        if var aegyo = settings.eyelidAegyoSal, aegyo.enabled {
+            aegyo.eyelidStrength = clamp(aegyo.eyelidStrength * factor, 0, 1)
+            aegyo.tapeConceal = clamp(aegyo.tapeConceal * factor, 0, 1)
+            aegyo.aegyoSalLuminance = clamp(aegyo.aegyoSalLuminance * factor, 0, 1)
+            aegyo.aegyoSalShadow = clamp(aegyo.aegyoSalShadow * factor, 0, 1)
+            settings.eyelidAegyoSal = aegyo
+        }
+
+        if var et = settings.eyeTeeth, et.enabled {
+            et.eyeglassGlareReduction = clamp(et.eyeglassGlareReduction * factor, 0, 1)
+            et.scleraBloodshotRemoval = clamp(et.scleraBloodshotRemoval * factor, 0, 1)
+            et.irisClarity = clamp(et.irisClarity * factor, 0, 1)
+            et.catchlightStrength = clamp(et.catchlightStrength * factor, 0, 1)
+            et.teethStainRemoval = clamp(et.teethStainRemoval * factor, 0, 1)
+            et.enamelSheen = clamp(et.enamelSheen * factor, 0, 1)
+            settings.eyeTeeth = et
+        }
+
+        if var expr = settings.expression, expr.enabled {
+            expr.smileDegree = clamp(expr.smileDegree * factor, 0, 1)
+            expr.smileWidth = clamp(expr.smileWidth * factor, -0.5, 0.5)
+            expr.lipSymmetry = clamp(expr.lipSymmetry * factor, 0, 1)
+            expr.philtrumShortening = clamp(expr.philtrumShortening * factor, 0, 1)
+            expr.upperLipPlump = clamp(expr.upperLipPlump * factor, -0.5, 0.5)
+            expr.lowerLipPlump = clamp(expr.lowerLipPlump * factor, -0.5, 0.5)
+            expr.lip3DHighlight = clamp(expr.lip3DHighlight * factor, 0, 1)
+            settings.expression = expr
+        }
+
+        if var fz = settings.facialZonal, fz.enabled {
+            fz.darkCircles = clamp(fz.darkCircles * factor, 0, 1)
+            fz.eyeBags = clamp(fz.eyeBags * factor, 0, 1)
+            fz.nasolabialFolds = clamp(fz.nasolabialFolds * factor, 0, 1)
+            fz.foreheadWrinkles = clamp(fz.foreheadWrinkles * factor, 0, 1)
+            fz.antiShine = clamp(fz.antiShine * factor, 0, 1)
+            fz.jawlineSculpting = clamp(fz.jawlineSculpting * factor, 0, 1)
+            settings.facialZonal = fz
+        }
+
+        if var fh = settings.facialHair, fh.enabled {
+            fh.lipFuzzRemoval = clamp(fh.lipFuzzRemoval * factor, 0, 1)
+            fh.beardShadowReduction = clamp(fh.beardShadowReduction * factor, 0, 1)
+            fh.stubbleSmoothing = clamp(fh.stubbleSmoothing * factor, 0, 1)
+            settings.facialHair = fh
+        }
+    }
+
+    private func applyPortraitBypasses(_ settings: inout AdjustmentSettings) {
+        if portraitBypassedModules.contains(.facialBoneContour) {
+            settings.facialBoneContour = nil
+        }
+        if portraitBypassedModules.contains(.facialContour) {
+            settings.facialContour = nil
+        }
+        if portraitBypassedModules.contains(.jawChinReshape) {
+            settings.jawChinReshape = nil
+        }
+        if portraitBypassedModules.contains(.noseReshape) {
+            settings.noseReshape = nil
+        }
+        if portraitBypassedModules.contains(.eyebrowReshape) {
+            settings.eyebrowReshape = nil
+        }
+        if portraitBypassedModules.contains(.eyeShape) {
+            settings.eyeShape = nil
+        }
+        if portraitBypassedModules.contains(.eyelidAegyoSal) {
+            settings.eyelidAegyoSal = nil
+        }
+        if portraitBypassedModules.contains(.eyeTeeth) {
+            settings.eyeTeeth = nil
+        }
+        if portraitBypassedModules.contains(.expression) {
+            settings.expression = nil
+        }
+        if portraitBypassedModules.contains(.facialZonal) {
+            settings.facialZonal = nil
+        }
+        if portraitBypassedModules.contains(.makeup) {
+            settings.makeup = nil
+        }
+        if portraitBypassedModules.contains(.hairColor) {
+            settings.hairColor = nil
+        }
+        if portraitBypassedModules.contains(.facialHair) {
+            settings.facialHair = nil
+        }
+        if portraitBypassedModules.contains(.bodySkin) {
+            settings.bodySkin = nil
+        }
+        if portraitBypassedModules.contains(.bodyReshape) {
+            settings.bodyReshape = nil
+        }
+        if portraitBypassedModules.contains(.clothing) {
+            settings.clothing = nil
+        }
+        if portraitBypassedModules.contains(.bokehBlur) {
+            settings.bokehBlur = nil
+        }
+        if portraitBypassedModules.contains(.skinRetouch) {
+            if var p = settings.portrait {
+                p.blemishStrength = 0
+                p.dodgeBurn = 0
+                p.structure = 0
+                p.texture = 0
+                p.gloss = 0
+                settings.portrait = p
+            }
+        }
+        if portraitBypassedModules.contains(.skinToneUnify) {
+            if var p = settings.portrait {
+                p.skinToneUnify = 0
+                settings.portrait = p
+            }
+        }
+        if portraitBypassedModules.contains(.hairRefine) {
+            if var p = settings.portrait {
+                p.hairGapFilling = 0
+                p.hairGloss = 0
+                p.hairDarkening = 0
+                p.hairSmoothing = 0
+                p.flyawayRemoval = 0
+                settings.portrait = p
+            }
+        }
+    }
+
+    public func isPortraitModuleActive(_ module: PortraitModuleType) -> Bool {
+        module.isActive(in: adjustments)
+    }
+
+    public func isPortraitModuleBypassed(_ module: PortraitModuleType) -> Bool {
+        portraitBypassedModules.contains(module)
+    }
+
+    public func togglePortraitModuleBypass(_ module: PortraitModuleType) {
+        if portraitBypassedModules.contains(module) {
+            portraitBypassedModules.remove(module)
+        } else {
+            portraitBypassedModules.insert(module)
+        }
+        requestPreview(immediate: true)
+    }
+
+    public func setPortraitModuleBypass(_ module: PortraitModuleType, bypassed: Bool) {
+        if bypassed {
+            portraitBypassedModules.insert(module)
+        } else {
+            portraitBypassedModules.remove(module)
+        }
+        requestPreview(immediate: true)
+    }
+
+    public func clearAllPortraitBypasses() {
+        portraitBypassedModules.removeAll()
+        requestPreview(immediate: true)
+    }
+
+    public var activePortraitModules: [PortraitModuleType] {
+        PortraitModuleType.allCases.filter { isPortraitModuleActive($0) }
+    }
+
+    public func hasActiveModules(in category: PortraitCategory) -> Bool {
+        if category == .quickStyles {
+            return !activePortraitModules.isEmpty
+        }
+        return PortraitModuleType.allCases.contains { $0.category == category && isPortraitModuleActive($0) }
+    }
+
+    public func hasBypassedModules(in category: PortraitCategory) -> Bool {
+        PortraitModuleType.allCases.contains { $0.category == category && isPortraitModuleBypassed($0) }
+    }
+
+    public func resetPortraitModule(_ module: PortraitModuleType) {
+        performUndoableEdit("portrait.reset.\(module.id)") {
+            switch module {
+            case .facialBoneContour:
+                adjustments.facialBoneContour = nil
+            case .facialContour:
+                adjustments.facialContour = nil
+            case .jawChinReshape:
+                adjustments.jawChinReshape = nil
+            case .noseReshape:
+                adjustments.noseReshape = nil
+            case .eyebrowReshape:
+                adjustments.eyebrowReshape = nil
+            case .eyeShape:
+                adjustments.eyeShape = nil
+            case .eyelidAegyoSal:
+                adjustments.eyelidAegyoSal = nil
+            case .eyeTeeth:
+                adjustments.eyeTeeth = nil
+            case .expression:
+                adjustments.expression = nil
+            case .facialZonal:
+                adjustments.facialZonal = nil
+            case .makeup:
+                adjustments.makeup = nil
+            case .hairColor:
+                adjustments.hairColor = nil
+            case .facialHair:
+                adjustments.facialHair = nil
+            case .bodySkin:
+                adjustments.bodySkin = nil
+            case .bodyReshape:
+                adjustments.bodyReshape = nil
+            case .clothing:
+                adjustments.clothing = nil
+            case .bokehBlur:
+                adjustments.bokehBlur = nil
+            case .skinRetouch:
+                if var p = adjustments.portrait {
+                    p.blemishStrength = 0
+                    p.dodgeBurn = 0
+                    p.structure = 0
+                    p.texture = 0
+                    p.gloss = 0
+                    adjustments.portrait = p
+                }
+            case .skinToneUnify:
+                if var p = adjustments.portrait {
+                    p.skinToneUnify = 0
+                    adjustments.portrait = p
+                }
+            case .hairRefine:
+                if var p = adjustments.portrait {
+                    p.hairGapFilling = 0
+                    p.hairGloss = 0
+                    p.hairDarkening = 0
+                    p.hairSmoothing = 0
+                    p.flyawayRemoval = 0
+                    adjustments.portrait = p
+                }
+            }
+        }
+        portraitBypassedModules.remove(module)
+        requestPreview(immediate: true)
+    }
+
+    public func resetAllPortraitAdjustments() {
+        performUndoableEdit("portrait.resetAll") {
+            adjustments.portrait = nil
+            adjustments.facialBoneContour = nil
+            adjustments.facialContour = nil
+            adjustments.jawChinReshape = nil
+            adjustments.noseReshape = nil
+            adjustments.eyebrowReshape = nil
+            adjustments.eyeShape = nil
+            adjustments.eyelidAegyoSal = nil
+            adjustments.eyeTeeth = nil
+            adjustments.expression = nil
+            adjustments.facialZonal = nil
+            adjustments.makeup = nil
+            adjustments.hairColor = nil
+            adjustments.facialHair = nil
+            adjustments.bodySkin = nil
+            adjustments.bodyReshape = nil
+            adjustments.clothing = nil
+            adjustments.bokehBlur = nil
+        }
+        portraitBypassedModules.removeAll()
+        portraitMasterIntensity = 1.0
+        requestPreview(immediate: true)
+    }
+
+    public func setPortraitMasterIntensity(_ intensity: Double) {
+        portraitMasterIntensity = intensity
+        requestPreview(immediate: true)
+    }
+
+    public func triggerFocusOnFace() {
+        focusOnFaceEvent += 1
+    }
+
+    public func applyPortraitPreset(_ preset: PortraitPreset) {
+        guard portraitFaceStatus.hasUsableSkinMask || portraitFaceStatus.detectedFaceCount > 0, !batchRunning else {
+            status = "未检测到可用人脸，无法应用人像预设。"
+            return
+        }
+        portraitBypassedModules.removeAll()
+        portraitMasterIntensity = 1.0
+
+        performUndoableEdit("portrait.preset.\(preset.id)") {
+            switch preset.id {
+            case "high_fashion_bone":
+                var bone = FacialBoneContourSettings(enabled: true)
+                bone.facialFolding = 0.40
+                bone.tZoneHighlight = 0.50
+                bone.cZoneHighlight = 0.45
+                bone.cheekContourShadow = 0.35
+                bone.jawlineShadow = 0.40
+                bone.philtrumHighlight = 0.35
+                bone.contourToneWarmth = 0.05
+                adjustments.facialBoneContour = bone
+
+                var fc = FacialContourSettings(enabled: true)
+                fc.templePlump = 0.25
+                fc.cheekboneNarrow = 0.25
+                fc.cheekPlump = 0.20
+                fc.contour3DShading = 0.30
+                adjustments.facialContour = fc
+
+                var jc = JawChinReshapeSettings(enabled: true)
+                jc.jawWidth = -0.25
+                jc.chinLength = 0.15
+                jc.chinContour = 0.30
+                jc.jawlineTighten = 0.35
+                adjustments.jawChinReshape = jc
+
+            case "cool_supermodel":
+                var eb = EyebrowReshapeSettings(enabled: true)
+                eb.browTailLift = 0.20
+                eb.wildBrowTexture = 0.45
+                eb.brow3DContour = 0.35
+                adjustments.eyebrowReshape = eb
+
+                var eye = EyeShapeSettings(enabled: true)
+                eye.eyeTilt = 0.15
+                eye.outerCanthoplasty = 0.20
+                adjustments.eyeShape = eye
+
+                var bone = FacialBoneContourSettings(enabled: true)
+                bone.facialFolding = 0.30
+                bone.tZoneHighlight = 0.40
+                bone.contourToneWarmth = -0.10
+                adjustments.facialBoneContour = bone
+
+                var nose = NoseReshapeSettings(enabled: true)
+                nose.noseTipSize = -0.25
+                nose.noseBridgeWidth = -0.20
+                adjustments.noseReshape = nose
+
+            case "soft_youthful":
+                var eye = EyeShapeSettings(enabled: true)
+                eye.innerCanthoplasty = 0.20
+                eye.eyeRoundness = 0.25
+                eye.eyeVerticalPosition = -0.20
+                adjustments.eyeShape = eye
+
+                var aegyo = EyelidAegyoSalSettings(enabled: true)
+                aegyo.aegyoSalLuminance = 0.45
+                aegyo.eyelidStrength = 0.40
+                adjustments.eyelidAegyoSal = aegyo
+
+                var expr = ExpressionSettings(enabled: true)
+                expr.smileDegree = 0.30
+                expr.smileWidth = 0.15
+                expr.philtrumShortening = 0.35
+                expr.upperLipPlump = 0.20
+                adjustments.expression = expr
+
+                var fc = FacialContourSettings(enabled: true)
+                fc.templePlump = 0.35
+                fc.appleCheekLift = 0.35
+                adjustments.facialContour = fc
+
+                var jc = JawChinReshapeSettings(enabled: true)
+                jc.chinShape = -0.25
+                adjustments.jawChinReshape = jc
+
+            case "studio_clarity":
+                var p = adjustments.portrait ?? PortraitRefinementSettings()
+                p.blemishStrength = 0.35
+                p.dodgeBurn = 0.40
+                p.structure = 0.20
+                p.texture = 0.20
+                p.gloss = 0.25
+                adjustments.portrait = p
+
+                var fz = FacialZonalRefinementSettings(enabled: true)
+                fz.darkCircles = 0.35
+                fz.eyeBags = 0.30
+                fz.nasolabialFolds = 0.25
+                fz.antiShine = 0.45
+                adjustments.facialZonal = fz
+
+                var et = EyeTeethRefinementSettings(enabled: true)
+                et.scleraBloodshotRemoval = 0.35
+                et.teethStainRemoval = 0.40
+                et.irisClarity = 0.30
+                et.catchlightPattern = .ringLight
+                et.catchlightStrength = 0.45
+                adjustments.eyeTeeth = et
+
+            case "masculine_sculpt":
+                var jc = JawChinReshapeSettings(enabled: true)
+                jc.jawWidth = 0.15
+                jc.jawlineTighten = 0.40
+                jc.chinContour = 0.30
+                adjustments.jawChinReshape = jc
+
+                var fh = FacialHairSettings(enabled: true)
+                fh.beardShadowReduction = 0.45
+                fh.moleManagement = .preserve
+                adjustments.facialHair = fh
+
+                var p = adjustments.portrait ?? PortraitRefinementSettings()
+                p.blemishStrength = 0.25
+                p.dodgeBurn = 0.35
+                p.structure = 0.30
+                p.keepSpots = true
+                adjustments.portrait = p
+
+            default:
+                break
+            }
+        }
+        requestPreview(immediate: true)
+        status = "已应用人像风格：\(preset.title)"
+    }
+}
+
