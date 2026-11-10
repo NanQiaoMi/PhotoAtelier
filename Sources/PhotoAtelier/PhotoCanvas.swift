@@ -89,10 +89,11 @@ struct PhotoCanvas: View {
                     Button { focusOnPrimaryFace() } label: {
                         HStack(spacing: 2) {
                             Image(systemName: "face.dashed")
-                            Text("面部").font(.system(size: 9))
+                            Text(zoom > 1.25 ? "还原" : "面部").font(.system(size: 9))
                         }
+                        .foregroundColor(zoom > 1.25 ? AtelierPalette.accent : AtelierPalette.muted)
                     }
-                    .help("一键缩放居中至面部区域，便于精细对比微雕细节")
+                    .help(zoom > 1.25 ? "还原为适合窗口视图" : "一键智能缩放居中至面部区域，便于精细对比微雕细节")
                 }
                 Button { zoom = max(1, zoom / 1.5); if zoom == 1 { pan = .zero; panOrigin = .zero } } label: { Image(systemName: "minus") }
                 Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 37)
@@ -127,56 +128,83 @@ struct PhotoCanvas: View {
     }
 
     private func photoContent(_ after: NSImage, size: CGSize) -> some View {
+        if model.holdOriginalActive, let before = model.beforeImage {
+            return AnyView(
+                ZStack(alignment: .topLeading) {
+                    Image(nsImage: before).resizable().frame(width: size.width, height: size.height)
+                    HStack(spacing: 5) {
+                        Circle().fill(Color.orange).frame(width: 6, height: 6)
+                        Text("原片 (Before)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("· 松开还原精修")
+                            .font(.system(size: 9))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 4.5)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(Capsule())
+                    .padding(14)
+                }
+                .frame(width: size.width, height: size.height)
+                .background(.black)
+                .shadow(color: .black.opacity(0.3), radius: 18, x: 0, y: 8)
+                .contentShape(Rectangle())
+            )
+        }
+
         let comparisonVisible = compare && !model.maskInteractionActive
             && !model.liquifyBrushActive && !model.repairBrushActive
-        return ZStack(alignment: .topLeading) {
-            Image(nsImage: after).resizable().frame(width: size.width, height: size.height)
+        return AnyView(
+            ZStack(alignment: .topLeading) {
+                Image(nsImage: after).resizable().frame(width: size.width, height: size.height)
 
-            if model.showMaskCoverage, let coverage = model.maskOverlayImage {
-                Image(nsImage: coverage).resizable().interpolation(.high)
-                    .frame(width: size.width, height: size.height)
-                    .opacity(min(1, max(0, model.maskOverlayOpacity)))
-                    .allowsHitTesting(false)
-            }
+                if model.showMaskCoverage, let coverage = model.maskOverlayImage {
+                    Image(nsImage: coverage).resizable().interpolation(.high)
+                        .frame(width: size.width, height: size.height)
+                        .opacity(min(1, max(0, model.maskOverlayOpacity)))
+                        .allowsHitTesting(false)
+                }
 
-            if comparisonVisible, let before = model.beforeImage {
-                Image(nsImage: before).resizable().scaledToFill()
-                    .frame(width: size.width, height: size.height).clipped()
-                    .mask(alignment: .leading) { Rectangle().frame(width: size.width * split) }
-                Rectangle().fill(.white.opacity(0.8)).frame(width: 1).offset(x: size.width * split)
-                Image(systemName: "arrow.left.and.right")
-                    .font(.system(size: 9, weight: .bold)).foregroundColor(.black.opacity(0.8))
-                    .frame(width: 26, height: 26).background(.white.opacity(0.9)).clipShape(Circle())
-                    .offset(x: size.width * split - 13, y: size.height / 2 - 13)
-                HStack {
-                    Text(model.comparisonLeftTitle); Spacer(); Text(model.comparisonRightTitle)
-                }.font(.system(size: 9, weight: .medium)).foregroundColor(.white)
-                    .padding(11).background(LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
-            }
+                if comparisonVisible, let before = model.beforeImage {
+                    Image(nsImage: before).resizable().scaledToFill()
+                        .frame(width: size.width, height: size.height).clipped()
+                        .mask(alignment: .leading) { Rectangle().frame(width: size.width * split) }
+                    Rectangle().fill(.white.opacity(0.8)).frame(width: 1).offset(x: size.width * split)
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 9, weight: .bold)).foregroundColor(.black.opacity(0.8))
+                        .frame(width: 26, height: 26).background(.white.opacity(0.9)).clipShape(Circle())
+                        .offset(x: size.width * split - 13, y: size.height / 2 - 13)
+                    HStack {
+                        Text(model.comparisonLeftTitle); Spacer(); Text(model.comparisonRightTitle)
+                    }.font(.system(size: 9, weight: .medium)).foregroundColor(.white)
+                        .padding(11).background(LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
+                }
 
-            if model.showMaskOverlay && (!comparisonVisible || model.maskInteractionActive) {
-                maskOutlines(size)
+                if model.showMaskOverlay && (!comparisonVisible || model.maskInteractionActive) {
+                    maskOutlines(size)
+                }
+                if !draft.isEmpty { draftOutline(size) }
+                if model.liquifyBrushActive { liquifyOverlay(size) }
+                if model.repairBrushActive { repairOverlay(size) }
+                if model.maskEditMode { geometryHandles(size) }
             }
-            if !draft.isEmpty { draftOutline(size) }
-            if model.liquifyBrushActive { liquifyOverlay(size) }
-            if model.repairBrushActive { repairOverlay(size) }
-            if model.maskEditMode { geometryHandles(size) }
-        }
-        .frame(width: size.width, height: size.height)
-        .background(.black)
-        .shadow(color: .black.opacity(0.3), radius: 18, x: 0, y: 8)
-        .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 2)
-            .onChanged { event in handleDragChanged(event, size: size) }
-            .onEnded { event in handleDragEnded(event, size: size) })
-        .simultaneousGesture(SpatialTapGesture().onEnded { event in handleTap(event.location, size: size) })
-        .onTapGesture(count: 2) {
-            if !model.maskInteractionActive {
-                zoom = 1
-                pan = .zero
-                panOrigin = .zero
+            .frame(width: size.width, height: size.height)
+            .background(.black)
+            .shadow(color: .black.opacity(0.3), radius: 18, x: 0, y: 8)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 2)
+                .onChanged { event in handleDragChanged(event, size: size) }
+                .onEnded { event in handleDragEnded(event, size: size) })
+            .simultaneousGesture(SpatialTapGesture().onEnded { event in handleTap(event.location, size: size) })
+            .onTapGesture(count: 2) {
+                if !model.maskInteractionActive {
+                    zoom = 1
+                    pan = .zero
+                    panOrigin = .zero
+                }
             }
-        }
+        )
     }
 
     private func handleDragChanged(_ event: DragGesture.Value, size: CGSize) {
@@ -649,15 +677,22 @@ struct PhotoCanvas: View {
 
     private func focusOnPrimaryFace() {
         guard let after = model.afterImage else { return }
-        let box = model.primaryFaceBoundingBox ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
         withAnimation(.easeInOut(duration: 0.25)) {
-            let targetZoom: CGFloat = 2.5
-            zoom = targetZoom
-            let fitted = fit(after.size, in: CGSize(width: max(1, canvasAreaSize.width - 48), height: max(1, canvasAreaSize.height - 64)))
-            let dx = (0.5 - box.midX) * fitted.width * targetZoom
-            let dy = (box.midY - 0.5) * fitted.height * targetZoom
-            pan = CGSize(width: dx, height: dy)
-            panOrigin = pan
+            if zoom > 1.25 {
+                zoom = 1
+                pan = .zero
+                panOrigin = .zero
+            } else {
+                let box = model.primaryFaceBoundingBox ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+                let faceDimension = max(box.width, box.height)
+                let targetZoom = min(4.5, max(1.6, 0.48 / max(0.08, faceDimension)))
+                zoom = targetZoom
+                let fitted = fit(after.size, in: CGSize(width: max(1, canvasAreaSize.width - 48), height: max(1, canvasAreaSize.height - 64)))
+                let dx = (0.5 - box.midX) * fitted.width * targetZoom
+                let dy = (box.midY - 0.5) * fitted.height * targetZoom
+                pan = CGSize(width: dx, height: dy)
+                panOrigin = pan
+            }
         }
     }
 }

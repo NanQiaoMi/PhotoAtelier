@@ -17,6 +17,7 @@ struct PortraitCard<Content: View>: View {
     let content: Content
 
     @State private var isHoldingBypass = false
+    @State private var isCollapsed = false
 
     init(module: PortraitModuleType, model: AppModel, @ViewBuilder content: () -> Content) {
         self.module = module
@@ -33,11 +34,13 @@ struct PortraitCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: isCollapsed ? 0 : 8) {
             header
-            content
-                .opacity(isBypassed ? 0.35 : 1.0)
-                .allowsHitTesting(!isBypassed)
+            if !isCollapsed {
+                content
+                    .opacity(isBypassed ? 0.35 : 1.0)
+                    .allowsHitTesting(!isBypassed)
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)
@@ -57,13 +60,24 @@ struct PortraitCard<Content: View>: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: module.icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(isActive ? AtelierPalette.accent : .white.opacity(0.7))
-
-            Text(module.title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(isActive ? .white : .white.opacity(0.85))
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { isCollapsed.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(AtelierPalette.muted)
+                        .frame(width: 8)
+                    Image(systemName: module.icon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(isActive ? AtelierPalette.accent : .white.opacity(0.7))
+                    Text(module.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(isActive ? .white : .white.opacity(0.85))
+                }
+            }
+            .buttonStyle(.plain)
+            .help(isCollapsed ? "展开此模块" : "收起此模块")
 
             if isActive {
                 Circle()
