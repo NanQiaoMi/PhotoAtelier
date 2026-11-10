@@ -243,6 +243,7 @@ final class AppModel: ObservableObject {
     @Published public var portraitMasterIntensity: Double = 1.0
     @Published public var focusOnFaceEvent: Int = 0
     @Published public var primaryFaceBoundingBox: CGRect? = nil
+    @Published public var holdOriginalActive: Bool = false
     /// Reference-color ("AI 追色") UI state. The profile itself lives in
     /// `adjustments.referenceColor`; these are display-only and never persisted.
     /// The thumbnail is only shown while `referenceColorThumbnailProfile` still

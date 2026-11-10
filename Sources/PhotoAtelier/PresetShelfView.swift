@@ -3,27 +3,71 @@ import PhotoCore
 import SwiftUI
 
 /// Horizontal filmstrip shelf displaying live photo style thumbnails for all LUTs.
+/// Features:
+/// - Real-time rendered photo thumbnails for every style preset
+/// - Category filter pills (全部 / 人像 / 电影 / 自然 / 风光 / 黑白 / 自定义)
+/// - Inline style intensity slider and recommended strength badge
+/// - One-click collapsible / expandable filmstrip for maximizing canvas workspace
+/// - Hover elevation, active badge, and readable gradient scrim
 struct PresetShelfView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var previews: StylePreviewController
     @AppStorage("isPresetShelfExpanded") private var isExpanded: Bool = true
     @State private var hoveredID: String? = nil
+    @State private var selectedCategory: String = "all"
+
+    private struct CategoryItem: Identifiable {
+        let id: String
+        let title: String
+        let count: Int
+    }
+
+    private var categoryOptions: [CategoryItem] {
+        var items: [CategoryItem] = [
+            CategoryItem(id: "all", title: "全部", count: model.lutOptions.count)
+        ]
+        let groups: [(LUTPresetGroup, String)] = [
+            (.portrait, "人像"),
+            (.cinematic, "电影"),
+            (.natural, "自然"),
+            (.landscape, "风光"),
+            (.monochrome, "黑白")
+        ]
+        for (g, title) in groups {
+            let count = model.lutOptions.filter { $0.group == g }.count
+            if count > 0 {
+                items.append(CategoryItem(id: g.rawValue, title: title, count: count))
+            }
+        }
+        let customCount = model.lutOptions.filter { $0.path != nil }.count
+        if customCount > 0 {
+            items.append(CategoryItem(id: "custom", title: "自定义", count: customCount))
+        }
+        return items
+    }
+
+    private var filteredOptions: [LUTOption] {
+        if selectedCategory == "all" { return model.lutOptions }
+        if selectedCategory == "custom" { return model.lutOptions.filter { $0.path != nil } }
+        return model.lutOptions.filter { $0.group?.rawValue == selectedCategory }
+    }
 
     private var activeOptionName: String {
         model.lutOptions.first(where: { $0.id == model.selectedLUT })?.name ?? "原色"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
+        VStack(alignment: .leading, spacing: isExpanded ? 7 : 0) {
             headerBar
 
             if isExpanded {
+                categoryFilterRow
                 filmstrip
             }
         }
         .padding(.horizontal, 22)
-        .padding(.vertical, isExpanded ? 11 : 7)
-        .background(AtelierPalette.panel.opacity(0.88))
+        .padding(.vertical, isExpanded ? 10 : 7)
+        .background(AtelierPalette.panel.opacity(0.92))
         .onAppear {
             model.requestStylePreviewsIfNeeded()
         }
@@ -76,6 +120,42 @@ struct PresetShelfView: View {
                 .clipShape(Capsule())
             }
 
+            // Inline Intensity Slider when a style is selected
+            if isExpanded && model.selectedLUT != "none" {
+                HStack(spacing: 6) {
+                    Text("浓度")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(AtelierPalette.muted)
+                    Slider(value: $model.adjustments.lutIntensity, in: 0...1)
+                        .controlSize(.mini)
+                        .frame(width: 75)
+                    Text("\(Int((model.adjustments.lutIntensity * 100).rounded()))%")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(AtelierPalette.accent)
+                        .frame(width: 28, alignment: .leading)
+
+                    if let recommended = model.selectedOption?.recommendedIntensity,
+                       abs(recommended - model.adjustments.lutIntensity) > 0.03 {
+                        Button {
+                            model.adoptRecommendedLUTIntensity()
+                        } label: {
+                            Text("推荐 \(Int((recommended * 100).rounded()))%")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(AtelierPalette.accent)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(AtelierPalette.accent.opacity(0.18))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("一键采用该风格推荐浓度")
+                    }
+                }
+                .padding(.horizontal, 7).padding(.vertical, 2)
+                .background(Color.black.opacity(0.22))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .padding(.leading, 4)
+            }
+
             if previews.busy {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.mini)
@@ -90,7 +170,7 @@ struct PresetShelfView: View {
 
             Button { model.showStyleBrowser = true } label: {
                 HStack(spacing: 3) {
-                    Text("全部 \(model.lutOptions.count) 种")
+                    Text("风格库全览")
                     Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
                 }
                 .font(.system(size: 10, weight: .medium))
@@ -102,13 +182,42 @@ struct PresetShelfView: View {
         }
     }
 
+    // MARK: - Category Filter Row
+
+    private var categoryFilterRow: some View {
+        HStack(spacing: 5) {
+            ForEach(categoryOptions) { cat in
+                let isSel = selectedCategory == cat.id
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selectedCategory = cat.id
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(cat.title)
+                        Text("\(cat.count)")
+                            .font(.system(size: 7.5, design: .monospaced))
+                            .foregroundColor(isSel ? AtelierPalette.background.opacity(0.85) : AtelierPalette.muted)
+                    }
+                    .font(.system(size: 9, weight: isSel ? .bold : .medium))
+                    .foregroundColor(isSel ? AtelierPalette.background : .white.opacity(0.85))
+                    .padding(.horizontal, 7).padding(.vertical, 2.5)
+                    .background(isSel ? AtelierPalette.accent : AtelierPalette.raised.opacity(0.7))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
     // MARK: - Filmstrip ScrollView
 
     private var filmstrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(Array(model.lutOptions.enumerated()), id: \.element.id) { index, option in
+                    ForEach(Array(filteredOptions.enumerated()), id: \.element.id) { index, option in
                         Button {
                             model.selectLUT(option.id)
                         } label: {
@@ -116,7 +225,7 @@ struct PresetShelfView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(model.batchRunning)
-                        .id(index)
+                        .id(option.id)
                         .onHover { isHovered in
                             hoveredID = isHovered ? option.id : nil
                         }
@@ -126,8 +235,8 @@ struct PresetShelfView: View {
                 .padding(.vertical, 2)
             }
             .onChange(of: model.selectedLUT) { selected in
-                guard let index = model.lutOptions.firstIndex(where: { $0.id == selected }) else { return }
-                withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(index, anchor: .center) }
+                guard filteredOptions.contains(where: { $0.id == selected }) else { return }
+                withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(selected, anchor: .center) }
             }
         }
         .overlay(alignment: .trailing) {
@@ -147,9 +256,9 @@ struct PresetShelfView: View {
 
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
-                // Background placeholder
+                // Background placeholder with subtle mood color
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(AtelierPalette.raised)
+                    .fill(cardPlaceholderColor(option))
 
                 // Rendered photo thumbnail
                 if let img = previews.images[option.id] {
@@ -214,5 +323,16 @@ struct PresetShelfView: View {
         }
         .frame(width: 102)
         .help("\(option.name) · \(option.detail)")
+    }
+
+    private func cardPlaceholderColor(_ option: LUTOption) -> Color {
+        guard let group = option.group else { return AtelierPalette.raised }
+        switch group {
+        case .portrait: return Color(red: 0.16, green: 0.13, blue: 0.14)
+        case .cinematic: return Color(red: 0.12, green: 0.14, blue: 0.16)
+        case .natural: return Color(red: 0.14, green: 0.15, blue: 0.13)
+        case .landscape: return Color(red: 0.12, green: 0.15, blue: 0.16)
+        case .monochrome: return Color(red: 0.14, green: 0.14, blue: 0.14)
+        }
     }
 }

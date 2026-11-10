@@ -236,7 +236,7 @@ struct ContentView: View {
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $showLog) { logSheet }
         .sheet(isPresented: $showLensPicker) { LensPicker(model: model) }
-        .sheet(isPresented: $model.showStyleBrowser) { StyleBrowserView(model: model, previews: model.stylePreviews) }
+        .sheet(isPresented: $model.showStyleBrowser) { StyleBrowserView(model: model, previews: model.stylePreviews, managesRequests: false) }
         .sheet(isPresented: $model.showNativeInspection, onDismiss: {
             if !model.showNativeInspection { model.nativeInspection.cancel() }
         }) {
@@ -697,9 +697,49 @@ struct ContentView: View {
                 .disabled(model.afterImage == nil || model.previewBusy || model.analysisBusy || model.scanning || model.batchRunning)
             Group {
                 Button { compare.toggle() } label: {
-                    Label("前后对比", systemImage: "rectangle.lefthalf.inset.filled")
+                    Label("前后分屏", systemImage: "rectangle.lefthalf.inset.filled")
                         .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
                 }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
+                .help("开启/关闭左右拖拽对比分屏")
+
+                Button {
+                    model.holdOriginalActive.toggle()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: model.holdOriginalActive ? "eye.fill" : "eye")
+                        Text("按住看原图")
+                    }
+                    .font(.system(size: 10, weight: model.holdOriginalActive ? .semibold : .regular))
+                    .foregroundColor(model.holdOriginalActive ? AtelierPalette.accent : AtelierPalette.muted)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.afterImage == nil)
+                .help("按住不放可临时查看整张原片，松开立即还原；也可单击切换")
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            if !model.holdOriginalActive { model.holdOriginalActive = true }
+                        }
+                        .onEnded { _ in
+                            if model.holdOriginalActive { model.holdOriginalActive = false }
+                        }
+                )
+
+                if model.portraitFaceStatus.detectedFaceCount > 0 {
+                    Button {
+                        model.focusOnFaceEvent += 1
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "face.dashed")
+                            Text("面部特写")
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(AtelierPalette.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("智能缩放并平移居中至面部（再次点击返回适合窗口）")
+                }
+
                 if model.selectedPhoto?.activeCopyID != nil && compare {
                     Picker("", selection: $model.comparisonMode) {
                         Text("比对原片").tag(ComparisonMode.original)
@@ -1351,13 +1391,22 @@ struct AdjustmentSlider: View {
     let range: ClosedRange<Double>
     var suffix = ""
     var percent = false
+
+    private var isModified: Bool {
+        let neutral: Double = (range.lowerBound > 0.3 && range.upperBound < 1.8) ? 1.0 : 0.0
+        return abs(value - neutral) > 0.005
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(title).font(.system(size: 10)).foregroundColor(.white.opacity(0.7))
+                Text(title)
+                    .font(.system(size: 10, weight: isModified ? .medium : .regular))
+                    .foregroundColor(isModified ? .white : .white.opacity(0.7))
                 Spacer()
-                Text(percent ? "\(Int(value * 100))%" : String(format: "%+.2f", value) + suffix)
-                    .font(.system(size: 9, design: .monospaced)).foregroundColor(AtelierPalette.muted)
+                Text(percent ? "\(Int((value * 100).rounded()))%" : String(format: "%+.2f", value) + suffix)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(isModified ? AtelierPalette.accent : AtelierPalette.muted)
             }
             Slider(value: $value, in: range).controlSize(.mini)
         }.padding(.bottom, 13)
