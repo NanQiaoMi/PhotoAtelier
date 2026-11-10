@@ -12,7 +12,13 @@ final class LUTCatalogTests: XCTestCase {
         ("quiet-forest", .landscape, 0.34),
         ("coastal-light", .landscape, 0.32),
         ("silver-salt", .monochrome, 0.38),
-        ("soft-monochrome", .monochrome, 0.36)
+        ("soft-monochrome", .monochrome, 0.36),
+        ("japanese-airy", .portrait, 0.35),
+        ("hk-cinema", .cinematic, 0.32),
+        ("kodak-gold", .cinematic, 0.34),
+        ("morandi-muted", .natural, 0.30),
+        ("moody-oil", .landscape, 0.30),
+        ("high-contrast-bw", .monochrome, 0.36)
     ]
 
     func testLegacyPresetOrderAndFullTableHashesRemainUnchanged() throws {
@@ -51,7 +57,7 @@ final class LUTCatalogTests: XCTestCase {
 
     func testCatalogContainsEightOriginalCreativeLooksWithCompleteMetadata() throws {
         let presets = LUTCube.builtIns
-        XCTAssertEqual(presets.count, 13)
+        XCTAssertEqual(presets.count, 19)
         XCTAssertEqual(Set(presets.map(\.id)).count, presets.count)
 
         for (index, metadata) in creativeMetadata.enumerated() {
@@ -157,7 +163,7 @@ final class LUTCatalogTests: XCTestCase {
     }
 
     func testMonochromeLooksRemoveAllChroma() throws {
-        let monochromeIDs: Set<String> = ["silver-salt", "soft-monochrome"]
+        let monochromeIDs: Set<String> = ["silver-salt", "soft-monochrome", "high-contrast-bw"]
         let presets = LUTCube.builtIns.filter { monochromeIDs.contains($0.id) }
         XCTAssertEqual(presets.count, monochromeIDs.count)
 

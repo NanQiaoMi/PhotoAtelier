@@ -477,7 +477,19 @@ public struct LUTCube {
         makeCreativePreset(id: "silver-salt", name: "银盐黑白", detail: "清晰的灰阶基底，可与原色按强度混合", look: .silverSalt,
                            group: .monochrome, recommendedIntensity: 0.38, tags: ["黑白", "银盐", "中间调"]),
         makeCreativePreset(id: "soft-monochrome", name: "柔和黑白", detail: "柔和的灰阶基底，轻抬黑位并收住高光", look: .softMonochrome,
-                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "柔和", "抬黑"])
+                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "柔和", "抬黑"]),
+        makeCreativePreset(id: "japanese-airy", name: "日系通透", detail: "高调轻盈、阴影微青与通透肤色", look: .japaneseAiry,
+                           group: .portrait, recommendedIntensity: 0.35, tags: ["日系", "高调", "清透", "肤色"]),
+        makeCreativePreset(id: "hk-cinema", name: "复古港风", detail: "浓郁琥珀高光与青绿阴影，怀旧电影质感", look: .hkCinema,
+                           group: .cinematic, recommendedIntensity: 0.32, tags: ["港风", "复古", "胶片", "琥珀"]),
+        makeCreativePreset(id: "kodak-gold", name: "柯达金胶片", detail: "温暖明媚的金黄调与沉稳暖调暗部", look: .kodakGold,
+                           group: .cinematic, recommendedIntensity: 0.34, tags: ["柯达", "金黄", "暖调", "胶卷"]),
+        makeCreativePreset(id: "morandi-muted", name: "莫兰迪灰调", detail: "克制低饱和、优雅灰阶与柔和大地色", look: .morandiMuted,
+                           group: .natural, recommendedIntensity: 0.30, tags: ["莫兰迪", "灰调", "低饱和", "克制"]),
+        makeCreativePreset(id: "moody-oil", name: "暗调油画", detail: "戏剧性明暗对比，浓郁阴影与微光高光", look: .moodyOil,
+                           group: .landscape, recommendedIntensity: 0.30, tags: ["暗调", "油画", "氛围", "浓郁"]),
+        makeCreativePreset(id: "high-contrast-bw", name: "高对比黑白", detail: "深邃黑位与纯净高光，纪实张力十足", look: .highContrastBW,
+                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "高反差", "纪实", "纯粹"])
     ]
 
     public static var builtIns: [LUTPreset] { builtInStorage }
@@ -546,6 +558,12 @@ public struct LUTCube {
         case coastalLight
         case silverSalt
         case softMonochrome
+        case japaneseAiry
+        case hkCinema
+        case kodakGold
+        case morandiMuted
+        case moodyOil
+        case highContrastBW
     }
 
     /// Original creative looks authored for normalized sRGB code values. This
@@ -627,6 +645,51 @@ public struct LUTCube {
                         let monochrome = 0.035 + 0.90 * luminance
                             + 0.02 * luminance * (1 - luminance)
                         color = SIMD3<Float>(repeating: monochrome)
+
+                    case .japaneseAiry:
+                        let airyLuma = 0.035 + 0.95 * luminance + 0.02 * (1 - luminance) * (1 - luminance)
+                        color = SIMD3<Float>(repeating: airyLuma) + (color - gray) * 0.94
+                        let shadow = (1 - luminance) * (1 - luminance)
+                        let midtone = max(0, 1 - abs(luminance - 0.58) / 0.58)
+                        color += SIMD3<Float>(-0.004 * shadow + 0.008 * midtone,
+                                              0.003 * shadow + 0.005 * midtone,
+                                              0.012 * shadow - 0.004 * midtone)
+
+                    case .hkCinema:
+                        color = gray + (color - gray) * 1.04
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.03 + SIMD3<Float>(repeating: 0.5)
+                        let shadow = 3 * luminance * (1 - luminance) * (1 - luminance)
+                        let highlight = 3 * luminance * luminance * (1 - luminance)
+                        color += SIMD3<Float>(-0.010 * shadow + 0.012 * highlight,
+                                              0.008 * shadow + 0.006 * highlight,
+                                             -0.012 * shadow - 0.008 * highlight)
+
+                    case .kodakGold:
+                        color = gray + (color - gray) * 1.03
+                        let toe = 0.015 * (1 - luminance) * (1 - luminance)
+                        color += SIMD3<Float>(repeating: toe)
+                        let warmth = 0.008 + 0.010 * luminance
+                        color += SIMD3<Float>(warmth, warmth * 0.25, -warmth * 0.70)
+
+                    case .morandiMuted:
+                        color = gray + (color - gray) * 0.84
+                        let toe = 0.025 * (1 - luminance) * (1 - luminance)
+                        let shoulder = 0.02 * luminance * luminance
+                        color += SIMD3<Float>(repeating: toe - shoulder)
+                        let earthy = 0.005 * (1 - abs(luminance - 0.5) * 2)
+                        color += SIMD3<Float>(earthy, earthy * 0.1, -earthy * 0.2)
+
+                    case .moodyOil:
+                        color = gray + (color - gray) * 1.04
+                        let shadowDrop = 0.025 * (1 - luminance) * (1 - luminance)
+                        color -= SIMD3<Float>(repeating: shadowDrop)
+                        let amber = 0.014 * luminance * luminance
+                        color += SIMD3<Float>(amber, amber * 0.25, -amber * 0.70)
+
+                    case .highContrastBW:
+                        var bw = luminance
+                        bw = (bw - 0.5) * 1.20 + 0.5
+                        color = SIMD3<Float>(repeating: min(max(bw, 0), 1))
                     }
 
                     table.append(min(max(color.x, 0), 1))

@@ -78,7 +78,7 @@ final class StyleWorkflowSmokeSession {
             switch phase {
             case 0:
                 guard ready, !model.lutLibraryBusy, model.proposalPreviews.count == 3 else { return }
-                try require(model.lutOptions.count == 19, "Thirteen original and five attributed film LUTs plus original color are available")
+                try require(model.lutOptions.count == 25, "Nineteen original and five attributed film LUTs plus original color are available")
                 countBeforeImport = model.lutOptions.count
                 model.importLUTFiles([evidence.appendingPathComponent("valid.cube"), evidence.appendingPathComponent("invalid.cube")])
                 model.outputRoot = output; model.startBatch()

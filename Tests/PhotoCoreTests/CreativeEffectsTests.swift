@@ -33,14 +33,40 @@ final class CreativeEffectsTests: XCTestCase {
         let invalid: [CreativeEffectsSettings] = [
             .init(bloom: -.infinity), .init(bloom: .infinity), .init(bloom: .nan),
             .init(vignette: -0.001), .init(vignette: 1.001),
-            .init(grain: -.infinity), .init(grain: .nan), .init(grain: .infinity)
+            .init(grain: -.infinity), .init(grain: .nan), .init(grain: .infinity),
+            .init(halation: -0.01), .init(halation: 1.5),
+            .init(mist: -.infinity), .init(mist: 1.01)
         ]
         for settings in invalid {
             XCTAssertThrowsError(try CreativeEffectsEngine.validate(settings))
         }
         XCTAssertNoThrow(try CreativeEffectsEngine.validate(.init()))
         XCTAssertNoThrow(try CreativeEffectsEngine.validate(
-            .init(bloom: 1, vignette: 1, grain: 1)))
+            .init(bloom: 1, vignette: 1, grain: 1, halation: 1, mist: 1)))
+    }
+
+    func testHalationAndMistEffectsPreserveGeometryAndAlpha() throws {
+        let spot = image(width: 48, height: 48) { x, y in
+            (20...28).contains(x) && (20...28).contains(y)
+                ? (2.5, 2.0, 1.8, 1.0)
+                : (0.1, 0.1, 0.1, 1.0)
+        }
+        let halationApplied = try CreativeEffectsEngine.apply(
+            .init(halation: 0.8), to: spot, context: context)
+        XCTAssertEqual(halationApplied.extent, spot.extent)
+
+        let mistApplied = try CreativeEffectsEngine.apply(
+            .init(mist: 0.6), to: spot, context: context)
+        XCTAssertEqual(mistApplied.extent, spot.extent)
+
+        let halationPixels = try render(halationApplied)
+        let haloPixel = pixel(halationPixels, width: 48, x: 18, y: 24)
+        // Halation produces warm red-tinted light leaking into edge neighbors
+        XCTAssertGreaterThan(haloPixel.red, 0.1)
+
+        let mistPixels = try render(mistApplied)
+        let darkPixel = pixel(mistPixels, width: 48, x: 5, y: 5)
+        XCTAssertGreaterThan(darkPixel.red, 0.08)
     }
 
     func testNeutralSettingsReturnTheOriginalImageAndCancelledWorkThrows() throws {
