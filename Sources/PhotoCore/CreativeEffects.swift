@@ -7,19 +7,24 @@ public struct CreativeEffectsSettings: Codable, Equatable {
     public var bloom: Double
     public var vignette: Double
     public var grain: Double
+    public var halation: Double
+    public var mist: Double
 
-    public init(bloom: Double = 0, vignette: Double = 0, grain: Double = 0) {
+    public init(bloom: Double = 0, vignette: Double = 0, grain: Double = 0,
+                halation: Double = 0, mist: Double = 0) {
         self.bloom = bloom
         self.vignette = vignette
         self.grain = grain
+        self.halation = halation
+        self.mist = mist
     }
 
     public var isNeutral: Bool {
-        bloom == 0 && vignette == 0 && grain == 0
+        bloom == 0 && vignette == 0 && grain == 0 && halation == 0 && mist == 0
     }
 
     private enum CodingKeys: String, CodingKey {
-        case bloom, vignette, grain
+        case bloom, vignette, grain, halation, mist
     }
 
     public init(from decoder: Decoder) throws {
@@ -27,7 +32,9 @@ public struct CreativeEffectsSettings: Codable, Equatable {
         self.init(
             bloom: try container.decodeIfPresent(Double.self, forKey: .bloom) ?? 0,
             vignette: try container.decodeIfPresent(Double.self, forKey: .vignette) ?? 0,
-            grain: try container.decodeIfPresent(Double.self, forKey: .grain) ?? 0
+            grain: try container.decodeIfPresent(Double.self, forKey: .grain) ?? 0,
+            halation: try container.decodeIfPresent(Double.self, forKey: .halation) ?? 0,
+            mist: try container.decodeIfPresent(Double.self, forKey: .mist) ?? 0
         )
     }
 
@@ -36,6 +43,8 @@ public struct CreativeEffectsSettings: Codable, Equatable {
         try container.encode(bloom, forKey: .bloom)
         try container.encode(vignette, forKey: .vignette)
         try container.encode(grain, forKey: .grain)
+        try container.encode(halation, forKey: .halation)
+        try container.encode(mist, forKey: .mist)
     }
 }
 
@@ -98,6 +107,67 @@ internal enum CreativeEffectsEngine {
     }
     """)
 
+    private static let halationExtractionKernel = CIColorKernel(source: """
+    kernel vec4 extractHalationHighlights(__sample sample) {
+        float alpha = sample.a;
+        if (!(alpha > 0.000001) || !(alpha <= 1.0)) { return vec4(0.0); }
+
+        vec3 color = sample.rgb / alpha;
+        if (!(abs(color.r) <= 65504.0) || !(abs(color.g) <= 65504.0)
+            || !(abs(color.b) <= 65504.0)) { return vec4(0.0); }
+
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        if (!(luminance >= 0.0) || !(luminance <= 65504.0)) { return vec4(0.0); }
+
+        float weight = smoothstep(0.70, 1.30, luminance);
+        vec3 halationTint = vec3(1.0, 0.22, 0.06) * (weight * luminance);
+        return vec4(halationTint * alpha, alpha);
+    }
+    """)
+
+    private static let halationCompositeKernel = CIColorKernel(source: """
+    kernel vec4 addCreativeHalation(__sample source, __sample glow, float strength) {
+        float alpha = source.a;
+        if (!(alpha > 0.0) || !(alpha <= 1.0)) { return source; }
+
+        vec3 addition = max(glow.rgb, vec3(0.0)) * (0.24 * strength);
+        vec3 color = source.rgb / alpha;
+
+        float maxRGB = max(max(color.r, color.g), color.b);
+        float sdrHeadroomScale = 1.0;
+        float largestAddition = max(max(addition.r, addition.g), addition.b);
+        if (maxRGB <= 1.0 && largestAddition > 0.0) {
+            float headroom = max(0.0, 1.0 - maxRGB);
+            float smoothHeadroom = smoothstep(0.0, 0.18, headroom);
+            sdrHeadroomScale = min(1.0, headroom / largestAddition) * smoothHeadroom;
+        }
+
+        vec3 outputColor = source.rgb + addition * (alpha * sdrHeadroomScale);
+        float largestBase = max(max(source.rgb.r, source.rgb.g), source.rgb.b);
+        float halfFloatAddition = largestAddition * alpha * sdrHeadroomScale;
+        float halfFloatHeadroom = max(0.0, 65504.0 - largestBase);
+        if (halfFloatAddition > 0.0 && halfFloatAddition > halfFloatHeadroom) {
+            float scale = halfFloatHeadroom / halfFloatAddition;
+            outputColor = source.rgb + addition * (alpha * sdrHeadroomScale * scale);
+        }
+        return vec4(outputColor, alpha);
+    }
+    """)
+
+    private static let mistCompositeKernel = CIColorKernel(source: """
+    kernel vec4 addCreativeMist(__sample source, __sample diffused, float strength) {
+        float alpha = source.a;
+        if (!(alpha > 0.0) || !(alpha <= 1.0)) { return source; }
+
+        float difAlpha = diffused.a;
+        vec3 src = source.rgb / alpha;
+        vec3 dif = (difAlpha > 0.0001) ? diffused.rgb / difAlpha : src;
+
+        vec3 blended = mix(src, dif, 0.20 * strength);
+        return vec4(blended * alpha, alpha);
+    }
+    """)
+
     private static let finishKernel = CIColorKernel(source: """
     float creativeNoise(vec2 position) {
         // A fixed-coordinate hash makes repeated renders and ROI renders agree.
@@ -143,8 +213,8 @@ internal enum CreativeEffectsEngine {
     """)
 
     static func validate(_ settings: CreativeEffectsSettings) throws {
-        let values = [settings.bloom, settings.vignette, settings.grain]
-        let names = ["柔光", "暗角", "颗粒"]
+        let values = [settings.bloom, settings.vignette, settings.grain, settings.halation, settings.mist]
+        let names = ["柔光", "暗角", "颗粒", "光晕", "薄雾"]
         for (index, value) in values.enumerated() {
             guard value.isFinite, (0...1).contains(value) else {
                 throw AtelierError.invalidConfiguration(
@@ -189,6 +259,46 @@ internal enum CreativeEffectsEngine {
                     image, blurred, NSNumber(value: settings.bloom)
                   ]) else {
                 throw AtelierError.invalidConfiguration("Core Image 高光辉光合成 kernel 无法生成输出。")
+            }
+            output = composite.cropped(to: extent)
+        }
+
+        if settings.halation > 0 {
+            try cancellation?.check()
+            guard let halationKernel = Self.halationExtractionKernel,
+                  let halationEmission = halationKernel.apply(extent: extent, arguments: [image]) else {
+                throw AtelierError.invalidConfiguration("Core Image 光晕提取 kernel 无法生成输出。")
+            }
+            let radius = max(1.5, min(extent.width, extent.height) * 0.016)
+            guard let blurred = CIFilter(name: "CIGaussianBlur", parameters: [
+                kCIInputImageKey: halationEmission,
+                kCIInputRadiusKey: radius
+            ])?.outputImage?.cropped(to: extent) else {
+                throw AtelierError.invalidConfiguration("Core Image 光晕模糊无法生成输出。")
+            }
+            guard let compositeKernel = Self.halationCompositeKernel,
+                  let composite = compositeKernel.apply(extent: extent, arguments: [
+                    output, blurred, NSNumber(value: settings.halation)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 光晕合成 kernel 无法生成输出。")
+            }
+            output = composite.cropped(to: extent)
+        }
+
+        if settings.mist > 0 {
+            try cancellation?.check()
+            let radius = max(2.0, min(extent.width, extent.height) * 0.022)
+            guard let blurred = CIFilter(name: "CIGaussianBlur", parameters: [
+                kCIInputImageKey: output,
+                kCIInputRadiusKey: radius
+            ])?.outputImage?.cropped(to: extent) else {
+                throw AtelierError.invalidConfiguration("Core Image 薄雾模糊无法生成输出。")
+            }
+            guard let compositeKernel = Self.mistCompositeKernel,
+                  let composite = compositeKernel.apply(extent: extent, arguments: [
+                    output, blurred, NSNumber(value: settings.mist)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 薄雾合成 kernel 无法生成输出。")
             }
             output = composite.cropped(to: extent)
         }
