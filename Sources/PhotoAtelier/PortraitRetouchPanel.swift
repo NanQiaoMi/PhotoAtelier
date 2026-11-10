@@ -330,6 +330,25 @@ struct PortraitRetouchPanel: View {
                 Spacer()
                 if status.detectedFaceCount > 0 {
                     Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            model.showFaceLandmarksHUD.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: model.showFaceLandmarksHUD ? "viewfinder.circle.fill" : "viewfinder.circle")
+                            Text("五官定位")
+                        }
+                        .font(.system(size: 9, weight: model.showFaceLandmarksHUD ? .semibold : .regular))
+                        .foregroundColor(model.showFaceLandmarksHUD ? AtelierPalette.accent : AtelierPalette.muted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(model.showFaceLandmarksHUD ? AtelierPalette.accent.opacity(0.18) : AtelierPalette.panel)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("在画布上高亮显示 Vision 算法识别出的五官关键点与轮廓")
+
+                    Button {
                         model.triggerFocusOnFace()
                     } label: {
                         HStack(spacing: 3) {

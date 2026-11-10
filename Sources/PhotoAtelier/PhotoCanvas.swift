@@ -29,10 +29,15 @@ struct PhotoCanvas: View {
             ZStack {
                 AtelierPalette.background
                 if let after = model.afterImage {
-                    let fitted = fit(after.size, in: CGSize(width: max(1, geometry.size.width - 48), height: max(1, geometry.size.height - 64)))
-                    photoContent(after, size: CGSize(width: fitted.width * zoom, height: fitted.height * zoom))
-                        .offset(pan)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
+                    if compare && model.comparisonLayout == .sideBySide, let before = model.beforeImage,
+                       !model.maskInteractionActive, !model.liquifyBrushActive, !model.repairBrushActive {
+                        sideBySideView(before: before, after: after, geometry: geometry.size)
+                    } else {
+                        let fitted = fit(after.size, in: CGSize(width: max(1, geometry.size.width - 48), height: max(1, geometry.size.height - 64)))
+                        photoContent(after, size: CGSize(width: fitted.width * zoom, height: fitted.height * zoom))
+                            .offset(pan)
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                    }
                     canvasControls
                 } else if model.previewBusy {
                     VStack(spacing: 15) {
@@ -94,6 +99,19 @@ struct PhotoCanvas: View {
                         .foregroundColor(zoom > 1.25 ? AtelierPalette.accent : AtelierPalette.muted)
                     }
                     .help(zoom > 1.25 ? "还原为适合窗口视图" : "一键智能缩放居中至面部区域，便于精细对比微雕细节")
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            model.showFaceLandmarksHUD.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: model.showFaceLandmarksHUD ? "viewfinder.circle.fill" : "viewfinder.circle")
+                            Text("五官").font(.system(size: 9))
+                        }
+                        .foregroundColor(model.showFaceLandmarksHUD ? AtelierPalette.accent : AtelierPalette.muted)
+                    }
+                    .help("开启/关闭面部关键五官定位网格高亮")
                 }
                 Button { zoom = max(1, zoom / 1.5); if zoom == 1 { pan = .zero; panOrigin = .zero } } label: { Image(systemName: "minus") }
                 Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 37)
@@ -171,14 +189,20 @@ struct PhotoCanvas: View {
                         .frame(width: size.width, height: size.height).clipped()
                         .mask(alignment: .leading) { Rectangle().frame(width: size.width * split) }
                     Rectangle().fill(.white.opacity(0.8)).frame(width: 1).offset(x: size.width * split)
+                    let idealHandleY = size.height / 2 - pan.height - 13
+                    let handleY = min(max(24, idealHandleY), size.height - 38)
                     Image(systemName: "arrow.left.and.right")
                         .font(.system(size: 9, weight: .bold)).foregroundColor(.black.opacity(0.8))
                         .frame(width: 26, height: 26).background(.white.opacity(0.9)).clipShape(Circle())
-                        .offset(x: size.width * split - 13, y: size.height / 2 - 13)
+                        .offset(x: size.width * split - 13, y: handleY)
                     HStack {
                         Text(model.comparisonLeftTitle); Spacer(); Text(model.comparisonRightTitle)
                     }.font(.system(size: 9, weight: .medium)).foregroundColor(.white)
                         .padding(11).background(LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
+                }
+
+                if model.showFaceLandmarksHUD {
+                    faceLandmarksOverlay(size)
                 }
 
                 if model.showMaskOverlay && (!comparisonVisible || model.maskInteractionActive) {
@@ -694,5 +718,164 @@ struct PhotoCanvas: View {
                 panOrigin = pan
             }
         }
+    }
+
+    // MARK: - P3-D: 2-Up Side-by-Side Comparison & Face Landmarks HUD
+
+    private func sideBySideView(before: NSImage, after: NSImage, geometry: CGSize) -> some View {
+        let margin: CGFloat = 8
+        let dividerWidth: CGFloat = 2
+        let paneWidth = max(100, (geometry.width - margin * 3 - dividerWidth) / 2)
+        let paneHeight = max(100, geometry.height - 48)
+
+        let fitted = fit(after.size, in: CGSize(width: paneWidth, height: paneHeight))
+        let scaledSize = CGSize(width: fitted.width * zoom, height: fitted.height * zoom)
+
+        return HStack(spacing: margin) {
+            singleComparisonPane(
+                title: model.comparisonLeftTitle,
+                titleColor: .orange,
+                image: before,
+                scaledSize: scaledSize,
+                paneSize: CGSize(width: paneWidth, height: paneHeight)
+            )
+
+            Rectangle()
+                .fill(Color.white.opacity(0.15))
+                .frame(width: dividerWidth, height: paneHeight)
+
+            singleComparisonPane(
+                title: model.comparisonRightTitle,
+                titleColor: AtelierPalette.accent,
+                image: after,
+                scaledSize: scaledSize,
+                paneSize: CGSize(width: paneWidth, height: paneHeight)
+            )
+        }
+        .frame(width: geometry.width, height: geometry.height)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 2)
+            .onChanged { event in
+                guard zoom > 1 else { return }
+                pan = CGSize(width: panOrigin.width + event.translation.width, height: panOrigin.height + event.translation.height)
+            }
+            .onEnded { _ in
+                panOrigin = pan
+            })
+        .onTapGesture(count: 2) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                zoom = 1
+                pan = .zero
+                panOrigin = .zero
+            }
+        }
+    }
+
+    private func singleComparisonPane(title: String, titleColor: Color, image: NSImage, scaledSize: CGSize, paneSize: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            Image(nsImage: image)
+                .resizable()
+                .frame(width: scaledSize.width, height: scaledSize.height)
+                .offset(pan)
+                .frame(width: paneSize.width, height: paneSize.height, alignment: .center)
+                .clipped()
+
+            if model.showFaceLandmarksHUD {
+                faceLandmarksOverlay(scaledSize)
+                    .offset(pan)
+                    .frame(width: paneSize.width, height: paneSize.height, alignment: .center)
+                    .clipped()
+            }
+
+            HStack(spacing: 5) {
+                Circle().fill(titleColor).frame(width: 6, height: 6)
+                Text(title)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 9).padding(.vertical, 4.5)
+            .background(Color.black.opacity(0.72))
+            .clipShape(Capsule())
+            .padding(10)
+        }
+        .frame(width: paneSize.width, height: paneSize.height)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 4)
+    }
+
+    private func faceLandmarksOverlay(_ size: CGSize) -> some View {
+        guard let landmarks = model.primaryFaceLandmarks else { return AnyView(EmptyView()) }
+        return AnyView(
+            Canvas { context, _ in
+                let strokeCyan = StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+                let strokeTeal = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round)
+                let strokeDashed = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round, dash: [4, 3])
+
+                func mapPt(_ pt: CGPoint) -> CGPoint {
+                    CGPoint(x: pt.x * size.width, y: (1.0 - pt.y) * size.height)
+                }
+
+                func drawPath(_ points: [CGPoint], closed: Bool, color: Color, style: StrokeStyle) {
+                    guard points.count > 1 else { return }
+                    var path = Path()
+                    path.move(to: mapPt(points[0]))
+                    for i in 1..<points.count {
+                        path.addLine(to: mapPt(points[i]))
+                    }
+                    if closed {
+                        path.closeSubpath()
+                    }
+                    context.stroke(path, with: .color(color), style: style)
+                }
+
+                // Face bounding box
+                let box = landmarks.boundingBox
+                if box.width > 0 && box.height > 0 {
+                    let rect = CGRect(
+                        x: box.minX * size.width,
+                        y: (1.0 - box.maxY) * size.height,
+                        width: box.width * size.width,
+                        height: box.height * size.height
+                    )
+                    let boxPath = Path(roundedRect: rect, cornerRadius: 6)
+                    context.stroke(boxPath, with: .color(AtelierPalette.accent.opacity(0.8)), style: strokeDashed)
+                }
+
+                // Face Contour (jawline)
+                drawPath(landmarks.faceContour, closed: false, color: AtelierPalette.accent.opacity(0.85), style: strokeCyan)
+
+                // Eyebrows
+                drawPath(landmarks.leftEyebrow, closed: false, color: .cyan.opacity(0.85), style: strokeTeal)
+                drawPath(landmarks.rightEyebrow, closed: false, color: .cyan.opacity(0.85), style: strokeTeal)
+
+                // Eyes
+                drawPath(landmarks.leftEye, closed: true, color: .cyan, style: strokeCyan)
+                drawPath(landmarks.rightEye, closed: true, color: .cyan, style: strokeCyan)
+
+                // Pupils
+                if let lp = landmarks.leftPupil {
+                    let center = mapPt(lp)
+                    let dotRect = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+                    context.fill(Path(ellipseIn: dotRect), with: .color(.cyan))
+                    context.stroke(Path(ellipseIn: dotRect.insetBy(dx: -2, dy: -2)), with: .color(.white.opacity(0.8)), lineWidth: 1)
+                }
+                if let rp = landmarks.rightPupil {
+                    let center = mapPt(rp)
+                    let dotRect = CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)
+                    context.fill(Path(ellipseIn: dotRect), with: .color(.cyan))
+                    context.stroke(Path(ellipseIn: dotRect.insetBy(dx: -2, dy: -2)), with: .color(.white.opacity(0.8)), lineWidth: 1)
+                }
+
+                // Nose
+                drawPath(landmarks.nose, closed: false, color: .cyan.opacity(0.85), style: strokeTeal)
+
+                // Lips
+                drawPath(landmarks.outerLips, closed: true, color: Color(red: 1.0, green: 0.45, blue: 0.65).opacity(0.9), style: strokeCyan)
+                drawPath(landmarks.innerLips, closed: true, color: Color(red: 1.0, green: 0.45, blue: 0.65).opacity(0.7), style: strokeTeal)
+            }
+            .frame(width: size.width, height: size.height)
+            .allowsHitTesting(false)
+        )
     }
 }
