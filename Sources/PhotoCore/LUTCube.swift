@@ -2,6 +2,7 @@ import Foundation
 
 public enum LUTPresetGroup: String, Codable, CaseIterable, Equatable {
     case natural
+    case camera
     case portrait
     case cinematic
     case landscape
@@ -10,6 +11,7 @@ public enum LUTPresetGroup: String, Codable, CaseIterable, Equatable {
     public var title: String {
         switch self {
         case .natural: return "自然"
+        case .camera: return "相机"
         case .portrait: return "人像"
         case .cinematic: return "电影"
         case .landscape: return "风光"
@@ -489,7 +491,33 @@ public struct LUTCube {
         makeCreativePreset(id: "moody-oil", name: "暗调油画", detail: "戏剧性明暗对比，浓郁阴影与微光高光", look: .moodyOil,
                            group: .landscape, recommendedIntensity: 0.30, tags: ["暗调", "油画", "氛围", "浓郁"]),
         makeCreativePreset(id: "high-contrast-bw", name: "高对比黑白", detail: "深邃黑位与纯净高光，纪实张力十足", look: .highContrastBW,
-                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "高反差", "纪实", "纯粹"])
+                           group: .monochrome, recommendedIntensity: 0.36, tags: ["黑白", "高反差", "纪实", "纯粹"]),
+        makeCreativePreset(id: "camera-ricoh-positive", name: "理光正片", detail: "高反差、浓郁饱和与鲜明街头抓拍感（GR 正片风格）", look: .cameraRicohPositive,
+                           group: .camera, recommendedIntensity: 0.35, tags: ["理光", "正片", "街拍", "高反差", "色彩浓郁"]),
+        makeCreativePreset(id: "camera-ricoh-hard-bw", name: "理光高反差黑白", detail: "深邃硬朗黑位与高动态光影张力（森山大道街头风）", look: .cameraRicohHardBW,
+                           group: .camera, recommendedIntensity: 0.38, tags: ["理光", "黑白", "高反差", "街头", "森山大道"]),
+        makeCreativePreset(id: "camera-leica-vibrant", name: "徕卡鲜活", detail: "浓郁油润德味、高微反差与深邃红蓝色泽", look: .cameraLeicaVibrant,
+                           group: .camera, recommendedIntensity: 0.32, tags: ["徕卡", "德味", "鲜活", "油润", "微反差"]),
+        makeCreativePreset(id: "camera-leica-classic", name: "徕卡经典", detail: "沉静克制、细腻层次与柔和高光滚降的人文纪实影调", look: .cameraLeicaClassic,
+                           group: .camera, recommendedIntensity: 0.34, tags: ["徕卡", "经典", "纪实", "高光柔和", "人文"]),
+        makeCreativePreset(id: "camera-leica-monochrome", name: "徕卡M黑白", detail: "极度丰富的中灰层次与平滑过渡，纯正银盐影调", look: .cameraLeicaMonochrome,
+                           group: .camera, recommendedIntensity: 0.36, tags: ["徕卡", "黑白", "银盐", "中间调", "细腻"]),
+        makeCreativePreset(id: "camera-fuji-velvia", name: "富士Velvia", detail: "经典高饱和反转片，极致纯净艳丽的蓝天与葱郁绿植", look: .cameraFujiVelvia,
+                           group: .camera, recommendedIntensity: 0.30, tags: ["富士", "Velvia", "反转片", "高饱和", "风光"]),
+        makeCreativePreset(id: "camera-fuji-proneg", name: "富士PRO Neg", detail: "适度偏硬反差、纯净透亮肤色与干净利落的影棚人像", look: .cameraFujiProNeg,
+                           group: .camera, recommendedIntensity: 0.35, tags: ["富士", "PRO Neg", "影棚", "通透肤色", "时装"]),
+        makeCreativePreset(id: "camera-sony-scinetone", name: "索尼S-Cinetone", detail: "源自威尼斯电影机，柔和自然肤色与电影级高光过渡", look: .cameraSonySCinetone,
+                           group: .camera, recommendedIntensity: 0.35, tags: ["索尼", "S-Cinetone", "电影感", "柔和肤色", "高光过渡"]),
+        makeCreativePreset(id: "camera-sony-fl", name: "索尼FL通透", detail: "暗部青蓝微冷、略抬黑位与清冽通透的现代街头感", look: .cameraSonyFL,
+                           group: .camera, recommendedIntensity: 0.32, tags: ["索尼", "FL", "创意外观", "冷调阴影", "现代街头"]),
+        makeCreativePreset(id: "camera-nikon-landscape", name: "尼康鲜活", detail: "明亮清澈的天空蓝、高反差黄绿叶片与立体通透大片", look: .cameraNikonLandscape,
+                           group: .camera, recommendedIntensity: 0.32, tags: ["尼康", "风光", "高反差", "清澈蓝天", "立体感"]),
+        makeCreativePreset(id: "camera-nikon-portrait", name: "尼康人像", detail: "通透自然、微粉肤色与柔和明暗过渡的温润人像", look: .cameraNikonPortrait,
+                           group: .camera, recommendedIntensity: 0.35, tags: ["尼康", "人像", "通透", "自然肤色", "温润"]),
+        makeCreativePreset(id: "camera-canon-portrait", name: "佳能红润", detail: "享誉业界的透粉红润好气色，温润通透的面部高光", look: .cameraCanonPortrait,
+                           group: .camera, recommendedIntensity: 0.36, tags: ["佳能", "人像", "透粉", "红润气色", "柔和高光"]),
+        makeCreativePreset(id: "camera-hasselblad-hncs", name: "哈苏自然", detail: "极其平滑真实的自然阶调、典雅克制色彩与高级中灰色阶", look: .cameraHasselbladHNCS,
+                           group: .camera, recommendedIntensity: 0.32, tags: ["哈苏", "HNCS", "真实自然", "高级中灰", "大师影调"])
     ]
 
     public static var builtIns: [LUTPreset] { builtInStorage }
@@ -564,6 +592,19 @@ public struct LUTCube {
         case morandiMuted
         case moodyOil
         case highContrastBW
+        case cameraRicohPositive
+        case cameraRicohHardBW
+        case cameraLeicaVibrant
+        case cameraLeicaClassic
+        case cameraLeicaMonochrome
+        case cameraFujiVelvia
+        case cameraFujiProNeg
+        case cameraSonySCinetone
+        case cameraSonyFL
+        case cameraNikonLandscape
+        case cameraNikonPortrait
+        case cameraCanonPortrait
+        case cameraHasselbladHNCS
     }
 
     /// Original creative looks authored for normalized sRGB code values. This
@@ -690,6 +731,105 @@ public struct LUTCube {
                         var bw = luminance
                         bw = (bw - 0.5) * 1.20 + 0.5
                         color = SIMD3<Float>(repeating: min(max(bw, 0), 1))
+
+                    case .cameraRicohPositive:
+                        color = gray + (color - gray) * 1.10
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.05 + SIMD3<Float>(repeating: 0.5)
+                        let shadowDrop = 0.020 * (1 - luminance) * (1 - luminance)
+                        color -= SIMD3<Float>(repeating: shadowDrop)
+                        let warmth = 0.010 * luminance * luminance
+                        color += SIMD3<Float>(warmth, warmth * 0.20, -warmth * 0.70)
+                        let blueAffinity = max(blue - max(red, green), 0)
+                        color += SIMD3<Float>(-0.005 * blueAffinity, 0.008 * blueAffinity, 0.030 * blueAffinity)
+                        let redAffinity = max(red - max(green, blue), 0)
+                        color += SIMD3<Float>(0.025 * redAffinity, -0.004 * redAffinity, -0.008 * redAffinity)
+
+                    case .cameraRicohHardBW:
+                        var bw = luminance
+                        bw = (bw - 0.5) * 1.30 + 0.5
+                        color = SIMD3<Float>(repeating: min(max(bw, 0), 1))
+
+                    case .cameraLeicaVibrant:
+                        color = gray + (color - gray) * 1.06
+                        let midLuma = 4 * luminance * (1 - luminance)
+                        let toe = 0.015 * (1 - luminance) * (1 - luminance)
+                        color -= SIMD3<Float>(repeating: toe)
+                        let redPop = max(red - green, 0) * midLuma
+                        let bluePop = max(blue - green, 0) * midLuma
+                        color += SIMD3<Float>(0.018 * redPop, 0, 0.018 * bluePop)
+
+                    case .cameraLeicaClassic:
+                        color = gray + (color - gray) * 0.98
+                        let shoulder = 0.025 * luminance * luminance
+                        color -= SIMD3<Float>(repeating: shoulder)
+                        let warmth = 0.006 * luminance
+                        color += SIMD3<Float>(warmth, warmth * 0.15, -warmth * 0.65)
+
+                    case .cameraLeicaMonochrome:
+                        let m = 0.015 + 0.96 * luminance + 0.02 * sin(luminance * .pi)
+                        color = SIMD3<Float>(repeating: min(max(m, 0), 1))
+
+                    case .cameraFujiVelvia:
+                        color = gray + (color - gray) * 1.10
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.05 + SIMD3<Float>(repeating: 0.5)
+                        let greenAffinity = max(green - max(red, blue), 0)
+                        color += SIMD3<Float>(-0.006 * greenAffinity, 0.035 * greenAffinity, 0.004 * greenAffinity)
+                        let blueAffinity = max(blue - max(red, green), 0)
+                        color += SIMD3<Float>(-0.008 * blueAffinity, 0.005 * blueAffinity, 0.030 * blueAffinity)
+
+                    case .cameraFujiProNeg:
+                        color = gray + (color - gray) * 0.96
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.03 + SIMD3<Float>(repeating: 0.5)
+                        let toe = 0.018 * (1 - luminance) * (1 - luminance)
+                        color += SIMD3<Float>(repeating: toe)
+                        let skinZone = max(0, 1 - abs(luminance - 0.65) / 0.35)
+                        let skinAffinity = max(red - blue, 0) * skinZone
+                        color += SIMD3<Float>(0.022 * skinAffinity, 0.006 * skinAffinity, -0.010 * skinAffinity)
+
+                    case .cameraSonySCinetone:
+                        color = gray + (color - gray) * 0.95
+                        let shoulder = 0.035 * luminance * luminance
+                        let toe = 0.012 * (1 - luminance) * (1 - luminance)
+                        color += SIMD3<Float>(repeating: toe - shoulder)
+                        let skinZone = max(0, 1 - abs(luminance - 0.60) / 0.40)
+                        let warmth = 0.008 * skinZone
+                        color += SIMD3<Float>(warmth, warmth * 0.20, -warmth * 0.60)
+
+                    case .cameraSonyFL:
+                        let lift = 0.030 * (1 - luminance) * (1 - luminance)
+                        color = SIMD3<Float>(repeating: luminance + lift) + (color - gray) * 1.02
+                        let shadow = 2 * (1 - luminance) * (1 - luminance)
+                        color += SIMD3<Float>(-0.006 * shadow, 0.003 * shadow, 0.010 * shadow)
+
+                    case .cameraNikonLandscape:
+                        color = gray + (color - gray) * 1.07
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.04 + SIMD3<Float>(repeating: 0.5)
+                        let yellowGreen = max(min(red, green) - blue, 0)
+                        color += SIMD3<Float>(0.012 * yellowGreen, 0.020 * yellowGreen, -0.010 * yellowGreen)
+                        let skyBlue = max(blue - red, 0)
+                        color += SIMD3<Float>(-0.008 * skyBlue, 0.004 * skyBlue, 0.025 * skyBlue)
+
+                    case .cameraNikonPortrait:
+                        color = gray + (color - gray) * 1.02
+                        color = (color - SIMD3<Float>(repeating: 0.5)) * 1.025 + SIMD3<Float>(repeating: 0.5)
+                        let midtone = max(0, 1 - abs(luminance - 0.58) / 0.45)
+                        let yellowWarm = max(min(red, green * 1.1) - blue, 0) * midtone
+                        color += SIMD3<Float>(0.018 * yellowWarm, 0.014 * yellowWarm, -0.012 * yellowWarm)
+                        let shadowDrop = 0.012 * (1 - luminance) * (1 - luminance)
+                        color -= SIMD3<Float>(repeating: shadowDrop)
+
+                    case .cameraCanonPortrait:
+                        color = gray + (color - gray) * 1.01
+                        let faceZone = max(0, 1 - abs(luminance - 0.62) / 0.45)
+                        let peachAffinity = max(red - max(green * 0.8, blue), 0) * faceZone
+                        color += SIMD3<Float>(0.024 * peachAffinity, 0.004 * peachAffinity, 0.006 * peachAffinity)
+                        let shoulder = 0.018 * luminance * luminance
+                        color -= SIMD3<Float>(repeating: shoulder)
+
+                    case .cameraHasselbladHNCS:
+                        color = gray + (color - gray) * 1.005
+                        let rollOff = 0.010 * sin((luminance - 0.5) * .pi)
+                        color += SIMD3<Float>(repeating: rollOff)
                     }
 
                     table.append(min(max(color.x, 0), 1))
