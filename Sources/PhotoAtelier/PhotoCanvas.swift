@@ -22,6 +22,7 @@ struct PhotoCanvas: View {
     @State private var zoom: CGFloat = 1
     @State private var pan = CGSize.zero
     @State private var panOrigin = CGSize.zero
+    @State private var canvasAreaSize: CGSize = CGSize(width: 800, height: 600)
 
     var body: some View {
         GeometryReader { geometry in
@@ -41,7 +42,10 @@ struct PhotoCanvas: View {
                 } else {
                     emptyState
                 }
-            }.clipped()
+            }
+            .clipped()
+            .onAppear { canvasAreaSize = geometry.size }
+            .onChange(of: geometry.size) { newSize in canvasAreaSize = newSize }
         }
         .onChange(of: model.selectedID) { _ in
             zoom = 1
@@ -58,6 +62,9 @@ struct PhotoCanvas: View {
         .onChange(of: model.repairBrushActive) { _ in cancelCanvasGesture() }
         .onChange(of: model.batchRunning) { running in
             if running { cancelCanvasGesture() }
+        }
+        .onChange(of: model.focusOnFaceEvent) { _ in
+            focusOnPrimaryFace()
         }
         .onExitCommand {
             if model.repairBrushActive {
@@ -78,6 +85,15 @@ struct PhotoCanvas: View {
             Spacer()
             HStack(spacing: 5) {
                 Button { zoom = 1; pan = .zero; panOrigin = .zero } label: { Text("适合").font(.system(size: 9)) }
+                if model.portraitFaceStatus.detectedFaceCount > 0 {
+                    Button { focusOnPrimaryFace() } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "face.dashed")
+                            Text("面部").font(.system(size: 9))
+                        }
+                    }
+                    .help("一键缩放居中至面部区域，便于精细对比微雕细节")
+                }
                 Button { zoom = max(1, zoom / 1.5); if zoom == 1 { pan = .zero; panOrigin = .zero } } label: { Image(systemName: "minus") }
                 Text("\(Int(zoom * 100))%").font(.system(size: 9, design: .monospaced)).frame(width: 37)
                 Button { zoom = min(6, zoom * 1.5) } label: { Image(systemName: "plus") }
@@ -629,5 +645,19 @@ struct PhotoCanvas: View {
     private func screenDistance(_ point: CGPoint, to maskPoint: MaskPoint, size: CGSize) -> CGFloat {
         let target = screen(maskPoint, size: size)
         return hypot(point.x - target.x, point.y - target.y)
+    }
+
+    private func focusOnPrimaryFace() {
+        guard let after = model.afterImage else { return }
+        let box = model.primaryFaceBoundingBox ?? CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            let targetZoom: CGFloat = 2.5
+            zoom = targetZoom
+            let fitted = fit(after.size, in: CGSize(width: max(1, canvasAreaSize.width - 48), height: max(1, canvasAreaSize.height - 64)))
+            let dx = (0.5 - box.midX) * fitted.width * targetZoom
+            let dy = (box.midY - 0.5) * fitted.height * targetZoom
+            pan = CGSize(width: dx, height: dy)
+            panOrigin = pan
+        }
     }
 }
