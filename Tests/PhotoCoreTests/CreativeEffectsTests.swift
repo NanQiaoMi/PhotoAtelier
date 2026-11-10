@@ -18,15 +18,15 @@ final class CreativeEffectsTests: XCTestCase {
 
     func testSettingsDefaultToNeutralAndDecodeMissingStrengthsAsZero() throws {
         let settings = CreativeEffectsSettings()
-        XCTAssertEqual(settings, CreativeEffectsSettings(bloom: 0, vignette: 0, grain: 0))
+        XCTAssertEqual(settings, CreativeEffectsSettings(bloom: 0, vignette: 0, grain: 0, halation: 0, mist: 0, fade: 0, bleachBypass: 0))
         XCTAssertTrue(settings.isNeutral)
 
         let decoded = try JSONDecoder().decode(
             CreativeEffectsSettings.self, from: Data("{}".utf8))
         XCTAssertEqual(decoded, settings)
         let restored = try JSONDecoder().decode(CreativeEffectsSettings.self,
-            from: JSONEncoder().encode(CreativeEffectsSettings(bloom: 0.2, vignette: 0.4, grain: 0.8)))
-        XCTAssertEqual(restored, CreativeEffectsSettings(bloom: 0.2, vignette: 0.4, grain: 0.8))
+            from: JSONEncoder().encode(CreativeEffectsSettings(bloom: 0.2, vignette: 0.4, grain: 0.8, halation: 0.1, mist: 0.3, fade: 0.15, bleachBypass: 0.25)))
+        XCTAssertEqual(restored, CreativeEffectsSettings(bloom: 0.2, vignette: 0.4, grain: 0.8, halation: 0.1, mist: 0.3, fade: 0.15, bleachBypass: 0.25))
     }
 
     func testValidationRejectsNonFiniteAndOutOfRangeStrengths() {
@@ -35,14 +35,16 @@ final class CreativeEffectsTests: XCTestCase {
             .init(vignette: -0.001), .init(vignette: 1.001),
             .init(grain: -.infinity), .init(grain: .nan), .init(grain: .infinity),
             .init(halation: -0.01), .init(halation: 1.5),
-            .init(mist: -.infinity), .init(mist: 1.01)
+            .init(mist: -.infinity), .init(mist: 1.01),
+            .init(fade: -0.01), .init(fade: 1.2),
+            .init(bleachBypass: .nan), .init(bleachBypass: 2.0)
         ]
         for settings in invalid {
             XCTAssertThrowsError(try CreativeEffectsEngine.validate(settings))
         }
         XCTAssertNoThrow(try CreativeEffectsEngine.validate(.init()))
         XCTAssertNoThrow(try CreativeEffectsEngine.validate(
-            .init(bloom: 1, vignette: 1, grain: 1, halation: 1, mist: 1)))
+            .init(bloom: 1, vignette: 1, grain: 1, halation: 1, mist: 1, fade: 1, bleachBypass: 1)))
     }
 
     func testHalationAndMistEffectsPreserveGeometryAndAlpha() throws {
@@ -59,6 +61,14 @@ final class CreativeEffectsTests: XCTestCase {
             .init(mist: 0.6), to: spot, context: context)
         XCTAssertEqual(mistApplied.extent, spot.extent)
 
+        let fadeApplied = try CreativeEffectsEngine.apply(
+            .init(fade: 0.5), to: spot, context: context)
+        XCTAssertEqual(fadeApplied.extent, spot.extent)
+
+        let bleachApplied = try CreativeEffectsEngine.apply(
+            .init(bleachBypass: 0.5), to: spot, context: context)
+        XCTAssertEqual(bleachApplied.extent, spot.extent)
+
         let halationPixels = try render(halationApplied)
         let haloPixel = pixel(halationPixels, width: 48, x: 18, y: 24)
         // Halation produces warm red-tinted light leaking into edge neighbors
@@ -67,6 +77,11 @@ final class CreativeEffectsTests: XCTestCase {
         let mistPixels = try render(mistApplied)
         let darkPixel = pixel(mistPixels, width: 48, x: 5, y: 5)
         XCTAssertGreaterThan(darkPixel.red, 0.08)
+
+        let fadePixels = try render(fadeApplied)
+        let liftedPixel = pixel(fadePixels, width: 48, x: 5, y: 5)
+        // Fade lifts deep shadow luminance
+        XCTAssertGreaterThan(liftedPixel.red, 0.10)
     }
 
     func testNeutralSettingsReturnTheOriginalImageAndCancelledWorkThrows() throws {

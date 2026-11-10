@@ -77,7 +77,7 @@ final class FilmLUTCatalogTests: XCTestCase {
 
     func testExistingBuiltinCatalogAndLegacyInitializerRemainUnattributed() throws {
         let originalBuiltins = LUTCube.builtIns
-        XCTAssertEqual(originalBuiltins.count, 19)
+        XCTAssertEqual(originalBuiltins.count, 32)
         XCTAssertTrue(originalBuiltins.allSatisfy { $0.provenance == nil })
 
         let neutral = try XCTUnwrap(originalBuiltins.first { $0.id == "neutral" })

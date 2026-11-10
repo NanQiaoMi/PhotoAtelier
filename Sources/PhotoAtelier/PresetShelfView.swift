@@ -28,6 +28,7 @@ struct PresetShelfView: View {
             CategoryItem(id: "all", title: "全部", count: model.lutOptions.count)
         ]
         let groups: [(LUTPresetGroup, String)] = [
+            (.camera, "相机"),
             (.portrait, "人像"),
             (.cinematic, "电影"),
             (.natural, "自然"),
@@ -378,6 +379,7 @@ struct PresetShelfView: View {
     private func cardPlaceholderColor(_ option: LUTOption) -> Color {
         guard let group = option.group else { return AtelierPalette.raised }
         switch group {
+        case .camera: return Color(red: 0.15, green: 0.13, blue: 0.12)
         case .portrait: return Color(red: 0.16, green: 0.13, blue: 0.14)
         case .cinematic: return Color(red: 0.12, green: 0.14, blue: 0.16)
         case .natural: return Color(red: 0.14, green: 0.15, blue: 0.13)

@@ -9,22 +9,28 @@ public struct CreativeEffectsSettings: Codable, Equatable {
     public var grain: Double
     public var halation: Double
     public var mist: Double
+    public var fade: Double
+    public var bleachBypass: Double
 
     public init(bloom: Double = 0, vignette: Double = 0, grain: Double = 0,
-                halation: Double = 0, mist: Double = 0) {
+                halation: Double = 0, mist: Double = 0,
+                fade: Double = 0, bleachBypass: Double = 0) {
         self.bloom = bloom
         self.vignette = vignette
         self.grain = grain
         self.halation = halation
         self.mist = mist
+        self.fade = fade
+        self.bleachBypass = bleachBypass
     }
 
     public var isNeutral: Bool {
         bloom == 0 && vignette == 0 && grain == 0 && halation == 0 && mist == 0
+            && fade == 0 && bleachBypass == 0
     }
 
     private enum CodingKeys: String, CodingKey {
-        case bloom, vignette, grain, halation, mist
+        case bloom, vignette, grain, halation, mist, fade, bleachBypass
     }
 
     public init(from decoder: Decoder) throws {
@@ -34,7 +40,9 @@ public struct CreativeEffectsSettings: Codable, Equatable {
             vignette: try container.decodeIfPresent(Double.self, forKey: .vignette) ?? 0,
             grain: try container.decodeIfPresent(Double.self, forKey: .grain) ?? 0,
             halation: try container.decodeIfPresent(Double.self, forKey: .halation) ?? 0,
-            mist: try container.decodeIfPresent(Double.self, forKey: .mist) ?? 0
+            mist: try container.decodeIfPresent(Double.self, forKey: .mist) ?? 0,
+            fade: try container.decodeIfPresent(Double.self, forKey: .fade) ?? 0,
+            bleachBypass: try container.decodeIfPresent(Double.self, forKey: .bleachBypass) ?? 0
         )
     }
 
@@ -45,6 +53,8 @@ public struct CreativeEffectsSettings: Codable, Equatable {
         try container.encode(grain, forKey: .grain)
         try container.encode(halation, forKey: .halation)
         try container.encode(mist, forKey: .mist)
+        try container.encode(fade, forKey: .fade)
+        try container.encode(bleachBypass, forKey: .bleachBypass)
     }
 }
 
@@ -168,6 +178,43 @@ internal enum CreativeEffectsEngine {
     }
     """)
 
+    private static let fadeKernel = CIColorKernel(source: """
+    kernel vec4 addCreativeFade(__sample source, float strength) {
+        float alpha = source.a;
+        if (!(alpha > 0.0) || !(alpha <= 1.0)) { return source; }
+
+        vec3 color = source.rgb / alpha;
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        if (!(luminance >= 0.0)) { return source; }
+
+        float shadowWeight = max(0.0, 1.0 - smoothstep(0.0, 0.32, luminance));
+        float lift = 0.09 * strength * shadowWeight;
+        vec3 faded = color + vec3(lift);
+        faded = min(faded, vec3(65504.0));
+        return vec4(faded * alpha, alpha);
+    }
+    """)
+
+    private static let bleachBypassKernel = CIColorKernel(source: """
+    kernel vec4 addCreativeBleachBypass(__sample source, float strength) {
+        float alpha = source.a;
+        if (!(alpha > 0.0) || !(alpha <= 1.0)) { return source; }
+
+        vec3 color = source.rgb / alpha;
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        if (!(luminance >= 0.0)) { return source; }
+
+        float hardLuma = smoothstep(0.06, 0.94, luminance);
+        vec3 blended = (luminance < 0.5)
+            ? (2.0 * color * hardLuma)
+            : (1.0 - 2.0 * (1.0 - color) * (1.0 - hardLuma));
+        vec3 silver = mix(blended, vec3(hardLuma), 0.35);
+        vec3 result = mix(color, silver, 0.50 * strength);
+        result = min(max(result, vec3(0.0)), vec3(65504.0));
+        return vec4(result * alpha, alpha);
+    }
+    """)
+
     private static let finishKernel = CIColorKernel(source: """
     float creativeNoise(vec2 position) {
         // A fixed-coordinate hash makes repeated renders and ROI renders agree.
@@ -213,8 +260,9 @@ internal enum CreativeEffectsEngine {
     """)
 
     static func validate(_ settings: CreativeEffectsSettings) throws {
-        let values = [settings.bloom, settings.vignette, settings.grain, settings.halation, settings.mist]
-        let names = ["柔光", "暗角", "颗粒", "光晕", "薄雾"]
+        let values = [settings.bloom, settings.vignette, settings.grain, settings.halation, settings.mist,
+                      settings.fade, settings.bleachBypass]
+        let names = ["柔光", "暗角", "颗粒", "光晕", "薄雾", "褪色", "留银"]
         for (index, value) in values.enumerated() {
             guard value.isFinite, (0...1).contains(value) else {
                 throw AtelierError.invalidConfiguration(
@@ -301,6 +349,28 @@ internal enum CreativeEffectsEngine {
                 throw AtelierError.invalidConfiguration("Core Image 薄雾合成 kernel 无法生成输出。")
             }
             output = composite.cropped(to: extent)
+        }
+
+        if settings.bleachBypass > 0 {
+            try cancellation?.check()
+            guard let bleachKernel = Self.bleachBypassKernel,
+                  let bleached = bleachKernel.apply(extent: extent, arguments: [
+                    output, NSNumber(value: settings.bleachBypass)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 留银效果 kernel 无法生成输出。")
+            }
+            output = bleached.cropped(to: extent)
+        }
+
+        if settings.fade > 0 {
+            try cancellation?.check()
+            guard let fadeKernel = Self.fadeKernel,
+                  let faded = fadeKernel.apply(extent: extent, arguments: [
+                    output, NSNumber(value: settings.fade)
+                  ]) else {
+                throw AtelierError.invalidConfiguration("Core Image 胶片褪色 kernel 无法生成输出。")
+            }
+            output = faded.cropped(to: extent)
         }
 
         if settings.vignette > 0 || settings.grain > 0 {

@@ -18,7 +18,20 @@ final class LUTCatalogTests: XCTestCase {
         ("kodak-gold", .cinematic, 0.34),
         ("morandi-muted", .natural, 0.30),
         ("moody-oil", .landscape, 0.30),
-        ("high-contrast-bw", .monochrome, 0.36)
+        ("high-contrast-bw", .monochrome, 0.36),
+        ("camera-ricoh-positive", .camera, 0.35),
+        ("camera-ricoh-hard-bw", .camera, 0.38),
+        ("camera-leica-vibrant", .camera, 0.32),
+        ("camera-leica-classic", .camera, 0.34),
+        ("camera-leica-monochrome", .camera, 0.36),
+        ("camera-fuji-velvia", .camera, 0.30),
+        ("camera-fuji-proneg", .camera, 0.35),
+        ("camera-sony-scinetone", .camera, 0.35),
+        ("camera-sony-fl", .camera, 0.32),
+        ("camera-nikon-landscape", .camera, 0.32),
+        ("camera-nikon-portrait", .camera, 0.35),
+        ("camera-canon-portrait", .camera, 0.36),
+        ("camera-hasselblad-hncs", .camera, 0.32)
     ]
 
     func testLegacyPresetOrderAndFullTableHashesRemainUnchanged() throws {
@@ -57,7 +70,7 @@ final class LUTCatalogTests: XCTestCase {
 
     func testCatalogContainsEightOriginalCreativeLooksWithCompleteMetadata() throws {
         let presets = LUTCube.builtIns
-        XCTAssertEqual(presets.count, 19)
+        XCTAssertEqual(presets.count, 32)
         XCTAssertEqual(Set(presets.map(\.id)).count, presets.count)
 
         for (index, metadata) in creativeMetadata.enumerated() {
@@ -70,7 +83,7 @@ final class LUTCatalogTests: XCTestCase {
             XCTAssertFalse(preset.detail.isEmpty, preset.id)
         }
 
-        XCTAssertEqual(LUTPresetGroup.allCases.map(\.title), ["自然", "人像", "电影", "风光", "黑白"])
+        XCTAssertEqual(LUTPresetGroup.allCases.map(\.title), ["自然", "相机", "人像", "电影", "风光", "黑白"])
         for group in LUTPresetGroup.allCases {
             XCTAssertEqual(try JSONDecoder().decode(LUTPresetGroup.self,
                                                      from: JSONEncoder().encode(group)), group)
@@ -163,7 +176,8 @@ final class LUTCatalogTests: XCTestCase {
     }
 
     func testMonochromeLooksRemoveAllChroma() throws {
-        let monochromeIDs: Set<String> = ["silver-salt", "soft-monochrome", "high-contrast-bw"]
+        let monochromeIDs: Set<String> = ["silver-salt", "soft-monochrome", "high-contrast-bw",
+                                          "camera-ricoh-hard-bw", "camera-leica-monochrome"]
         let presets = LUTCube.builtIns.filter { monochromeIDs.contains($0.id) }
         XCTAssertEqual(presets.count, monochromeIDs.count)
 
