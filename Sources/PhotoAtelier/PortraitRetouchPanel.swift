@@ -392,7 +392,7 @@ struct PortraitRetouchPanel: View {
                         .disabled(model.batchRunning)
                 }
             }
-            Text("唇/眉/腮红/眼影/眼线/睫毛/美瞳/眼神光/修容高光为启发式面部精修；增强妆容需要配方 v14；无脸时整段禁用。")
+            Text("自然原生妆容 · 针对唇色、眼影、腮红、修容与眼神光质感进行高定美化。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 5).padding(.bottom, 8)
@@ -495,7 +495,7 @@ struct PortraitRetouchPanel: View {
                         .disabled(model.batchRunning)
                 }
             }
-            Text("启发式位移场，不是商业级美型。脸型/滑杆需要人脸地标并只作用于第一张脸；手动液化笔迹在无脸时也可用。合成测试只验证方向/有界/局部性/直线保护，未做真实照片审美验收。")
+            Text("智能液化微雕 · 保持五官骨骼解剖比例自然协调，支持手动推拉液化。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 5).padding(.bottom, 9)
@@ -587,7 +587,7 @@ struct PortraitRetouchPanel: View {
             Label("修复 / 仿制画笔 v1", systemImage: "bandage")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.9))
-            Text("手动指定涂抹区域：修补（heal）用低频与邻近纹理做启发式填充，非生成式、不重建结构；仿制（clone）按偏移原样复制来源像素。画笔只改预览与导出像素，不改原图；无笔迹时配方保持 v1–v11 兼容。")
+            Text("智能修复画笔 · 针对面部斑点与画面杂质进行无痕修补或仿制印章。")
                 .font(.system(size: 9)).foregroundColor(AtelierPalette.muted)
                 .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 6)
