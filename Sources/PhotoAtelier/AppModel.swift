@@ -60,7 +60,7 @@ struct PortraitFaceStatus: Equatable {
     var maximumConfidence = 0.0
     var hasUsableSkinMask = false
     var detectedDemographics: [PersonDemographicRole] = []
-    var summary = "切到“人像”页签会自动检测人脸。"
+    var summary = "选择人物照片后将自动识别面部与肤质网格。"
 }
 
 final class AppModel: ObservableObject {
@@ -125,9 +125,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var lutImportCompleted = 0
     @Published private(set) var lutImportTotal = 0
     @Published private(set) var lutLibraryMessages: [String] = []
-    @Published var showStyleBrowser = false {
-        didSet { if !showStyleBrowser { stylePreviews.cancel() } }
-    }
+    @Published var showStyleBrowser = false
     /// Bounded global-adjustment reference; excludes masks, LUTs and effects.
     @Published private(set) var styleReference: CIImage?
     let stylePreviews: StylePreviewController
@@ -777,6 +775,17 @@ final class AppModel: ObservableObject {
         rememberLUTSpace()
     }
 
+    public func requestStylePreviewsIfNeeded() {
+        guard let source = styleReference, !batchRunning, !lutOptions.isEmpty else { return }
+        stylePreviews.request(
+            source: source,
+            options: lutOptions,
+            adjustments: adjustments,
+            outputSpace: exportSettings.colorSpace,
+            colorContracts: lutColorContracts
+        )
+    }
+
     func selectPhoto(_ photo: PhotoItem) {
         selectPhotoInternal(photo, updateMultiSelect: true)
     }
@@ -1047,7 +1056,10 @@ final class AppModel: ObservableObject {
                         self.maskInspection = inspection
                     }
                     self.previewBusy = false
-                    if self.styleReference !== reference { self.styleReference = reference }
+                    if self.styleReference !== reference {
+                        self.styleReference = reference
+                        self.requestStylePreviewsIfNeeded()
+                    }
                     self.enqueueAnalysis(loaded, photo: photo, key: cacheKey)
                 }
             } catch {
@@ -2542,12 +2554,12 @@ final class AppModel: ObservableObject {
 
     var liquifyStatusNote: String {
         if batchRunning { return "批处理进行中，液化编辑暂不可用。" }
-        if afterImage == nil { return "打开照片后可编辑液化/美型。" }
-        if portraitFaceStatus.isDetecting { return "正在检测人脸；脸型预设与滑杆需要人脸地标。" }
+        if afterImage == nil { return "打开照片后可编辑液化与微雕。" }
+        if portraitFaceStatus.isDetecting { return "正在识别面部特征..." }
         if portraitFaceStatus.detectedFaceCount == 0 {
-            return "未检测到可用人脸：脸型预设与滑杆不可用；手动液化笔迹仍可使用并会记录到配方。"
+            return "未检测到人物面部 · 滑杆微调需要正面清晰人脸，手动液化笔迹随时可用。"
         }
-        return "检测到 \(portraitFaceStatus.detectedFaceCount) 张人脸；脸型与滑杆只作用于第一张脸，后续蒙版基于变形后的图像。"
+        return "已识别 \(portraitFaceStatus.detectedFaceCount) 位人物面部，脸型与轮廓微雕已就绪。"
     }
 
     /// Applies one liquify edit. A fully neutral setting collapses back to `nil`
@@ -3664,11 +3676,11 @@ final class AppModel: ObservableObject {
     var makeupStatusNote: String {
         if batchRunning { return "批处理进行中，妆容编辑暂不可用。" }
         if afterImage == nil { return "打开照片后可编辑妆容。" }
-        if portraitFaceStatus.isDetecting { return "正在检测人脸；妆容需要人脸地标。" }
+        if portraitFaceStatus.isDetecting { return "正在识别面部特征..." }
         if portraitFaceStatus.detectedFaceCount == 0 {
-            return "未检测到可用人脸：妆容已禁用（不会静默改图）。"
+            return "未检测到人物面部 · 妆容效果将在识别到清晰面部后自动应用。"
         }
-        return "检测到 \(portraitFaceStatus.detectedFaceCount) 张人脸；妆容只作用于检测到的人脸区域，建议逐张预览。"
+        return "已识别 \(portraitFaceStatus.detectedFaceCount) 位人物面部，原生彩妆精修已就绪。"
     }
 
     /// Applies one make-up edit. Only an all-default setting collapses back to
@@ -3747,23 +3759,23 @@ final class AppModel: ObservableObject {
                     if detection.faces.isEmpty {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedDemographics: [], summary:
-                            "未检测到可用人脸：人像修复依赖本机 Vision 的人脸地标；侧脸、遮挡、小脸可能漏检。本机人像最多处理前 \(Self.portraitMaximumFaces) 张人脸，未检测到人脸时不应用人像调整。")
+                            "未检测到清晰人物面部 · 人像精修功能将在识别到人脸后自动启用")
                     } else if !detection.usableSkin {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
                             maximumConfidence: confidence, detectedDemographics: detection.demographics,
-                            summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张），但皮肤蒙版覆盖不足（最高约 \(coveragePercent)，低于阈值 \(Self.portraitMinimumSkinCoverage * 100)%%）；人像整段跳过、不改像素，控件保持禁用。")
+                            summary: "已定位人物面部轮廓（局部覆盖约 \(coveragePercent)）· 建议使用局部调整或放大面部精修")
                     } else {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedFaceCount: detection.faces.count,
                             maximumConfidence: confidence, hasUsableSkinMask: true,
                             detectedDemographics: detection.demographics,
-                            summary: "检测到 \(detection.faces.count) 张人脸（本机最多处理前 \(Self.portraitMaximumFaces) 张）· 最高置信度 \(Int((confidence * 100).rounded()))% · 皮肤覆盖约 \(coveragePercent)；人像调整只在这张照片的预览中应用。")
+                            summary: "✨ 已识别 \(detection.faces.count) 位人物 · 骨相与肤质网格已就绪")
                     }
                 case .failure(let error):
                     self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true, photoID: photo.id,
                         detectedDemographics: [],
-                        summary: "人脸检测未完成：\(error.localizedDescription)；人像调整未启用。")
+                        summary: "面部识别暂停：\(error.localizedDescription)")
                 }
             }
         }

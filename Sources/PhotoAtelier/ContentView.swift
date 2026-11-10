@@ -171,7 +171,7 @@ struct ContentView: View {
                     PhotoCanvas(model: model, compare: compare, split: $split)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if inspectorTab == 0 { AnalysisProposalShelf(model: model) }
-                    else { presetShelf }
+                    else { PresetShelfView(model: model, previews: model.stylePreviews) }
                     batchBar
                 }.frame(maxWidth: .infinity)
                 Rectangle().fill(AtelierPalette.line).frame(width: 1)
@@ -717,72 +717,7 @@ struct ContentView: View {
         }.padding(.horizontal, 22).frame(height: 47)
     }
 
-    private var presetShelf: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                sectionLabel("色彩风格")
-                Text("\(model.lutOptions.count)")
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundColor(AtelierPalette.muted)
-                    .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 3).fill(AtelierPalette.raised))
-                    .help("内置与导入的 LUT 风格总数")
-                Spacer(minLength: 8)
-                ViewThatFits(in: .horizontal) {
-                    Button { model.showStyleBrowser = true } label: {
-                        HStack(spacing: 3) {
-                            Text("全部 \(model.lutOptions.count) 种")
-                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-                        }
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(AtelierPalette.accent)
-                        .lineLimit(1).fixedSize()
-                    }.buttonStyle(.plain).help("打开风格库浏览全部 \(model.lutOptions.count) 种风格")
-                    Button { model.showStyleBrowser = true } label: {
-                        Image(systemName: "rectangle.grid.2x2")
-                            .font(.system(size: 11)).foregroundColor(AtelierPalette.accent)
-                            .frame(width: 18, height: 18)
-                    }.buttonStyle(.plain).help("浏览全部 \(model.lutOptions.count) 种风格")
-                }
-            }
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: true) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(model.lutOptions.enumerated()), id: \.element.id) { index, option in
-                            Button { model.selectLUT(option.id) } label: {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ZStack(alignment: .bottomLeading) {
-                                        AtelierPalette.raised
-                                        Image(systemName: option.id == "none" ? "circle.lefthalf.filled" : "camera.filters")
-                                            .font(.system(size: 17, weight: .ultraLight)).foregroundColor(Color.white.opacity(0.8)).padding(10)
-                                        if model.selectedLUT == option.id {
-                                            Image(systemName: "checkmark.circle.fill").foregroundColor(AtelierPalette.accent)
-                                                .font(.system(size: 12)).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(6)
-                                        }
-                                    }.frame(width: 96, height: 60).clipped().clipShape(RoundedRectangle(cornerRadius: 6))
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(model.selectedLUT == option.id ? AtelierPalette.accent : .clear, lineWidth: 1.5))
-                                    Text(option.name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                                        .frame(width: 96, alignment: .leading)
-                                        .foregroundColor(model.selectedLUT == option.id ? AtelierPalette.accent : .white.opacity(0.8))
-                                }.frame(width: 96, alignment: .leading).help(option.detail)
-                            }.buttonStyle(.plain).disabled(model.batchRunning).id(index)
-                        }
-                        Color.clear.frame(width: 24, height: 1)
-                    }.padding(.vertical, 2)
-                }
-                .onChange(of: model.selectedLUT) { selected in
-                    guard let index = model.lutOptions.firstIndex(where: { $0.id == selected }) else { return }
-                    withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(index, anchor: .center) }
-                }
-            }
-            .overlay(alignment: .trailing) {
-                LinearGradient(colors: [AtelierPalette.panel.opacity(0), AtelierPalette.panel.opacity(0.92)],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 18).allowsHitTesting(false)
-            }
-        }.padding(.horizontal, 22).padding(.vertical, 16)
-            .background(AtelierPalette.panel.opacity(0.65))
-    }
+    // MARK: - Inspector & Panels
 
     private var inspector: some View {
         VStack(spacing: 0) {
