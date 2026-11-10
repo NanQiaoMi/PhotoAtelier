@@ -15,6 +15,7 @@ struct PresetShelfView: View {
     @AppStorage("isPresetShelfExpanded") private var isExpanded: Bool = true
     @State private var hoveredID: String? = nil
     @State private var selectedCategory: String = "all"
+    @State private var shelfHovered: Bool = false
 
     private struct CategoryItem: Identifiable {
         let id: String
@@ -215,29 +216,68 @@ struct PresetShelfView: View {
 
     private var filmstrip: some View {
         ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Array(filteredOptions.enumerated()), id: \.element.id) { index, option in
+            ZStack {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(filteredOptions.enumerated()), id: \.element.id) { index, option in
+                            Button {
+                                model.selectLUT(option.id)
+                            } label: {
+                                styleCard(option)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.batchRunning)
+                            .id(option.id)
+                            .onHover { isHovered in
+                                hoveredID = isHovered ? option.id : nil
+                            }
+                        }
+                        Color.clear.frame(width: 16, height: 1)
+                    }
+                    .padding(.vertical, 2)
+                }
+                .onChange(of: model.selectedLUT) { selected in
+                    guard filteredOptions.contains(where: { $0.id == selected }) else { return }
+                    withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(selected, anchor: .center) }
+                }
+
+                if filteredOptions.count > 5 {
+                    HStack {
                         Button {
-                            model.selectLUT(option.id)
+                            scrollRelative(by: -3, proxy: proxy)
                         } label: {
-                            styleCard(option)
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 22, height: 44)
+                                .background(Color.black.opacity(0.68))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .shadow(color: .black.opacity(0.4), radius: 3)
                         }
                         .buttonStyle(.plain)
-                        .disabled(model.batchRunning)
-                        .id(option.id)
-                        .onHover { isHovered in
-                            hoveredID = isHovered ? option.id : nil
+                        .padding(.leading, -2)
+
+                        Spacer()
+
+                        Button {
+                            scrollRelative(by: 3, proxy: proxy)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 22, height: 44)
+                                .background(Color.black.opacity(0.68))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .shadow(color: .black.opacity(0.4), radius: 3)
                         }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, -2)
                     }
-                    Color.clear.frame(width: 16, height: 1)
+                    .opacity(shelfHovered ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: shelfHovered)
                 }
-                .padding(.vertical, 2)
             }
-            .onChange(of: model.selectedLUT) { selected in
-                guard filteredOptions.contains(where: { $0.id == selected }) else { return }
-                withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(selected, anchor: .center) }
-            }
+            .onHover { shelfHovered = $0 }
         }
         .overlay(alignment: .trailing) {
             LinearGradient(
@@ -245,6 +285,16 @@ struct PresetShelfView: View {
                 startPoint: .leading, endPoint: .trailing
             )
             .frame(width: 18).allowsHitTesting(false)
+        }
+    }
+
+    private func scrollRelative(by delta: Int, proxy: ScrollViewProxy) {
+        let currentId = hoveredID ?? model.selectedLUT
+        let currentIndex = filteredOptions.firstIndex(where: { $0.id == currentId }) ?? 0
+        let targetIndex = min(max(0, currentIndex + delta), filteredOptions.count - 1)
+        let targetId = filteredOptions[targetIndex].id
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(targetId, anchor: delta > 0 ? .trailing : .leading)
         }
     }
 

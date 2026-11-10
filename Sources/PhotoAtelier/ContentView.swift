@@ -697,10 +697,21 @@ struct ContentView: View {
                 .disabled(model.afterImage == nil || model.previewBusy || model.analysisBusy || model.scanning || model.batchRunning)
             Group {
                 Button { compare.toggle() } label: {
-                    Label("前后分屏", systemImage: "rectangle.lefthalf.inset.filled")
+                    Label(compare ? model.comparisonLayout.rawValue : "对比", systemImage: model.comparisonLayout == .sideBySide ? "rectangle.split.2x1.fill" : "rectangle.lefthalf.inset.filled")
                         .font(.system(size: 10)).foregroundColor(compare ? AtelierPalette.accent : AtelierPalette.muted)
                 }.buttonStyle(.plain).disabled(model.afterImage == nil || model.maskInteractionActive)
-                .help("开启/关闭左右拖拽对比分屏")
+                .help("开启/关闭对比视图")
+
+                if compare {
+                    Picker("", selection: $model.comparisonLayout) {
+                        ForEach(ComparisonLayout.allCases) { layout in
+                            Text(layout.rawValue).tag(layout)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 88)
+                    .help("切换对比呈现形式：分屏拖拽 或 左右同步并排")
+                }
 
                 Button {
                     model.holdOriginalActive.toggle()
@@ -738,6 +749,21 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .help("智能缩放并平移居中至面部（再次点击返回适合窗口）")
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            model.showFaceLandmarksHUD.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: model.showFaceLandmarksHUD ? "viewfinder.circle.fill" : "viewfinder.circle")
+                            Text("五官定位")
+                        }
+                        .font(.system(size: 10, weight: model.showFaceLandmarksHUD ? .semibold : .regular))
+                        .foregroundColor(model.showFaceLandmarksHUD ? AtelierPalette.accent : AtelierPalette.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("在画布上高亮显示 Vision 算法识别出的五官关键点与轮廓")
                 }
 
                 if model.selectedPhoto?.activeCopyID != nil && compare {

@@ -17,6 +17,12 @@ struct LUTOption: Identifiable {
     var provenance: LUTProvenance? = nil
 }
 
+public enum ComparisonLayout: String, CaseIterable, Identifiable {
+    case split = "分屏"
+    case sideBySide = "并排"
+    public var id: String { rawValue }
+}
+
 enum MaskDrawMode: String, CaseIterable {
     case new, add, subtract, intersect
     var title: String {
@@ -243,7 +249,10 @@ final class AppModel: ObservableObject {
     @Published public var portraitMasterIntensity: Double = 1.0
     @Published public var focusOnFaceEvent: Int = 0
     @Published public var primaryFaceBoundingBox: CGRect? = nil
+    @Published public var primaryFaceLandmarks: FaceLandmarkSet? = nil
+    @Published public var showFaceLandmarksHUD: Bool = false
     @Published public var holdOriginalActive: Bool = false
+    @Published public var comparisonLayout: ComparisonLayout = .split
     /// Reference-color ("AI 追色") UI state. The profile itself lives in
     /// `adjustments.referenceColor`; these are display-only and never persisted.
     /// The thumbnail is only shown while `referenceColorThumbnailProfile` still
@@ -3757,6 +3766,7 @@ final class AppModel: ObservableObject {
                     let confidence = detection.faces.map(\.confidence).max() ?? 0
                     let coveragePercent = String(format: "%.3f%%", detection.maximumCoverage * 100)
                     self.primaryFaceBoundingBox = detection.faces.first?.boundingBox
+                    self.primaryFaceLandmarks = detection.faces.first
                     if detection.faces.isEmpty {
                         self.portraitFaceStatus = PortraitFaceStatus(hasCompleted: true,
                             photoID: photo.id, detectedDemographics: [], summary:
@@ -3787,6 +3797,7 @@ final class AppModel: ObservableObject {
         portraitFaceStatus = PortraitFaceStatus()
         selectedPersonIndex = nil
         primaryFaceBoundingBox = nil
+        primaryFaceLandmarks = nil
     }
 
     // MARK: - P2-M: Multi-Person Face Demographic Grouping & Profiles
