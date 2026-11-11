@@ -13,3 +13,8 @@ xcuserdata/
 artifacts/
 test-output/
 *.log
+.dependencies/
+.venv/
+__pycache__/
+
+.agentteam/
