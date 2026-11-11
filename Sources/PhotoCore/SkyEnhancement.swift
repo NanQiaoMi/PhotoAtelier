@@ -275,6 +275,71 @@ public enum SkyEnhancementEngine {
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
             .cropped(to: extent)
 
+        // Pixel-evidence gate: the geometric mask above always covers the upper
+        // region, but not every photo has a sky up there (interiors, night
+        // scenes, backlit portraits). Sample the region above the horizon and
+        // require an actual sky-like pixel share before declaring hasSky=true;
+        // otherwise the stage must degrade explicitly instead of tinting the
+        // top of a dark room azure. Threshold calibrated on 13 real samples:
+        // landscapes 0.34/0.43, sky-background portrait 0.30 pass; lakeside
+        // portrait 0.14 and dark/indoor/night 0.00-0.03 correctly reject.
+        let skyFraction = Self.measureSkyFraction(image: image, horizonNormY: horizonNormY)
+        guard skyFraction >= minimumSkyFraction else {
+            let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: extent)
+            return (black, false)
+        }
+
         return (feathered, true)
+    }
+
+    /// Minimum share of sky-like pixels (of the region above the horizon) for
+    /// the geometric mask to count as real sky. Calibrated on the P3-E sample
+    /// corpus; see docs/p3e-real-photo-optimization-plan.md §2.1.
+    static let minimumSkyFraction: Double = 0.15
+
+    /// Renders a downscaled copy of the image and measures the share of
+    /// sky-like pixels above the horizon: overexposed-bright (luminance >
+    /// 0.85) or blue-cyan tinted mid/high luminance (luminance > 0.45 and
+    /// blue − red > 0.02), both measured in extended linear sRGB.
+    static func measureSkyFraction(image: CIImage, horizonNormY: Double) -> Double {
+        let extent = image.extent
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB),
+              extent.width > 0, extent.height > 0 else { return 0 }
+        // Downscale so the longest edge is ~64px: enough statistics, cheap render.
+        let scale = 64.0 / max(extent.width, extent.height)
+        let width = max(1, Int((extent.width * scale).rounded()))
+        let height = max(1, Int((extent.height * scale).rounded()))
+        let small = image
+            .transformed(by: CGAffineTransform(scaleX: Double(width) / extent.width,
+                                               y: Double(height) / extent.height))
+            .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+        var bitmap = [Float](repeating: 0, count: width * height * 4)
+        let context = CIContext(options: [
+            .workingColorSpace: colorSpace,
+            .outputColorSpace: colorSpace,
+            .workingFormat: CIFormat.RGBAf,
+            .cacheIntermediates: false
+        ])
+        context.render(small, toBitmap: &bitmap, rowBytes: width * 16,
+                       bounds: CGRect(x: 0, y: 0, width: width, height: height),
+                       format: .RGBAf, colorSpace: colorSpace)
+        // CIContext.render produces top-down rows: row 0 is the TOP of the
+        // image, so the region above the horizon is rows 0..<horizonRow.
+        let horizonRow = max(0, min(height, Int((1.0 - horizonNormY) * Double(height))))
+        var skyPixels = 0
+        var totalPixels = 0
+        for row in 0..<horizonRow {
+            for col in 0..<width {
+                let offset = (row * width + col) * 4
+                let r = bitmap[offset], g = bitmap[offset + 1], b = bitmap[offset + 2]
+                let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                if luminance > 0.85 || (luminance > 0.45 && b - r > 0.02) {
+                    skyPixels += 1
+                }
+                totalPixels += 1
+            }
+        }
+        guard totalPixels > 0 else { return 0 }
+        return Double(skyPixels) / Double(totalPixels)
     }
 }
