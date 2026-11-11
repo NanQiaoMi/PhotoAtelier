@@ -261,4 +261,113 @@ final class BokehBlurTests: XCTestCase {
         )
         XCTAssertNil(skipped.bokehBlur)
     }
+
+    // MARK: - P3-E3: depth-map gradient regression
+
+    private let linearColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+    private lazy var analysisContext = CIContext(options: [
+        .workingColorSpace: linearColorSpace,
+        .outputColorSpace: linearColorSpace,
+        .workingFormat: CIFormat.RGBAf,
+        .cacheIntermediates: false
+    ])
+
+    /// Full-width vertical stripe pattern (4px period) for contrast probes.
+    private func makeStripeImage(width: Int = 256, height: Int = 256) -> CIImage {
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for row in 0..<height {
+            for col in 0..<width {
+                let o = (row * width + col) * 4
+                let stripe: Float = (col / 4) % 2 == 0 ? 0.8 : 0.3
+                pixels[o] = stripe; pixels[o + 1] = stripe; pixels[o + 2] = stripe
+                pixels[o + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        return CIImage(bitmapData: data, bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                       size: CGSize(width: width, height: height),
+                       format: .RGBAf, colorSpace: linearColorSpace)
+    }
+
+    /// Stripe contrast retained in a single row (1 = sharp, 0 = fully blurred).
+    /// CIImage space: y=0 is the image bottom.
+    private func stripeRetention(_ original: CIImage, _ processed: CIImage, y: Int) -> Double {
+        let width = Int(original.extent.width)
+        var bo = [Float](repeating: 0, count: width * 4)
+        var bp = [Float](repeating: 0, count: width * 4)
+        analysisContext.render(original, toBitmap: &bo, rowBytes: width * 16,
+                               bounds: CGRect(x: 0, y: CGFloat(y), width: CGFloat(width), height: 1),
+                               format: .RGBAf, colorSpace: linearColorSpace)
+        analysisContext.render(processed, toBitmap: &bp, rowBytes: width * 16,
+                               bounds: CGRect(x: 0, y: CGFloat(y), width: CGFloat(width), height: 1),
+                               format: .RGBAf, colorSpace: linearColorSpace)
+        var minO: Float = 9, maxO: Float = 0, minP: Float = 9, maxP: Float = 0
+        for col in 30..<70 {
+            minO = min(minO, bo[col * 4]); maxO = max(maxO, bo[col * 4])
+            minP = min(minP, bp[col * 4]); maxP = max(maxP, bp[col * 4])
+        }
+        return Double((maxP - minP) / max(0.0001, maxO - minO))
+    }
+
+    /// Regression for the P3-E3 defect: the ground-perspective depth map used to
+    /// be spatially uniform (kernel `samplerCoord` produced a constant field), so
+    /// every row got identical blur. The rasterized gradient must keep the image
+    /// bottom (near ground, depth ≈ 0.35) visibly sharper than the top (far, depth ≈ 1).
+    func testDepthGradientModulatesBlurTopToBottom() {
+        let image = makeStripeImage()
+        var settings = BokehBlurSettings()
+        settings.enabled = true
+        settings.apertureFocalSize = 1.0
+        settings.focalPlaneOffset = 0
+        settings.depthFalloffRate = 1.0
+        settings.edgeBleedProtection = 0
+        settings.specularHighlightBoost = 0
+        // Fully transparent person matte: no subject protection, pure ground gradient.
+        let emptyMask = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0,
+                                               colorSpace: linearColorSpace)!)
+            .cropped(to: image.extent)
+        let (out, report) = BokehDepthEngine.apply(to: image, personMask: emptyMask, settings: settings)
+        XCTAssertTrue(report.applied)
+        // P3-E3: report must carry real depth-field radii, not a constant.
+        // Ground perspective: near ground (depth 0.35) sits close to the focal
+        // plane → small radius; far top (depth 1.0) → maximum defocus.
+        XCTAssertEqual(report.maxBlurRadius, 48.0, accuracy: 0.1)
+        XCTAssertGreaterThan(report.nearRadius, 0)
+        XCTAssertLessThanOrEqual(report.farRadius, report.maxBlurRadius)
+        XCTAssertGreaterThan(report.farRadius, report.nearRadius,
+                             "远景半径应大于近景半径（离焦平面越远越虚）")
+        XCTAssertEqual(report.nearRadius, 0.35 * 48.0, accuracy: 1.0,
+                       "近景地面深度应落在 0.35 基准附近")
+        XCTAssertGreaterThan(report.farRadius - report.nearRadius, 10,
+                             "底部（0.35 深度）与顶部（1.0 深度）半径差应显著")
+
+        let nearGround = stripeRetention(image, out, y: 8)      // bottom = near
+        let mid = stripeRetention(image, out, y: 128)
+        let farTop = stripeRetention(image, out, y: 248)        // top = far
+        XCTAssertGreaterThan(nearGround, mid + 0.15,
+                             "近景（底部）应显著比中景更清晰")
+        XCTAssertGreaterThan(mid, farTop + 0.15,
+                             "中景应显著比远景（顶部）更清晰")
+        XCTAssertLessThan(farTop, 0.35, "远景应接近最大散焦")
+    }
+
+    /// The subject region must stay sharp regardless of depth: an opaque matte
+    /// zeroes the depth map under the person.
+    func testSubjectRegionStaysSharpInsideDepthGradient() {
+        let image = makeStripeImage()
+        var settings = BokehBlurSettings()
+        settings.enabled = true
+        settings.apertureFocalSize = 1.0
+        settings.edgeBleedProtection = 0
+        settings.specularHighlightBoost = 0
+        // Opaque white matte everywhere → depth 0 everywhere → no blur at all.
+        let fullMask = CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: 1,
+                                              colorSpace: linearColorSpace)!)
+            .cropped(to: image.extent)
+        let (out, _) = BokehDepthEngine.apply(to: image, personMask: fullMask, settings: settings)
+        XCTAssertEqual(stripeRetention(image, out, y: 248), 1.0, accuracy: 0.02,
+                       "主体完全不透明（覆盖全图）时不应有任何虚化")
+    }
 }

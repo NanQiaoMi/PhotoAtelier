@@ -390,8 +390,8 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **创意效果扩展（halation/mist/fade/bleachBypass）** | ✅ 已交付 (`3181358`、`2975052`) | `CreativeEffectsSettings` 扩展至 7 通道：胶片红晕/黑柔薄雾/胶片褪色/银盐留银 4 款 CIColorKernel 着色器（LUT 之后应用，延续 alpha/HDR/ROI 一致性约束）；「质感滤镜」面板 7 快捷胶囊 | 无新配方版本（由 v8 门禁 `isNeutral` 汇总守卫覆盖），测试全绿 |
 | **LUT 目录扩至 32 原创款** | ✅ 已交付 (`3181358`、`2975052`) | 第一批 6 款（日系通透/复古港风/柯达金/莫兰迪/暗调油画/高对比黑白）+ 第二批 13 款相机厂商风格（理光/徕卡/富士/索尼/尼康/佳能/哈苏，新 `LUTPresetGroup.camera` 分组）；17³ 程序化生成、署名致敬、带推荐强度与中文标签；自检契约 19→25→38 | legacy 5 款全表哈希断言不变，旧像素路径零改动 |
 | 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
-| RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
-| P2 全模块真实照片审美回归 | 规划中 | 用 P1-H 审美验收引擎对 P2-A…P2-Z 26 个新模块跑全量样片集评分，确认无质量回退 | 需授权样片与解锁会话 |
+| RAW 引擎 / AI 降噪 | 评估完成（`docs/raw-engine-evaluation.md`）：CIRAWFilter 主 + LibRaw 回退，LGPL-2.1，解码器来源如实标注；CoreML 降噪随 macOS 27 | 实施阻塞：真机 RAW 样本（需 1–3 张或相机型号） |
+| P3-E 真实照片处理质量优化 | **P3-E1/E2/E3 已修**（`docs/p3e-real-photo-optimization-plan.md`）：E1 `needsFaceMasks` 漏 9 个人脸模块触发 → 静态谓词 `requiresFaceDetection` + 门禁/管线双层测试；E2 天空掩码加像素证据门禁（13 张样片标定，判定 10/13，假阳性降为无害）；E3 景深内核 `samplerCoord` 产出均匀深度图 → 光栅化梯度修复，`BokehBlurReport` 新增近/远景实测半径 | P3-E4 全量审美回归待做 |
 | 文档持续同步 | 进行中 | P3 批次 release notes 已合并入 `docs/p3-release-notes.md`；README 与本文件已同步（2026-11-11） | 后续每批保持同步 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |
 | 多端 / 云协作 | 优先 Windows 端 + 简单共享（WebDAV/iCloud Drive 配方同步），不做账号计费 | 独立产品与验收面，投入大 |

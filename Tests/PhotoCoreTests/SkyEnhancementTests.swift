@@ -330,6 +330,82 @@ final class SkyEnhancementTests: XCTestCase {
         return b1 == b2
     }
 
+    // MARK: - P3-E2: pixel-evidence sky gate (self-generated mask path)
+
+    /// Rasterizes an RGBA closure into a CIImage in extended linear sRGB so the
+    /// analyzer's luminance/hue classification sees the intended colors.
+    private func makeLinearImage(width: Int, height: Int,
+                                 pixel: (Double, Double) -> (Double, Double, Double)) -> CIImage {
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for row in 0..<height {
+            // Bottom-left origin: row 0 is the bottom of the image.
+            let y = Double(height - 1 - row) / Double(max(1, height - 1))
+            for col in 0..<width {
+                let x = Double(col) / Double(max(1, width - 1))
+                let c = pixel(x, y)
+                let o = (row * width + col) * 4
+                pixels[o] = Float(c.0); pixels[o + 1] = Float(c.1); pixels[o + 2] = Float(c.2)
+                pixels[o + 3] = 1.0
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        return CIImage(bitmapData: data, bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                       size: CGSize(width: width, height: height),
+                       format: .RGBAf, colorSpace: cs)
+    }
+
+    func testMeasureSkyFractionClassifiesSkyAndInterior() {
+        let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        // Blue gradient sky in the top 60% (bright + blue > red), dark ground below.
+        let sky = makeLinearImage(width: 64, height: 64) { _, y in
+            y >= 0.4 ? (0.45 + 0.3 * y, 0.60 + 0.2 * y, 0.85) : (0.10, 0.12, 0.08)
+        }
+        let skyFraction = SkyEnhancementEngine.measureSkyFraction(image: sky, horizonNormY: 0.40)
+        XCTAssertGreaterThan(skyFraction, 0.9, "蓝青渐变天空的上半区应几乎全部判为天空")
+
+        // Dark interior: dim gray walls, no bright or blue-tinted pixels.
+        let interior = CIImage(color: CIColor(red: 0.08, green: 0.08, blue: 0.09, colorSpace: cs)!)
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+        let interiorFraction = SkyEnhancementEngine.measureSkyFraction(image: interior, horizonNormY: 0.40)
+        XCTAssertLessThan(interiorFraction, 0.05, "暗调室内上半区不应误判为天空")
+    }
+
+    func testMakeSkyMaskRejectsInteriorWithoutSkyEvidence() throws {
+        let cs = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let settings = SkyEnhancementSettings(enabled: true, skyVibrance: 0.8)
+        // Dark room: the geometric fallback would cover the upper 60%, but the
+        // pixel gate must refuse (P3-E: interior photos were azure-tinted).
+        let interior = CIImage(color: CIColor(red: 0.08, green: 0.08, blue: 0.09, colorSpace: cs)!)
+            .cropped(to: CGRect(x: 0, y: 0, width: 128, height: 128))
+        let (mask, hasSky) = SkyEnhancementEngine.makeSkyMask(image: interior)
+        XCTAssertFalse(hasSky, "暗调室内图不应被判定为有天空")
+
+        let (outImage, report) = try SkyEnhancementEngine.apply(interior, settings: settings, context: context)
+        XCTAssertFalse(report.applied)
+        XCTAssertFalse(report.hasSkyDetected)
+        XCTAssertTrue(report.note?.contains("未检测到有效天空区域") == true)
+        XCTAssertTrue(compareImagesExact(interior, outImage, extent: CGRect(x: 0, y: 0, width: 128, height: 128)))
+        _ = mask // black mask on the rejection path
+    }
+
+    func testMakeSkyMaskAcceptsRealSky() throws {
+        // Washed-out pale sky above, dark landscape below — passes the gate
+        // (bright top region) and the enhancement applies.
+        let landscape = makeLinearImage(width: 128, height: 128) { _, y in
+            y >= 0.4 ? (0.82, 0.85, 0.88) : (0.10, 0.16, 0.07)
+        }
+        let settings = SkyEnhancementSettings(enabled: true, skyVibrance: 0.8)
+        let (_, hasSky) = SkyEnhancementEngine.makeSkyMask(image: landscape)
+        XCTAssertTrue(hasSky, "上亮下暗的风光构图应判定有天空")
+
+        let (_, report) = try SkyEnhancementEngine.apply(landscape, settings: settings, context: context)
+        XCTAssertTrue(report.applied)
+        XCTAssertTrue(report.hasSkyDetected)
+    }
+
     private func samplePixel(_ image: CIImage, at point: (x: Int, y: Int), extent: CGRect) -> (r: Double, g: Double, b: Double) {
         var pixel = [UInt8](repeating: 0, count: 4)
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!

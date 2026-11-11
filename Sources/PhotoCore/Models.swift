@@ -1170,15 +1170,24 @@ public struct BokehBlurReport: Codable, Equatable {
     public var applied: Bool
     public var bokehShape: BokehShape
     public var maxBlurRadius: Double
+    /// P3-E3: actual defocus radii sampled from the depth field
+    /// (near ground ≈ image bottom, far ≈ image top), so the report
+    /// reflects the real depth modulation instead of a constant.
+    public var nearRadius: Double
+    public var farRadius: Double
     public var note: String?
 
     public init(applied: Bool,
                 bokehShape: BokehShape = .circular,
                 maxBlurRadius: Double = 0,
+                nearRadius: Double = 0,
+                farRadius: Double = 0,
                 note: String? = nil) {
         self.applied = applied
         self.bokehShape = bokehShape
         self.maxBlurRadius = maxBlurRadius
+        self.nearRadius = nearRadius
+        self.farRadius = farRadius
         self.note = note
     }
 }

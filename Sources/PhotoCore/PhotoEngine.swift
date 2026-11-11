@@ -367,6 +367,42 @@ public final class PhotoEngine {
         }
     }
 
+    /// Static trigger list for the shared face detection that feeds
+    /// `detectedFaces` in `process`. Every face-aware stage must appear here:
+    /// portrait/multi-person/reference-color(skin-only), make-up, facial zonal,
+    /// eye+teeth, eyelid+aegyo-sal, and the P2-R hair-color / P2-S facial-hair /
+    /// P2 reshape stages (expression, eyeShape, noseReshape, jawChinReshape,
+    /// facialContour, eyebrowReshape, facialBoneContour) which read the shared
+    /// `detectedFaces` in their single-face branch. Static so tests can cover
+    /// the trigger matrix without running Vision; `process` must keep using
+    /// this instead of re-deriving its own list.
+    static func requiresFaceDetection(_ settings: AdjustmentSettings) -> Bool {
+        let multiPersonActive = settings.multiPerson.map { $0.enabled && !$0.isNeutral } ?? false
+        if multiPersonActive {
+            return true
+        }
+        if settings.portrait.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.makeup.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.facialZonal.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.eyeTeeth.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.eyelidAegyoSal.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.hairColor.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.facialHair.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.expression.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.eyeShape.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.noseReshape.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.jawChinReshape.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.facialContour.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.eyebrowReshape.map({ !$0.isNeutral }) ?? false { return true }
+        if settings.facialBoneContour.map({ !$0.isNeutral }) ?? false { return true }
+        // Skin-limited reference color consumes face skin masks.
+        if let referenceColor = settings.referenceColor,
+           !referenceColor.isNeutral, referenceColor.skinOnly {
+            return true
+        }
+        return false
+    }
+
     public func process(_ image: CIImage,
                         settings: AdjustmentSettings,
                         lut: LUTCube?,
@@ -486,7 +522,14 @@ public final class PhotoEngine {
         let eyelidAegyoSalActive = settings.eyelidAegyoSal.map { !$0.isNeutral } ?? false
         let needsPortraitMasks = portraitActive || multiPersonActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
-        let needsFaceMasks = needsPortraitMasks || makeupActive || facialZonalActive || multiPersonActive || eyeTeethActive || eyelidAegyoSalActive
+        // Single source of truth for "which stages need the shared face
+        // detection". Must list every consumer of `detectedFaces` below
+        // (multi-person loop, portrait/zonal/makeup/eyeTeeth/eyelid stages and
+        // the P2-R/S + P2 reshape single-face stages); a module missing from
+        // the list silently reads empty landmarks and reports
+        // 「未检测到可用人脸」. `requiresFaceDetection` is static and unit-tested
+        // so the trigger list is covered without running Vision.
+        let needsFaceMasks = Self.requiresFaceDetection(settings)
         // One Vision detection feeds portrait masks, skin-limited reference color
         // and the make-up stage (the same landmarks are reused instead of running a
         // second detector in the make-up branch). Portrait/refcolor keep their
