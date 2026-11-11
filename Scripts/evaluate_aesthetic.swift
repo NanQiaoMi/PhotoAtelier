@@ -152,7 +152,11 @@ let pipelines: [PipelineSpec] = [
     PipelineSpec(id: "03_portrait_retouch", name: "人像精修 (Portrait Retouch)", description: "祛斑瑕疵修复 + 中性灰高低频平整 + 牙齿眼白提亮 + 肤色统一", categoryFocus: "人像特写/环境"),
     PipelineSpec(id: "04_makeup_sculpt", name: "妆容塑颜 (Makeup & Sculpt)", description: "唇/眉/腮红/眼影/眼线/睫毛/高光/修容精修妆容", categoryFocus: "人像特写/环境"),
     PipelineSpec(id: "05_film_style", name: "经典胶片 (Film Style)", description: "富士风格 Classic Chrome 色彩模拟与自适应肤色保护", categoryFocus: "人文/风光/复古"),
-    PipelineSpec(id: "06_master_pipeline", name: "商业全流程 (Master Pipeline)", description: "场景校正 + 人像双频精修 + 增强妆容塑颜 + 胶片色调完整组合", categoryFocus: "商业客片综合成片")
+    PipelineSpec(id: "06_master_pipeline", name: "商业全流程 (Master Pipeline)", description: "场景校正 + 人像双频精修 + 增强妆容塑颜 + 胶片色调完整组合", categoryFocus: "商业客片综合成片"),
+    PipelineSpec(id: "07_p2_skin_suite", name: "P2 美肤全家桶 (P2 Skin Suite)", description: "五区祛皱去油光 + 身体手部美肤 + 衣物祛皱 + 发质精修（发缝/光泽/柔顺/去碎发）", categoryFocus: "人像特写/环境·P2 回归"),
+    PipelineSpec(id: "08_p2_reshape_suite", name: "P2 微雕全家桶 (P2 Reshape Suite)", description: "液化高颅顶 + 骨相光影折叠度 + 五官微雕（眼型/鼻/下颌/眉形）+ 微笑唇形", categoryFocus: "人像特写·P2 回归"),
+    PipelineSpec(id: "09_p2_scene_suite", name: "P2 场景全家桶 (P2 Scene Suite)", description: "天空识别氛围增强 + 景深光斑虚化 + 影棚背景修复 + 创意效果（红晕/薄雾/颗粒）", categoryFocus: "风光/环境/宠物·P2 回归"),
+    PipelineSpec(id: "10_p2_master_suite", name: "P2 商业大师 (P2 Master Suite)", description: "P2 全模块组合：美肤 + 微雕 + 眼神光美牙 + 景深虚化 + 胶片色调商业直出", categoryFocus: "商业客片·P2 综合")
 ]
 
 var sampleRecords: [SampleRecord] = []
@@ -325,6 +329,184 @@ for (index, item) in itemsToProcess.enumerated() {
 
             lutToApply = classicChromeCube
             settings.lutIntensity = 0.65
+            settings.preserveLuminance = 0.75
+            settings.protectSkin = 0.85
+            settings.protectNeutrals = 0.65
+
+        case "07_p2_skin_suite":
+            // P2 美肤回归：五区祛皱去油光 + 身体美肤 + 衣物祛皱 + 发质精修
+            var zonal = FacialZonalRefinementSettings()
+            zonal.enabled = true
+            zonal.darkCircles = 0.45
+            zonal.eyeBags = 0.40
+            zonal.nasolabialFolds = 0.40
+            zonal.foreheadWrinkles = 0.40
+            zonal.antiShine = 0.50
+            zonal.jawlineSculpting = 0.30
+            settings.facialZonal = zonal
+
+            var bodySkin = BodySkinRefinementSettings()
+            bodySkin.enabled = true
+            bodySkin.neckSmoothing = 0.40
+            bodySkin.bodySmoothing = 0.45
+            bodySkin.veinReduction = 0.40
+            bodySkin.bodyToneHarmonization = 0.40
+            settings.bodySkin = bodySkin
+
+            var clothing = ClothingRefinementSettings()
+            clothing.enabled = true
+            clothing.wrinkleSmoothing = 0.45
+            clothing.creaseRemoval = 0.40
+            settings.clothing = clothing
+
+            var portrait = PortraitRefinementSettings()
+            portrait.hairGapFilling = 0.40
+            portrait.hairGloss = 0.45
+            portrait.hairDarkening = 0.30
+            portrait.hairSmoothing = 0.40
+            portrait.flyawayRemoval = 0.45
+            settings.portrait = portrait
+
+        case "08_p2_reshape_suite":
+            // P2 微雕回归：液化高颅顶 + 骨相光影 + 五官微雕 + 微笑唇形（保守量）
+            var liquify = FaceReshapeSettings(preset: .youthful)
+            liquify.strength = 0.55
+            liquify.parameters.cranialTop = 0.30
+            liquify.parameters.hairline = 0.15
+            liquify.parameters.temple = 0.20
+            settings.liquify = liquify
+
+            var bone = FacialBoneContourSettings(enabled: true)
+            bone.facialFolding = 0.40
+            bone.tZoneHighlight = 0.45
+            bone.cZoneHighlight = 0.40
+            bone.cheekContourShadow = 0.30
+            bone.jawlineShadow = 0.30
+            bone.philtrumHighlight = 0.25
+            settings.facialBoneContour = bone
+
+            var eyeShape = EyeShapeSettings()
+            eyeShape.enabled = true
+            eyeShape.eyeSymmetry = 0.35
+            eyeShape.eyeRoundness = 0.25
+            settings.eyeShape = eyeShape
+
+            var nose = NoseReshapeSettings()
+            nose.enabled = true
+            nose.nose3DContour = 0.35
+            nose.noseTipSize = 0.25
+            settings.noseReshape = nose
+
+            var jaw = JawChinReshapeSettings()
+            jaw.enabled = true
+            jaw.jawlineTighten = 0.35
+            jaw.chinProjection = 0.25
+            settings.jawChinReshape = jaw
+
+            var brow = EyebrowReshapeSettings()
+            brow.enabled = true
+            brow.browSymmetry = 0.35
+            brow.wildBrowTexture = 0.40
+            settings.eyebrowReshape = brow
+
+            var contour = FacialContourSettings()
+            contour.enabled = true
+            contour.templePlump = 0.30
+            contour.contourSmoothness = 0.30
+            contour.appleCheekLift = 0.25
+            settings.facialContour = contour
+
+            var expression = ExpressionSettings()
+            expression.enabled = true
+            expression.smileDegree = 0.30
+            expression.lipSymmetry = 0.25
+            settings.expression = expression
+
+        case "09_p2_scene_suite":
+            // P2 场景回归：天空氛围 + 景深虚化 + 影棚背景 + 创意效果
+            var sky = SkyEnhancementSettings()
+            sky.enabled = true
+            sky.skyVibrance = 0.45
+            sky.cloudContrast = 0.35
+            settings.sky = sky
+
+            var bokeh = BokehBlurSettings()
+            bokeh.enabled = true
+            bokeh.apertureFocalSize = 0.35
+            bokeh.bokehShape = .circular
+            bokeh.specularHighlightBoost = 0.40
+            settings.bokehBlur = bokeh
+
+            var backdrop = BackdropRefinementSettings()
+            backdrop.enabled = true
+            backdrop.smoothing = 0.40
+            backdrop.uniformity = 0.35
+            settings.backdrop = backdrop
+
+            var effects = CreativeEffectsSettings()
+            effects.halation = 0.30
+            effects.mist = 0.20
+            effects.grain = 0.25
+            settings.creativeEffects = effects
+
+        case "10_p2_master_suite":
+            // P2 商业大师：美肤 + 微雕 + 眼神光美牙 + 景深 + 胶片色调全链路
+            var portrait = PortraitRefinementSettings()
+            portrait.blemishStrength = 0.55
+            portrait.dodgeBurn = 0.50
+            portrait.structure = 0.20
+            portrait.texture = 0.70
+            portrait.gloss = 0.25
+            portrait.teethWhiten = 0.45
+            portrait.eyeBrighten = 0.45
+            portrait.skinToneUnify = 0.50
+            portrait.hairGloss = 0.40
+            portrait.hairSmoothing = 0.35
+            portrait.flyawayRemoval = 0.40
+            settings.portrait = portrait
+
+            var zonal = FacialZonalRefinementSettings()
+            zonal.enabled = true
+            zonal.darkCircles = 0.40
+            zonal.eyeBags = 0.35
+            zonal.antiShine = 0.45
+            zonal.nasolabialFolds = 0.35
+            settings.facialZonal = zonal
+
+            var bone = FacialBoneContourSettings(enabled: true)
+            bone.facialFolding = 0.35
+            bone.tZoneHighlight = 0.40
+            bone.cZoneHighlight = 0.35
+            bone.jawlineShadow = 0.25
+            settings.facialBoneContour = bone
+
+            var eyeTeeth = EyeTeethRefinementSettings()
+            eyeTeeth.enabled = true
+            eyeTeeth.irisClarity = 0.40
+            eyeTeeth.scleraBloodshotRemoval = 0.40
+            eyeTeeth.catchlightPattern = .naturalPoint
+            eyeTeeth.catchlightStrength = 0.45
+            settings.eyeTeeth = eyeTeeth
+
+            var bokeh = BokehBlurSettings()
+            bokeh.enabled = true
+            bokeh.apertureFocalSize = 0.28
+            bokeh.bokehShape = .creamy
+            bokeh.specularHighlightBoost = 0.35
+            settings.bokehBlur = bokeh
+
+            var makeup = MakeupSettings()
+            makeup.lipIntensity = 0.40
+            makeup.lipColor = SRGBColor(red: 0.85, green: 0.28, blue: 0.36)
+            makeup.cheekIntensity = 0.30
+            makeup.cheekColor = SRGBColor(red: 0.91, green: 0.42, blue: 0.47)
+            makeup.catchlightIntensity = 0.40
+            makeup.highlightIntensity = 0.30
+            makeup.contourIntensity = 0.25
+            settings.makeup = makeup
+
+            lutToApply = classicChromeCube
+            settings.lutIntensity = 0.60
             settings.preserveLuminance = 0.75
             settings.protectSkin = 0.85
             settings.protectNeutrals = 0.65
@@ -781,11 +963,25 @@ let htmlContent = """
 """
 
 var cardsHtml = ""
+// P3-D: pipeline tab labels generated from the shared pipeline list so the
+// HTML tabs always match the rendered pipelines (was a hardcoded 6-tab row).
+let pipelineTabTitles: [String: String] = [
+    "01_baseline": "原片基线",
+    "02_scene_adaptive": "自适应场景",
+    "03_portrait_retouch": "人像精修",
+    "04_makeup_sculpt": "妆容塑颜",
+    "05_film_style": "经典胶片",
+    "06_master_pipeline": "商业全流程",
+    "07_p2_skin_suite": "P2 美肤",
+    "08_p2_reshape_suite": "P2 微雕",
+    "09_p2_scene_suite": "P2 场景",
+    "10_p2_master_suite": "P2 大师"
+]
 for sample in sampleRecords {
     let baselinePreview = sample.previewFiles["01_baseline"] ?? ""
-    let masterPreview = sample.previewFiles["06_master_pipeline"] ?? baselinePreview
+    let masterPreview = sample.previewFiles["10_p2_master_suite"] ?? sample.previewFiles["06_master_pipeline"] ?? baselinePreview
     let baselineCrop = sample.cropFiles["01_baseline"] ?? ""
-    let masterCrop = sample.cropFiles["06_master_pipeline"] ?? baselineCrop
+    let masterCrop = sample.cropFiles["10_p2_master_suite"] ?? sample.cropFiles["06_master_pipeline"] ?? baselineCrop
 
     cardsHtml += """
     <div class="card" data-category="\(sample.category)">
@@ -800,14 +996,11 @@ for sample in sampleRecords {
                 </div>
             </div>
 
-            <div class="pipeline-tabs" id="tabs-\(sample.id)">
-                <button class="tab-btn" onclick="switchPipeline('\(sample.id)', '01_baseline')">原片基线</button>
-                <button class="tab-btn" onclick="switchPipeline('\(sample.id)', '02_scene_adaptive')">自适应场景</button>
-                <button class="tab-btn" onclick="switchPipeline('\(sample.id)', '03_portrait_retouch')">人像精修</button>
-                <button class="tab-btn" onclick="switchPipeline('\(sample.id)', '04_makeup_sculpt')">妆容塑颜</button>
-                <button class="tab-btn" onclick="switchPipeline('\(sample.id)', '05_film_style')">经典胶片</button>
-                <button class="tab-btn active" onclick="switchPipeline('\(sample.id)', '06_master_pipeline')">商业全流程</button>
-            </div>
+            <div class="pipeline-tabs" id="tabs-\(sample.id)">\(pipelines.map { p in
+                let title = pipelineTabTitles[p.id] ?? p.id
+                let active = (p.id == "10_p2_master_suite") ? " active" : ""
+                return "<button class=\"tab-btn\(active)\" onclick=\"switchPipeline('\(sample.id)', '\(p.id)')\">\(title)</button>"
+            }.joined())</div>
 
             <div class="preview-viewer" id="viewer-\(sample.id)">
                 <img id="img-after-\(sample.id)" src="\(masterPreview)" alt="Processed">
