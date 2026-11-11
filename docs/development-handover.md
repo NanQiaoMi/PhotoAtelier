@@ -1,6 +1,6 @@
 # 光屿 · Photo Atelier 开发交接文档
 
-**日期**：2026-11-05
+**日期**：2026-11-11（本轮更新；上轮 2026-11-05）
 **仓库**：`/Users/mimi/project/ai调色`
 **适用对象**：后续接手的开发者 / AI Agent
 **目的**：记录本轮（P0→P1-C + 布局修复）做过的操作、修改、验证方式与坑，保证后续开发能独立复现与继续。
@@ -15,10 +15,11 @@
 | `feat/p0-gap-closure` | `2af5ccd` | P0：导入/撤销/人脸语义蒙版/人像 v1/追色/导出增强/QA 脚本 |
 | `feat/p1-color-beauty` | `2ea97cb` | P1：调色工具扩展/液化美型/水印导出 |
 | `feat/p1b-retouch-delivery` | `152c9d1` | P1-B：证件照/换背景、修复画笔/仿制、本地客户交付页 |
-| `feat/p1c-culling-makeup-perf` | `a54b99f` | P1-C ~ P2-C 集成分支（含挑图/持久化/交付增强/增强妆容/Universal双架构/真实照片审美体系/测试加固/高颅顶美型/发缝填充/秀发光泽/去碎发/秀发柔顺） |
-| **`feat/p2d-studio-backdrop-refinement`（当前工作分支）** | `a54b99f` | P2-D：影棚纯色背景平整与瑕疵修复（折痕抚平、脚印/污渍消除、色调统一） |
+| **`feat/p1c-culling-makeup-perf`（当前集成分支，2026-11-11）** | `0a668ec` | P1-C 起全部批次：挑图/持久化/交付/妆容/性能 + P2-A…P2-Z（26 批）+ P3-A/B/C 人像 UX 重构/风格架缩图/交互增强 + 创意效果（halation/mist/fade/bleachBypass）+ 13 款相机厂商风格 LUT |
 
-- 当前所有功能分支**仅本地**，未推送远端；`main` 未合并任何功能分支（项目规则：功能分支 + 本地验证，未获授权不推送/合并）。
+> 历史上每个批次曾使用独立分支（如 `feat/p2d-studio-backdrop-refinement` 等），现已全部按序合入 `feat/p1c-culling-makeup-perf` 单一集成分支（124 commits ahead of `main`）；合入后本地批次分支仅作存档。
+
+- 当前所有功能分支**仅本地**，未推送远端（远端仅有 `codex/*` 三条 + `feat/p0-gap-closure` 四条旧分支）；`main` 未合并任何功能分支（项目规则：功能分支 + 本地验证，未获授权不推送/合并）。
 - 工作区应保持干净；`artifacts/`、`build/`、`.build/` 均在 `.gitignore` 中，**不要提交**。
 - 提交规范：`<type>(<scope>): <summary>`，显式路径 `git add`，禁止 `git add -A`。
 
@@ -129,12 +130,14 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 | P1-B | 证件照/换背景（人物抠图/背景/阴影/尺寸/裁剪/打印排版）；修复画笔/仿制图章；本地客户交付页（静态 HTML 相册 + 接触表 PDF，离线/无外链/隐私剥离） | `bc69b59`、`6790241`、`ab098e8`、`a2361c7`、`152c9d1` |
 | P1-C | AI 挑图/选片（质量分析/自动挑图/评级/废片/筛选/导出跳过）；妆容（唇/眉/腮红/眼影）；性能（有界并行批处理/预览取消/分析降采样） | `75c65d9`、`1ddf0cf`、`73ea89e`、`8dc9d01`、`fb22674` |
 
-### 4.2 处理管线顺序（v13 最终口径）
+### 4.2 处理管线顺序（v33 最终口径）
 
 ```
 基础影调（曝光/WB/五区 EV/对比/饱和/高光/阴影）
 → 全局几何（旋转/透视/自动水平/Lensfun 畸变）
 → 液化/美型
+→ 人像精修模块群（磨皮/五区/骨相/五官微雕/彩妆/秀发/身形/衣物…P2 系列，按各批 release notes 顺序）
+→ 宠物美化 / 天空识别置换 / 景深虚化（P2-I/J/Q）
 → 调色工具（曲线 → HSL → 颜色分级）
 → 镜头效果（暗角/横向色差）
 → 修复画笔/仿制图章
@@ -144,12 +147,13 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 → 背景替换/证件照（裁剪）
 → 局部蒙版/细节
 → LUT
+→ 创意效果（辉光/暗角/颗粒/红晕/薄雾/褪色/留银，v8 门禁）
 → 输出色域映射
 → 导出（水印/缩放/模板/交付页）
 ```
 
-- 顺序约束写在 `PhotoEngine.process` 注释与各批 release notes 中；改动顺序会破坏旧配方像素路径，必须同步回归测试。
-- v1–v9 旧路径保持像素兼容；新非中性字段需要对应版本门禁（v10/v11/v12/v13），保存时自动升级；旧配方缺字段走旧路径。
+- 顺序约束写在 `PhotoEngine.process` 注释与各批 release notes 中；改动顺序会破坏旧配方像素路径，必须同步回归测试。人像 P2 模块的完整先后以其在 `PhotoEngine.process` 内的实际串接为准，此处为概览。
+- v1–v33 旧路径保持像素兼容；新非中性字段需要对应版本门禁（v10–v33；创意效果由 v8 组门禁覆盖），保存时自动升级；旧配方缺字段走旧路径。
 
 ### 4.3 配方版本
 
@@ -180,6 +184,8 @@ artifacts/p1c-c7-verify/benchmark/benchmark [OUTPUT_JSON] [WORK_DIR]
 | v32 | 智能眉形微雕、根根分明野生眉毛流感与双眉对称性矫正（`eyebrowReshape`） |
 | v33 | 智能全脸骨相立体光影重塑、面部折叠度与 T区/C区/下巴高光阴影精雕（`facialBoneContour`） |
 
+> **P3 批次未新增配方版本**：P3-A/B/C（人像 UX 分类页签/模块旁路/总控倍率/风格架缩图）与创意效果扩展（halation/mist/fade/bleachBypass）均不改配方字段结构——新效果字段落在既有 `CreativeEffectsSettings` 组内，由既有 v8 门禁经 `isNeutral` 汇总守卫覆盖；旁路与倍率是预览会话状态，不写配方。
+
 ---
 
 ## 5. 代码地图
@@ -203,11 +209,16 @@ Sources/PhotoCore/          # 纯算法/管线（无 UI），测试目标只依�
   ReferenceColorMatch / LUT* / OutputGamut / LensCorrection
 Sources/PhotoAtelier/       # SwiftUI app
   ContentView.swift         # 主布局：左侧库、预览、presetShelf、右侧 inspector
-  AppModel.swift            # 状态、预览 token、批量、挑图、导出
+  AppModel.swift            # 状态、预览 token、批量、挑图、导出、人像旁路/倍率/特写
   PhotoEngine 集成面板：AnalysisPanel/Basic/ColorToolsPanel/PortraitRetouchPanel/ReferenceColorPanel/IDPhotoPanel/MaskInspector
-  PhotoCanvas.swift         # 画布、液化/修复/蒙版笔迹
+  PortraitModuleTypes.swift # P3-A：六大场景分类、20 模块枚举、大师预设定义
+  PortraitModuleComponents.swift # P3-A：模块卡片（旁路/复位/HUD）、分类页签组件
+  PresetShelfView.swift     # P3-B：风格架实时缩图、分类筛选、内联强度
+  CreativeEffectsPanel.swift # 质感滤镜（7 效果滑杆 + 快捷胶囊）
+  PhotoCanvas.swift         # 画布、液化/修复/蒙版笔迹、2-up 并排对比、五官 HUD
   SmokeHarness.swift        # --self-test 入口
-Tests/PhotoCoreTests/       # 521 个测试（含各批新增）
+  StyleWorkflowSmokeHarness.swift # --style-self-test 入口（38 款风格契约断言）
+Tests/PhotoCoreTests/       # 791 个测试（2026-11-11；含各批新增）
 Scripts/benchmark.swift     # schemaVersion 4 基准
 Scripts/ui_smoke.sh         # UI 冒烟（重试/AX/哈希绑定/fast mode）
 Scripts/build_app.sh        # Release 打包
@@ -340,9 +351,9 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 
 ### 9.2 P1 里程碑达成状态
 
-> **状态**：🎉 **P1 全周期 100% 达成**（P0 ~ P1-I 全部通过质量门禁与全量回归）。所有功能均已就绪，进入 P2（中远期增量）规划阶段。
+> **状态**：🎉 **P1 全周期 100% 达成**（P0 ~ P1-I 全部通过质量门禁与全量回归）。**P2-A…P2-Z 全部 26 批亦已交付**（配方版本 v33），P3-A/B/C 与创意效果/风格目录扩展已合入（见 §9.3 上表），791 项测试全绿（2026-11-11 实测 150.5s）。
 
-### 9.3 P2 阶段进展与规划
+### 9.3 P2/P3 阶段进展与规划
 
 | 项目 | 状态 | 说明 | 前置评估 |
 |---|---|---|---|
@@ -372,8 +383,16 @@ docs/                       # 各批 release notes / 计划 / 设计 / 差距分
 | **P2-X：智能太阳穴/颧骨与面部外轮廓流畅度微雕** | ✅ 已交付 (`feat/p2x-temples-cheekbones-contour`) | 太阳穴凹陷饱满化充盈、颧骨突出外扩内推、面颊凹陷丰盈消除吸腮感、外轮廓波折平滑调和重塑鹅蛋脸、苹果肌立体提拉微雕，叠加 3D 苹果肌高光与颧骨修容阴影；配方版本升级至 31 | 原生 CIColorKernel + WarpField，单帧 < 4.5ms，763 测试全绿 |
 | **P2-Y：智能眉形微雕、根根分明野生眉毛流感与双眉对称性矫正** | ✅ 已交付 (`feat/p2y-eyebrow-reshaping-texture`) | 眉尾高度与走势提拉消除下垂八字眉、眉毛粗细丰盈与收细柳叶眉、眉身长度微调延展眉梢、双眉对称性自动消除高低眉、GPU微对比度根根分明野生眉毛流感、眉骨3D立体高光与眉下阴影；配方版本升级至 32 | 原生 CIColorKernel + WarpField，单帧 < 4.5ms，776 测试全绿 |
 | **P2-Z：智能全脸骨相立体光影重塑、面部折叠度与 T区/C区/下巴高光阴影精雕** | ✅ 已交付 (`feat/p2z-facial-bone-contour-shading`) | 基于面部解剖学骨骼走廊的面部折叠度提升（收紧外侧轮廓强化中轴突出度）、T区/下巴3D立体高光、双侧C区珍珠光泽、面颊侧部立体阴影、下颌线下微阴影收敛双下巴、唇峰人中光泽立体微雕与冷暖修容色温调节；配方版本升级至 33 | 原生 CIColorKernel，单帧 < 4.5ms，790 测试全绿 |
+| **P3-A：人像修图面板 UX 重构** | ✅ 已交付 (`e513887`) | 六大场景分类页签（智能速修/极润美肤/骨相光影/五官微雕/美妆秀发/身形服饰）、20 个精修模块卡片化（👁️ 单击旁路 + 按住瞬时对比 + ⟲ 单模块复位）、人像效果总控倍率 0–150%（预览会话状态）、5 个大师级商业人像预设、活跃效果 HUD | 纯 UI 层，管线与配方零改动，791 测试全绿 |
+| **P3-B：风格架实时缩图** | ✅ 已交付 (`e4a0da9`) | 风格库卡片显示当前照片真实渲染缩图、分类筛选胶囊（含新「相机」分组）、选中后内联强度滑杆与推荐强度徽标、可折叠胶片条 | 纯 UI 层，缩图后台渲染 |
+| **P3-C：交互打磨** | ✅ 已交付 (`29129cb`) | 「按住看原图」（按住临时查看整张原片）、自适应「面部特写」一键缩放居中人脸（工具栏 + 修图面板 1:1 两处入口） | 纯 UI 层 |
+| **UX 对比增强** | ✅ 已交付 (`0762166`) | 前后对比「分屏 / 并排 2-up」双布局（并排窗格同步平移缩放）、分屏手柄 Y 坐标边界钳制、「五官定位」HUD 高亮 Vision 关键点、风格架两端滚动箭头 | 纯 UI 层 |
+| **创意效果扩展（halation/mist/fade/bleachBypass）** | ✅ 已交付 (`3181358`、`2975052`) | `CreativeEffectsSettings` 扩展至 7 通道：胶片红晕/黑柔薄雾/胶片褪色/银盐留银 4 款 CIColorKernel 着色器（LUT 之后应用，延续 alpha/HDR/ROI 一致性约束）；「质感滤镜」面板 7 快捷胶囊 | 无新配方版本（由 v8 门禁 `isNeutral` 汇总守卫覆盖），测试全绿 |
+| **LUT 目录扩至 32 原创款** | ✅ 已交付 (`3181358`、`2975052`) | 第一批 6 款（日系通透/复古港风/柯达金/莫兰迪/暗调油画/高对比黑白）+ 第二批 13 款相机厂商风格（理光/徕卡/富士/索尼/尼康/佳能/哈苏，新 `LUTPresetGroup.camera` 分组）；17³ 程序化生成、署名致敬、带推荐强度与中文标签；自检契约 19→25→38 | legacy 5 款全表哈希断言不变，旧像素路径零改动 |
 | 联机深度控制 | 规划中 | `ImageCaptureCore` 相机参数直接控制（ISO/快门/光圈） | 设备型号专用通信复杂，热文件夹已先行闭环 |
 | RAW 引擎 / AI 降噪 | 评估 LibRaw（LGPL，动态链接）与 CoreML 降噪模型；RAW 专用高光重建 | 许可/分发合规审查；真机 RAW 样本 |
+| P2 全模块真实照片审美回归 | 规划中 | 用 P1-H 审美验收引擎对 P2-A…P2-Z 26 个新模块跑全量样片集评分，确认无质量回退 | 需授权样片与解锁会话 |
+| 文档持续同步 | 进行中 | P3 批次 release notes 已合并入 `docs/p3-release-notes.md`；README 与本文件已同步（2026-11-11） | 后续每批保持同步 |
 | 生成式 AI | 本地扩散（Core ML）或云端 API；与「离线隐私」冲突 → 显式可选插件并标注数据去向 | 许可、模型体积、隐私声明 |
 | 多端 / 云协作 | 优先 Windows 端 + 简单共享（WebDAV/iCloud Drive 配方同步），不做账号计费 | 独立产品与验收面，投入大 |
 | 排版 / 视频 | 不做（与调色/精修主航道无关），导出通用格式交给专业工具 | — |
