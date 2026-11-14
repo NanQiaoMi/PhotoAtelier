@@ -48,6 +48,11 @@ public enum ExpressionEngine {
             col *= (1.0 - sh * 0.14);
         }
 
+        // R3 (2026-11-14): pixels outside this module's guides pass through
+        // unchanged. The engine works in extended-linear-sRGB, where highlights
+        // above 1.0 are legitimate; the unconditional clamp used to clip every
+        // highlight in the photograph whenever the slider was non-zero.
+        if (hl <= 0.001 && sh <= 0.001) { return c; }
         return vec4(clamp(col, 0.0, 1.0), c.a);
     }
     """
@@ -167,8 +172,13 @@ public enum ExpressionEngine {
         let mh = geometry.mouthHeight
 
         // 1. 微笑嘴角与嘴角上扬 (Smile Degree)
-        if settings.smileDegree > 0.0001 {
-            let strength = settings.smileDegree
+        // R3: a smile that is already in the photo must not be pushed further.
+        // The photo's own lip geometry decides how much headroom is left, so
+        // the same slider reads as "relax the mouth" on a neutral face and as
+        // a no-op on a laughing one.
+        let smileStrength = settings.smileDegree * geometry.smileHeadroom
+        if smileStrength > 0.0001 {
+            let strength = smileStrength
             let upAmount = mh * 0.52 * strength
             let outAmount = mw * 0.12 * strength
             let cornerRadiusX = mw * 0.35
@@ -405,6 +415,13 @@ public struct ExpressionGeometry {
     public let lowerVermilionCenter: CGPoint
     public let lowerVermilionBottom: CGPoint
     public let labiomentalGroove: CGPoint
+    /// R3 (2026-11-14): how much the mouth is *already* smiling, measured from
+    /// the photo's own lip contour - the corner height above the lip centre.
+    /// `smileDegree` is a request to lift the corners; on a mouth that is
+    /// already smiling that request has to be attenuated, otherwise the corners
+    /// are pushed further up into the "咧嘴" grimace the P2 review caught.
+    /// 0 ≈ a neutral mouth, ≈0.06 a relaxed smile, > 0.10 a broad grin.
+    public let existingSmileArc: Double
 
     public init?(face: FaceLandmarkSet) {
         let pts = face.outerLips.filter { $0.x.isFinite && $0.y.isFinite }
@@ -452,5 +469,19 @@ public struct ExpressionGeometry {
         self.upperVermilionCenter = CGPoint(x: center.x, y: (cBow.y + center.y) * 0.5)
         self.lowerVermilionCenter = CGPoint(x: center.x, y: (lBottom.y + center.y) * 0.5)
         self.labiomentalGroove = CGPoint(x: center.x, y: max(0.0, lBottom.y - CGFloat(h * 0.35)))
+
+        // Corner height above the lip centre: positive when the commissures
+        // sit above the middle of the mouth, which is exactly what a smile is.
+        let lipCenterY = Double((cBow.y + lBottom.y) * 0.5)
+        let cornerMeanY = Double((minXPt.y + maxXPt.y) * 0.5)
+        self.existingSmileArc = max(0.0, cornerMeanY - lipCenterY)
+    }
+
+    /// R3: the share of a requested smile uplift that is still appropriate,
+    /// given how much the mouth already smiles. A neutral mouth takes the full
+    /// request; a mouth that already smiles broadly takes almost none.
+    public var smileHeadroom: Double {
+        let alreadySmiling = min(1.0, max(0.0, (existingSmileArc - 0.015) / 0.075))
+        return 1.0 - alreadySmiling
     }
 }

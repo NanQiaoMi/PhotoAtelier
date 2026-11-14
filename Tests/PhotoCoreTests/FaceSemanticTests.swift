@@ -172,7 +172,11 @@ final class FaceSemanticTests: XCTestCase {
         }
     }
 
-    private func syntheticImage(faces: [SyntheticFace]) -> CIImage {
+    /// `exposure` scales every linear-light channel. The fixture is defined in
+    /// extended linear sRGB, so a scale below 1 is exactly what an underexposed
+    /// photo looks like to the analyzer — the case the old absolute teeth/sclera
+    /// gates could not handle.
+    private func syntheticImage(faces: [SyntheticFace], exposure: Float = 1) -> CIImage {
         let paintedFaces = faces.map { PaintedFace(face: $0, imageWidth: CGFloat(width)) }
         var components = [Float](repeating: 0, count: width * height * 4)
         // The background is deliberately painted in the same skin colour as the
@@ -180,12 +184,12 @@ final class FaceSemanticTests: XCTestCase {
         // would be caught by the assertions below.
         for index in 0..<(width * height) {
             let offset = index * 4
-            components[offset] = skinColor.r
-            components[offset + 1] = skinColor.g
-            components[offset + 2] = skinColor.b
+            components[offset] = skinColor.r * exposure
+            components[offset + 1] = skinColor.g * exposure
+            components[offset + 2] = skinColor.b * exposure
             components[offset + 3] = skinColor.a
         }
-        for face in paintedFaces { paint(face, into: &components) }
+        for face in paintedFaces { paint(face, into: &components, exposure: exposure) }
         let data = components.withUnsafeBufferPointer { buffer in
             Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
         }
@@ -195,12 +199,13 @@ final class FaceSemanticTests: XCTestCase {
                        format: .RGBAf, colorSpace: linearColorSpace)
     }
 
-    private func paint(_ face: PaintedFace, into components: inout [Float]) {
+    private func paint(_ face: PaintedFace, into components: inout [Float],
+                       exposure: Float = 1) {
         func write(_ color: RGBA, row: Int, column: Int) {
             let offset = (row * width + column) * 4
-            components[offset] = color.r
-            components[offset + 1] = color.g
-            components[offset + 2] = color.b
+            components[offset] = color.r * exposure
+            components[offset + 1] = color.g * exposure
+            components[offset + 2] = color.b * exposure
             components[offset + 3] = color.a
         }
         // Lips: outer ring in lip colour, inner mouth dark, central dentition bright.
@@ -387,6 +392,99 @@ final class FaceSemanticTests: XCTestCase {
         for mask in [skin, teeth, sclera, iris, lips, brows] {
             XCTAssertLessThan(mask.value(at: farCorner), 0.001)
         }
+    }
+
+    /// R4 (2026-11-14): teeth and sclera mattes must follow the photo's own
+    /// exposure, not an absolute brightness. The old gates (`L* > 60..76` for
+    /// teeth, `L* > 64..80` for sclera) returned an **empty** matte on all three
+    /// real portraits measured, because real enamel in an open mouth peaked at
+    /// L* 58-60 and the brightest sclera at L* 38-45. This fixture renders the
+    /// same face at three exposures; the mattes must cover the same anatomy at
+    /// every one of them.
+    func testTeethAndScleraMattesSurviveUnderexposure() throws {
+        let face = SyntheticFace(center: CGPoint(x: 0.5, y: 0.46), scale: 1)
+        let teethCenter = CGPoint(x: face.center.x, y: face.lipsY)
+        let irisRadius = face.irisRadiusPixels(imageWidth: CGFloat(width)) / CGFloat(width)
+        let scleraPoint = CGPoint(x: face.leftPupil.x + 1.5 * irisRadius, y: face.leftPupil.y)
+        let mouthCorner = CGPoint(x: face.center.x - 0.028, y: face.lipsY)
+
+        // 1.0 = correctly exposed, 0.35 ≈ a two-stop-underexposed portrait,
+        // 0.15 ≈ a very dark frame. All three describe the same face.
+        for exposure in [Float(1.0), 0.35, 0.15] {
+            let image = syntheticImage(faces: [face], exposure: exposure)
+            let result = FaceSemanticAnalyzer.masks(image: image, faceBounds: face.boundingBox,
+                                                    landmarks: face.landmarkSet)
+            let teeth = try XCTUnwrap(sampled(result.teeth), "teeth matte at exposure \(exposure)")
+            let sclera = try XCTUnwrap(sampled(result.sclera), "sclera matte at exposure \(exposure)")
+
+            XCTAssertGreaterThan(teeth.value(at: teethCenter), 0.5,
+                                 "enamel must be found at exposure \(exposure)")
+            XCTAssertLessThan(teeth.value(at: mouthCorner), 0.1,
+                              "the dark mouth interior is not enamel, at exposure \(exposure)")
+            XCTAssertGreaterThan(sclera.value(at: scleraPoint), 0.5,
+                                 "sclera must be found at exposure \(exposure)")
+        }
+    }
+
+    /// The other half of the relative teeth rule: making it exposure-robust must
+    /// not make it fire on a **closed mouth**. Bright red lipstick has a very red
+    /// lip ring and a light interior seam, which is the case most likely to slip
+    /// through a loosened gate.
+    func testClosedMouthWithLipstickProducesNoTeethMatte() throws {
+        let width = 160, height = 160
+        let linearColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        let skin: (Float, Float, Float) = (0.40, 0.24, 0.18)
+        let lipstick: (Float, Float, Float) = (0.55, 0.10, 0.09)
+        let seam: (Float, Float, Float) = (0.05, 0.02, 0.02)
+        for row in 0..<height {
+            for column in 0..<width {
+                let offset = (row * width + column) * 4
+                var color = skin
+                let dx = (Double(column) - 80) / 34, dy = (Double(row) - 70) / 12
+                if dx * dx + dy * dy <= 1 {
+                    color = abs(Double(row) - 70) < 1.2 ? seam : lipstick
+                }
+                pixels[offset] = color.0
+                pixels[offset + 1] = color.1
+                pixels[offset + 2] = color.2
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let image = CIImage(bitmapData: data, bytesPerRow: width * 16,
+                            size: CGSize(width: width, height: height),
+                            format: .RGBAf, colorSpace: linearColorSpace)
+
+        func ellipse(_ cx: Double, _ cy: Double, _ rx: Double, _ ry: Double) -> [CGPoint] {
+            (0..<16).map { index in
+                let angle = Double(index) / 16 * 2 * .pi
+                return CGPoint(x: (cx + rx * cos(angle)) / 160, y: 1 - (cy + ry * sin(angle)) / 160)
+            }
+        }
+        var face = FaceLandmarkSet(boundingBox: CGRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7),
+                                   confidence: 1)
+        face.faceContour = ellipse(80, 80, 60, 72)
+        face.outerLips = ellipse(80, 70, 34, 12)
+        face.innerLips = ellipse(80, 70, 30, 1.2)
+        face.leftEye = ellipse(58, 52, 12, 6)
+        face.rightEye = ellipse(102, 52, 12, 6)
+        face.leftEyebrow = ellipse(58, 40, 14, 3)
+        face.rightEyebrow = ellipse(102, 40, 14, 3)
+
+        let result = FaceSemanticAnalyzer.masks(image: image, faceBounds: face.boundingBox,
+                                                landmarks: face)
+        let teeth = try XCTUnwrap(sampled(result.teeth))
+        var maximum: Float = 0
+        for row in 0..<teeth.maskHeight {
+            for column in 0..<teeth.maskWidth {
+                maximum = max(maximum, teeth.values[row * teeth.maskWidth + column])
+            }
+        }
+        XCTAssertLessThan(maximum, 0.1,
+                          "a closed mouth has no enamel; the teeth matte must stay empty")
     }
 
     func testMasksAreDeterministicSoftAndBounded() throws {

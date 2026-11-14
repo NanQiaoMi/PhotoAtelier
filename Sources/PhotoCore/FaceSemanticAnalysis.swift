@@ -84,6 +84,80 @@ public struct FaceLandmarkSet: Equatable {
             } >= 3
         }
     }
+
+    // MARK: - Face oval (R3)
+
+    /// Fraction of the brow-to-chin distance that the forehead occupies.
+    ///
+    /// Used to estimate the hairline, which Vision does not report. The value
+    /// is deliberately conservative: a hairline that is estimated too low cuts
+    /// forehead skin out of the matte, while one that is too high pulls hair
+    /// into it.
+    private static let foreheadHeightFraction = 0.30
+
+    /// The closed outline of the face's skin area.
+    ///
+    /// Vision's `faceContour` is an **open arc** that runs from one temple,
+    /// under the chin and up to the other temple — the forehead is not part of
+    /// it. Treating that arc as a closed polygon (the ray-casting fill the
+    /// matte builder uses) fills only the jaw region, which is why the skin
+    /// matte used to cover a small patch under the jaw instead of the face.
+    /// Vision's own face *bounding box* has the same blind spot: it stops at
+    /// the brows, so every engine that works off the face box was blind to the
+    /// forehead too.
+    ///
+    /// The arc is closed here with a forehead cap estimated from the brow line
+    /// and the chin, and the face box is derived from the same geometry.
+    public var skinOvalPolygon: [CGPoint] {
+        let contour = faceContour.filter { $0.x.isFinite && $0.y.isFinite }
+        guard contour.count >= 3 else { return contour }
+        let xs = contour.map { $0.x }
+        let ys = contour.map { $0.y }
+        guard let minX = xs.min(), let maxX = xs.max(),
+              let minY = ys.min(), let maxY = ys.max() else { return contour }
+        let diagonal = hypot(maxX - minX, maxY - minY)
+        let closingGap = hypot(contour[0].x - contour[contour.count - 1].x,
+                               contour[0].y - contour[contour.count - 1].y)
+        // A contour whose ends almost meet is already a closed outline (some
+        // callers hand in a full oval); only an open arc needs the forehead cap.
+        guard diagonal > 0, closingGap > diagonal * 0.35 else { return contour }
+
+        let chinY = minY
+        let browY = (leftEyebrow + rightEyebrow)
+            .map { $0.y }
+            .filter { $0.isFinite }
+            .max()
+        let eyeY = (leftEye + rightEye)
+            .map { $0.y }
+            .filter { $0.isFinite }
+            .max()
+        let anchorY = browY ?? eyeY ?? (chinY + 0.05)
+        let span = max(0.02, anchorY - chinY)
+        let forehead = span * Self.foreheadHeightFraction
+
+        let first = contour[0]
+        let last = contour[contour.count - 1]
+        let capLeft = CGPoint(x: last.x, y: last.y + forehead)
+        let capRight = CGPoint(x: first.x, y: first.y + forehead)
+        let apex = CGPoint(x: (capLeft.x + capRight.x) * 0.5,
+                           y: (capLeft.y + capRight.y) * 0.5 + forehead * 0.10)
+        return contour + [capLeft, apex, capRight]
+    }
+
+    /// The face rectangle that actually covers the face, forehead included.
+    ///
+    /// `boundingBox` is Vision's own detection box, which stops at the brows on
+    /// many portraits. This box is derived from `skinOvalPolygon` and is what
+    /// the retouching engines should use when they need "the whole face".
+    public var skinOvalBox: CGRect {
+        let polygon = skinOvalPolygon
+        guard polygon.count >= 3 else { return boundingBox }
+        let xs = polygon.map { $0.x }
+        let ys = polygon.map { $0.y }
+        guard let minX = xs.min(), let maxX = xs.max(),
+              let minY = ys.min(), let maxY = ys.max() else { return boundingBox }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
 }
 
 // MARK: - Mask output
@@ -96,10 +170,12 @@ public struct FaceLandmarkSet: Equatable {
 /// single-channel matte (`mask.red`) and multiply or blend the treatment by it.
 ///
 /// Resolution: masks are computed on an internal raster whose longest edge is
-/// `FaceSemanticAnalyzer.masks(..., maxDimension:)` (default 512, clamped to
-/// 32...1024) and then scaled to the full image, so edges are soft at the raster
-/// scale of a few pixels. They are intentionally low-resolution priors for
-/// retouching, not per-pixel segmentation labels.
+/// `FaceSemanticAnalyzer.masks(..., maxDimension:)` (R2, 2026-11-12: default
+/// raised from 512 to 1024 after the "细节粗糙" review — 512-edge mattes upscaled
+/// onto a 1440-px photo produced visibly soft mask borders on skin edges; the
+/// clamp range is unchanged) and then scaled to the full image, so edges are
+/// soft at the raster scale of a few pixels. They remain low-resolution priors
+/// for retouching, not per-pixel segmentation labels.
 ///
 /// `nil` means the landmarks required for that mask were absent. A non-`nil`
 /// mask can still be all zero: the geometry was available but no pixel matched
@@ -170,7 +246,7 @@ public struct FaceSemanticMaskSet {
 /// of the public contract above.
 public enum FaceSemanticAnalyzer {
     /// Default longest edge of the internal matte raster.
-    public static let defaultMaxDimension = 512
+    public static let defaultMaxDimension = 1024
     /// Faces below this Vision confidence are ignored by `detect` and `masks`.
     public static let minimumConfidence: Double = 0.3
 
@@ -313,6 +389,8 @@ private struct FaceGeometry {
     let box: CGRect
     let confidence: Double
     let contour: [CGPoint]
+    /// Closed face outline (jaw arc + forehead cap); R3, see `skinOvalPolygon`.
+    let skinOval: [CGPoint]
     let eyes: [[CGPoint]]
     let pupils: [CGPoint?]
     let brows: [[CGPoint]]
@@ -327,6 +405,51 @@ private struct FaceColorWeights {
     let iris: [Float]
     let lips: [Float]
     let brows: [Float]
+}
+
+/// R4 (2026-11-14): per-face colour references measured from the same raster the
+/// classifier sees, used to make the teeth/sclera rules **relative**.
+///
+/// The previous gates were absolute CIELab thresholds (`L* > 60..76` for teeth,
+/// `L* > 64..80` for sclera). Those encode studio lighting: on the three real
+/// portraits measured here, the brightest enamel inside an open mouth was
+/// `L* 58..60` and the brightest sclera `L* 38..45`, so both mattes came out
+/// empty and "牙齿美白 / 眼白提亮" were silent no-ops on every real photo — the
+/// same failure the glare gate had before it was referenced to face skin.
+///
+/// The discriminator that survives exposure is *relative*: enamel is markedly
+/// less red than the lip around it, and sclera is markedly brighter and less
+/// chromatic than the rest of the eye polygon. Both references are medians of
+/// the face's own pixels, so a dark or warm exposure moves them together.
+private struct FaceColorReference {
+    /// Median a* of the lip ring (outer lip minus the mouth opening). Zero when
+    /// the mouth geometry is unusable.
+    let lipRedness: Double
+    /// Median L* of the lip ring.
+    let lipLightness: Double
+    /// L* spread of the eye polygons (sclera + iris + lids together), as
+    /// percentiles rather than a median: in a well-lit eye the sclera *is* the
+    /// median, so "brighter than the median" would exclude it.
+    let eyeLightnessP10: Double
+    let eyeLightnessP90: Double
+    /// Median chroma of the eye polygons. Sclera is the pale part of the eye;
+    /// the iris and lashes sit well above it.
+    let eyeChroma: Double
+
+    static let unavailable = FaceColorReference(lipRedness: 0, lipLightness: 0,
+                                                eyeLightnessP10: 0, eyeLightnessP90: 0,
+                                                eyeChroma: 0)
+
+    var hasLipReference: Bool { lipLightness > 1 }
+    var hasEyeReference: Bool { eyeLightnessP90 > 1 }
+
+    /// Sclera must sit in the upper part of the eye's own brightness spread.
+    /// The margin is a fraction of that spread, so a shadowed eye and a
+    /// well-lit eye both get a threshold at the same *relative* height.
+    var scleraLightnessFloor: Double {
+        let spread = max(0, eyeLightnessP90 - eyeLightnessP10)
+        return eyeLightnessP90 - 0.40 * spread
+    }
 }
 
 // MARK: - Implementation
@@ -346,7 +469,7 @@ private extension FaceSemanticAnalyzer {
               let pixels = rasterize(image: image, extent: extent, width: width, height: height) else {
             return emptyMaskSet(extent: extent, resolution: resolution)
         }
-        let colors = colorWeights(pixels: pixels, width: width, height: height)
+        let lab = LabRaster.make(pixels: pixels, width: width, height: height)
 
         var skin: [Float]?
         var teeth: [Float]?
@@ -358,6 +481,9 @@ private extension FaceSemanticAnalyzer {
         var mergedConfidence = 1.0
 
         for geometry in geometries {
+            // R4: each face is classified against its own lip/eye references, so
+            // a dark or warm exposure moves the references with it.
+            let colors = colorWeights(lab: lab, reference: colorReference(for: geometry, lab: lab))
             let layers = maskLayers(for: geometry, colors: colors, width: width, height: height)
             skin = maximum(skin, layers.skin)
             teeth = maximum(teeth, layers.teeth)
@@ -376,9 +502,9 @@ private extension FaceSemanticAnalyzer {
             confidence: mergedConfidence,
             faceCount: geometries.count,
             skin: maskImage(skin, width: width, height: height, extent: extent),
-            teeth: maskImage(teeth, width: width, height: height, extent: extent),
-            sclera: maskImage(sclera, width: width, height: height, extent: extent),
-            iris: maskImage(iris, width: width, height: height, extent: extent),
+            teeth: maskImage(teeth, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
+            sclera: maskImage(sclera, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
+            iris: maskImage(iris, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
             lips: maskImage(lips, width: width, height: height, extent: extent),
             brows: maskImage(brows, width: width, height: height, extent: extent)
         )
@@ -398,9 +524,10 @@ private extension FaceSemanticAnalyzer {
               let pixels = rasterize(image: image, extent: extent, width: width, height: height) else {
             return []
         }
-        let colors = colorWeights(pixels: pixels, width: width, height: height)
+        let lab = LabRaster.make(pixels: pixels, width: width, height: height)
 
         return geometries.map { geometry in
+            let colors = colorWeights(lab: lab, reference: colorReference(for: geometry, lab: lab))
             let layers = maskLayers(for: geometry, colors: colors, width: width, height: height)
             return FaceSemanticMaskSet(
                 extent: extent,
@@ -409,9 +536,9 @@ private extension FaceSemanticAnalyzer {
                 confidence: geometry.confidence,
                 faceCount: 1,
                 skin: maskImage(layers.skin, width: width, height: height, extent: extent),
-                teeth: maskImage(layers.teeth, width: width, height: height, extent: extent),
-                sclera: maskImage(layers.sclera, width: width, height: height, extent: extent),
-                iris: maskImage(layers.iris, width: width, height: height, extent: extent),
+                teeth: maskImage(layers.teeth, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
+                sclera: maskImage(layers.sclera, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
+                iris: maskImage(layers.iris, width: width, height: height, extent: extent, featherScale: smallFeatureFeatherScale),
                 lips: maskImage(layers.lips, width: width, height: height, extent: extent),
                 brows: maskImage(layers.brows, width: width, height: height, extent: extent)
             )
@@ -673,7 +800,11 @@ private extension FaceSemanticAnalyzer {
 
         var skin: [Float]?
         if geometry.contour.count >= 3 {
-            let contour = fillPolygons([geometry.contour], width: width, height: height)
+            // R3 (2026-11-14): the raw `faceContour` is an open jaw arc, so the
+            // polygon fill covered only the jaw. The closed face oval (jaw arc +
+            // forehead cap) is what the skin matte has to be built from.
+            let oval = geometry.skinOval
+            let contour = fillPolygons([oval], width: width, height: height)
             var values = contour
             for index in values.indices where contour[index] > 0 {
                 // Excluded features must be cleared, not just skipped: `values`
@@ -716,7 +847,8 @@ private extension FaceSemanticAnalyzer {
             ?? boundingBox(of: [contour, outerLips, innerLips] + eyes + brows)
         guard let box else { return nil }
         return FaceGeometry(box: box, confidence: face.confidence,
-                            contour: contour, eyes: eyes, pupils: pupils,
+                            contour: contour, skinOval: face.skinOvalPolygon,
+                            eyes: eyes, pupils: pupils,
                             brows: brows, outerLips: outerLips, innerLips: innerLips)
     }
 
@@ -741,7 +873,7 @@ private extension FaceSemanticAnalyzer {
     }
 
     static func maskImage(_ values: [Float]?, width: Int, height: Int,
-                          extent: CGRect) -> CIImage? {
+                          extent: CGRect, featherScale: CGFloat = 1) -> CIImage? {
         guard let values, values.count == width * height, width > 0, height > 0 else { return nil }
         var rgba = [Float](repeating: 0, count: width * height * 4)
         for index in values.indices {
@@ -760,8 +892,13 @@ private extension FaceSemanticAnalyzer {
                              bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
                              size: CGSize(width: CGFloat(width), height: CGFloat(height)),
                              format: .RGBAf, colorSpace: linearColorSpace)
+        // R4 (2026-11-14): the default feather is sized for large, soft-edged
+        // regions (the skin oval). Small features cannot survive it — a 5-px-tall
+        // teeth band blurred with a 3-px Gaussian peaks at 0.29 coverage, which
+        // then reads as "almost no matte" downstream. Teeth/sclera pass a
+        // smaller scale so their core stays solid.
         let feathered = forcingOpaque(
-            gaussianBlurred(bitmap, radius: featherRadius(width: width, height: height))
+            gaussianBlurred(bitmap, radius: featherRadius(width: width, height: height) * featherScale)
                 .cropped(to: bitmap.extent))
         let scale = CGAffineTransform(scaleX: extent.width / CGFloat(width),
                                       y: extent.height / CGFloat(height))
@@ -796,6 +933,14 @@ private extension FaceSemanticAnalyzer {
         min(4, max(1, 0.0030 * CGFloat(max(width, height))))
     }
 
+    /// R4 (2026-11-14): teeth, sclera and iris are the thinnest features the
+    /// matte builder produces — on a real 1440-px portrait the visible enamel
+    /// band is ~5 px tall and the iris disc ~14 px across on the internal
+    /// raster, and the skin oval's 3-px Gaussian erases them (measured peaks
+    /// 0.29/0.38/0.22 before, 0.88/0.91/0.9 after). They feather at a quarter
+    /// of the skin oval's radius; larger regions keep the default.
+    static let smallFeatureFeatherScale: CGFloat = 0.25
+
     static func emptyMaskSet(extent: CGRect = .zero,
                              resolution: CGSize = .zero) -> FaceSemanticMaskSet {
         FaceSemanticMaskSet(extent: extent, resolution: resolution, faceBounds: .zero,
@@ -807,8 +952,112 @@ private extension FaceSemanticAnalyzer {
 // MARK: - Colour classification
 
 private extension FaceSemanticAnalyzer {
-    static func colorWeights(pixels: [Float], width: Int, height: Int) -> FaceColorWeights {
-        let count = width * height
+    /// The analyzer raster converted to CIELab once. Classifying per face needs
+    /// the same per-pixel Lab values, and converting the raster for every face
+    /// would repeat the (pow-heavy) sRGB→Lab step `faceCount` times.
+    struct LabRaster {
+        let lightness: [Float]
+        let aStar: [Float]
+        let bStar: [Float]
+        let chroma: [Float]
+        /// Pixels whose source alpha was finite and non-zero.
+        let valid: [Bool]
+        let width: Int
+        let height: Int
+
+        static func make(pixels: [Float], width: Int, height: Int) -> LabRaster {
+            let count = width * height
+            var lightness = [Float](repeating: 0, count: count)
+            var aStar = lightness, bStar = lightness, chroma = lightness
+            var valid = [Bool](repeating: false, count: count)
+            for index in 0..<count {
+                let offset = index * 4
+                let alpha = pixels[offset + 3]
+                guard alpha.isFinite, alpha > 0.001 else { continue }
+                let inverseAlpha = alpha < 1 ? 1 / alpha : 1
+                let red = pixels[offset] * inverseAlpha
+                let green = pixels[offset + 1] * inverseAlpha
+                let blue = pixels[offset + 2] * inverseAlpha
+                guard red.isFinite, green.isFinite, blue.isFinite else { continue }
+                let lab = labValue(red: red, green: green, blue: blue)
+                lightness[index] = lab.lightness
+                aStar[index] = lab.aStar
+                bStar[index] = lab.bStar
+                chroma[index] = lab.chroma
+                valid[index] = true
+            }
+            return LabRaster(lightness: lightness, aStar: aStar, bStar: bStar,
+                             chroma: chroma, valid: valid, width: width, height: height)
+        }
+    }
+
+    /// Sorted samples of `values` over the pixels flagged in `region`, for
+    /// callers that need percentiles rather than one central value.
+    static func samples(of values: [Float], over region: [Float]) -> [Float] {
+        var samples: [Float] = []
+        samples.reserveCapacity(region.count / 8)
+        for index in region.indices where region[index] > 0.5 {
+            let value = values[index]
+            if value.isFinite { samples.append(value) }
+        }
+        samples.sort()
+        return samples
+    }
+
+    static func median(of values: [Float], over region: [Float]) -> Double {
+        let samples = samples(of: values, over: region)
+        return samples.isEmpty ? 0 : Double(samples[samples.count / 2])
+    }
+
+    static func percentile(_ samples: [Float], _ fraction: Double) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let index = min(samples.count - 1, max(0, Int(Double(samples.count - 1) * fraction)))
+        return Double(samples[index])
+    }
+
+    /// R4 (2026-11-14): measures the references the relative teeth/sclera rules
+    /// need, from this face's own pixels.
+    static func colorReference(for geometry: FaceGeometry,
+                               lab: LabRaster) -> FaceColorReference {
+        let width = lab.width, height = lab.height
+        var reference = FaceColorReference.unavailable
+
+        // Lip ring: the outer lip minus the mouth opening. Median redness and
+        // lightness of that ring describe the surrounding lip tissue.
+        if geometry.outerLips.count >= 3 {
+            let outer = fillPolygons([geometry.outerLips], width: width, height: height)
+            let inner = geometry.innerLips.count >= 3
+                ? fillPolygons([geometry.innerLips], width: width, height: height)
+                : [Float](repeating: 0, count: outer.count)
+            var ring = outer
+            for index in ring.indices where ring[index] > 0 {
+                ring[index] = max(0, ring[index] - inner[index])
+            }
+            let lipA = median(of: lab.aStar, over: ring)
+            let lipL = median(of: lab.lightness, over: ring)
+            reference = FaceColorReference(lipRedness: lipA, lipLightness: lipL,
+                                           eyeLightnessP10: reference.eyeLightnessP10,
+                                           eyeLightnessP90: reference.eyeLightnessP90,
+                                           eyeChroma: reference.eyeChroma)
+        }
+
+        // Eye polygon union: the sclera rule ranks pixels against the eye's own
+        // brightness spread and chroma level.
+        if !geometry.eyes.isEmpty {
+            let eyes = fillPolygons(geometry.eyes, width: width, height: height)
+            let eyeL = samples(of: lab.lightness, over: eyes)
+            let eyeC = median(of: lab.chroma, over: eyes)
+            reference = FaceColorReference(lipRedness: reference.lipRedness,
+                                           lipLightness: reference.lipLightness,
+                                           eyeLightnessP10: percentile(eyeL, 0.10),
+                                           eyeLightnessP90: percentile(eyeL, 0.90),
+                                           eyeChroma: eyeC)
+        }
+        return reference
+    }
+
+    static func colorWeights(lab: LabRaster, reference: FaceColorReference) -> FaceColorWeights {
+        let count = lab.width * lab.height
         var skin = [Float](repeating: 0, count: count)
         var teeth = [Float](repeating: 0, count: count)
         var sclera = [Float](repeating: 0, count: count)
@@ -816,34 +1065,63 @@ private extension FaceSemanticAnalyzer {
         var lips = [Float](repeating: 0, count: count)
         var brows = [Float](repeating: 0, count: count)
         for index in 0..<count {
-            let offset = index * 4
-            let alpha = pixels[offset + 3]
-            guard alpha.isFinite, alpha > 0.001 else { continue }
-            let inverseAlpha = alpha < 1 ? 1 / alpha : 1
-            let red = pixels[offset] * inverseAlpha
-            let green = pixels[offset + 1] * inverseAlpha
-            let blue = pixels[offset + 2] * inverseAlpha
-            guard red.isFinite, green.isFinite, blue.isFinite else { continue }
-            let lab = labValue(red: red, green: green, blue: blue)
-            let lightness = lab.lightness
-            let chroma = lab.chroma
-            let aStar = lab.aStar
-            let bStar = lab.bStar
+            guard lab.valid[index] else { continue }
+            let lightness = lab.lightness[index]
+            let chroma = lab.chroma[index]
+            let aStar = lab.aStar[index]
+            let bStar = lab.bStar[index]
 
             // Skin: broad CIELab prior for pale to deep tones (lightness range,
             // moderate warm chroma, positive a*/b*). Applied only inside the face
             // contour, so a skin-coloured background cannot leak in.
-            let skinLightness = smoothstep(12, 22, lightness) * (1 - smoothstep(93, 98, lightness))
-            let skinChroma = smoothstep(2.5, 6.5, chroma) * (1 - smoothstep(46, 58, chroma))
-            let skinWarmth = smoothstep(0, 4, bStar) * (1 - smoothstep(38, 48, bStar))
+            //
+            // R3 (2026-11-14, "针对人的处理特别差" review): the old gate was
+            // strict — chroma had to reach 6.5 and b* had to be positive. On a
+            // backlit or side-lit face the shadow side is low chroma and
+            // slightly cool, so the gate rejected it. The floors are now low
+            // enough to include shadowed skin; the geometric face oval plus the
+            // eye/brow/lip exclusions keep hair and background out.
+            let skinLightness = smoothstep(8, 16, lightness) * (1 - smoothstep(93, 98, lightness))
+            let skinChroma = smoothstep(1.2, 4.5, chroma) * (1 - smoothstep(46, 58, chroma))
+            let skinWarmth = smoothstep(-5, 2, bStar) * (1 - smoothstep(38, 48, bStar))
             let skinRed = 1 - smoothstep(34, 46, aStar)
             skin[index] = skinLightness * skinChroma * skinWarmth * skinRed
 
-            // Teeth: bright and nearly neutral inside the inner lip polygon.
-            teeth[index] = smoothstep(60, 76, lightness) * (1 - smoothstep(11, 20, chroma))
+            // Teeth: enamel is markedly **less red than the lip around it**, not
+            // absolutely bright. Absolute gates (`L* > 60..76`) encoded studio
+            // lighting and returned an empty matte on every real portrait
+            // measured (brightest enamel L* 58-60). Ranking against the mouth's
+            // own lip ring survives exposure and white balance.
+            if reference.hasLipReference {
+                // Lip median a* ~18-23; enamel sits ~5-8 units below it.
+                let desaturated = smoothstep(0, 5, Float(reference.lipRedness) - aStar)
+                // ...and no darker than the lip around it (a closed mouth's
+                // shadowed interior is well below this and stays unmasked).
+                let lit = smoothstep(Float(reference.lipLightness) * 0.82,
+                                     Float(reference.lipLightness) * 1.02, lightness)
+                teeth[index] = desaturated * lit
+            } else {
+                // No usable mouth geometry: keep a conservative absolute rule so
+                // a well-lit synthetic/studio face still classifies.
+                teeth[index] = smoothstep(60, 76, lightness) * (1 - smoothstep(11, 20, chroma))
+            }
 
-            // Sclera: the brightest low-chroma part of the eye polygon.
-            sclera[index] = smoothstep(64, 80, lightness) * (1 - smoothstep(8, 16, chroma))
+            // Sclera: the brightest low-chroma part of **this eye**, ranked
+            // against the eye polygon's own brightness spread. The absolute
+            // `L* > 64..80` gate returned nothing on real portraits (brightest
+            // sclera 38-45), and a median reference excludes the sclera itself
+            // on a well-lit eye where the sclera *is* the median.
+            if reference.hasEyeReference {
+                let floor = Float(reference.scleraLightnessFloor)
+                let bright = smoothstep(floor, floor + 6, lightness)
+                // Whitish relative to the eye's own chroma level; the iris and
+                // the lashes sit well above it.
+                let pale = 1 - smoothstep(Float(reference.eyeChroma) * 1.15,
+                                          Float(reference.eyeChroma) * 2.4, chroma)
+                sclera[index] = bright * pale
+            } else {
+                sclera[index] = smoothstep(64, 80, lightness) * (1 - smoothstep(8, 16, chroma))
+            }
 
             // Iris: mid/low lightness with clearly more chroma than the sclera.
             iris[index] = smoothstep(8, 18, chroma)

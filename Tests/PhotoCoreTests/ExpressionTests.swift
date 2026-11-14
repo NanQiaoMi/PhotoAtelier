@@ -114,6 +114,47 @@ final class ExpressionTests: XCTestCase {
         XCTAssertLessThan(offset.x, 0.0, "Left commissure must pull outward to the left")
     }
 
+    /// R3 (2026-11-14): the P2 review caught sample-10's natural smile turning
+    /// into a "咧嘴" grimace because `smileDegree` lifted the corners
+    /// unconditionally. A mouth that already smiles must keep its headroom
+    /// small, so the same slider cannot pile a second smile on top of one that
+    /// is already in the photo.
+    func testSmileDegreeRespectsExistingSmile() {
+        var (_, neutralFace) = makeTestFaceImage()
+        // The fixture's own mouth is already a relaxed smile (corners at 0.35,
+        // lip centre ≈ 0.35) - flatten it first so both cases are comparable.
+        neutralFace.outerLips = neutralFace.outerLips.enumerated().map { index, point in
+            // A neutral mouth: the commissures sit level with the lip centre.
+            let levels: [Int: CGFloat] = [0: 0.35, 6: 0.35, 2: 0.375, 4: 0.375, 8: 0.32]
+            return CGPoint(x: point.x, y: levels[index] ?? point.y)
+        }
+        var smilingFace = neutralFace
+        // A broad grin: both corners raised well above the lip centre.
+        smilingFace.outerLips = smilingFace.outerLips.enumerated().map { index, point in
+            let levels: [Int: CGFloat] = [0: 0.40, 6: 0.40, 2: 0.395, 4: 0.395, 8: 0.31]
+            return CGPoint(x: point.x, y: levels[index] ?? point.y)
+        }
+
+        let neutralGeometry = ExpressionGeometry(face: neutralFace)
+        let smilingGeometry = ExpressionGeometry(face: smilingFace)
+        XCTAssertNotNil(neutralGeometry)
+        XCTAssertNotNil(smilingGeometry)
+        guard let neutralGeometry, let smilingGeometry else { return }
+
+        XCTAssertLessThan(neutralGeometry.existingSmileArc, smilingGeometry.existingSmileArc,
+                          "fixture must give the grinning mouth the larger arc")
+        XCTAssertGreaterThan(neutralGeometry.smileHeadroom, smilingGeometry.smileHeadroom,
+                             "a mouth that already smiles must have less headroom")
+
+        let settings = ExpressionSettings(enabled: true, smileDegree: 0.8)
+        let neutralField = ExpressionEngine.generateWarpField(
+            faces: [neutralFace], settings: settings, imageSize: CGSize(width: 400, height: 400))
+        let smilingField = ExpressionEngine.generateWarpField(
+            faces: [smilingFace], settings: settings, imageSize: CGSize(width: 400, height: 400))
+        XCTAssertGreaterThan(neutralField.maximumMagnitude, smilingField.maximumMagnitude,
+                             "the same smileDegree must move an already-smiling mouth less")
+    }
+
     func testSmileWidthModulation() {
         let (_, face) = makeTestFaceImage()
         // Widen smile

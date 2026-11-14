@@ -47,6 +47,11 @@ public enum FacialContourEngine {
             col *= (1.0 - sh * 0.12);
         }
 
+        // R3 (2026-11-14): pixels outside this module's guides pass through
+        // unchanged. The engine works in extended-linear-sRGB, where highlights
+        // above 1.0 are legitimate; the unconditional clamp used to clip every
+        // highlight in the photograph whenever the slider was non-zero.
+        if (hl <= 0.001 && sh <= 0.001) { return c; }
         return vec4(clamp(col, 0.0, 1.0), c.a);
     }
     """

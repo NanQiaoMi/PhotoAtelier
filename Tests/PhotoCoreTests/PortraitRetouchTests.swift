@@ -148,6 +148,13 @@ final class PortraitRetouchTests: XCTestCase {
         return variance.squareRoot()
     }
 
+    /// Optional mean for region samples that may legitimately be empty
+    /// (fixture-dependent), used by the R2 light-direction assertions.
+    private func optionalMean(_ values: [Float]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0.0) { $0 + Double($1) } / Double(values.count)
+    }
+
     private func lab(red: Float, green: Float, blue: Float) -> (lightness: Double, aStar: Double, bStar: Double) {
         let r = Double(min(1, max(0, red)))
         let g = Double(min(1, max(0, green)))
@@ -392,13 +399,46 @@ final class PortraitRetouchTests: XCTestCase {
         let skinRegion: (Int, Int) -> Bool = { skinColumns.contains($0) && skinRows.contains($1) }
         let outsideSkin: (Int, Int) -> Bool = { !skinColumns.contains($0) || !skinRows.contains($1) }
 
-        // dodgeBurn: broad low-frequency variation shrinks.
+        // dodgeBurn (R2/R3 contract, 2026-11-12 / 2026-11-14 naturalness
+        // reworks): broad low-frequency structure must SURVIVE — pulling toward
+        // the face-wide mean flattened real light direction into a plastic,
+        // uniformly lit face. The control now evens only blotchy deviation from
+        // a skin-only, face-scale wide trend (the trend IS the lighting), so the
+        // low-band standard deviation shrinks only slightly while the spatial
+        // ordering of the lighting (dark side vs bright side) is preserved.
         let dodge = try apply(PortraitRefinementSettings(dodgeBurn: 1))
         let beforeLow = boxBlur(beforeLuminance, width: width, height: height, radius: 12)
         let afterLow = boxBlur(dodge.plane, width: width, height: height, radius: 12)
         let lowBefore = standardDeviation(skinValues(beforeLow, width: width, height: height, region: skinRegion))
         let lowAfter = standardDeviation(skinValues(afterLow, width: width, height: height, region: skinRegion))
-        XCTAssertLessThan(lowAfter, lowBefore * 0.8, "dodgeBurn must flatten broad skin lighting")
+        XCTAssertGreaterThan(lowAfter, lowBefore * 0.85,
+                             "dodgeBurn must preserve broad skin lighting structure (R2)")
+        XCTAssertLessThan(lowAfter, lowBefore * 1.02,
+                          "dodgeBurn must still even out blotchy low-frequency patches (R2)")
+        // Directional structure: the mean luminance of the darker third of the
+        // skin region must stay darker than the brighter third (light direction
+        // survives the pass).
+        let darkSideMax = Double(width) * 0.4
+        let brightSideMin = Double(width) * 0.6
+        let darkSide = skinValues(beforeLow, width: width, height: height, region: { column, row in
+            skinRegion(column, row) && Double(column) < darkSideMax
+        })
+        let brightSide = skinValues(beforeLow, width: width, height: height, region: { column, row in
+            skinRegion(column, row) && Double(column) > brightSideMin
+        })
+        let afterDarkSide = skinValues(afterLow, width: width, height: height, region: { column, row in
+            skinRegion(column, row) && Double(column) < darkSideMax
+        })
+        let afterBrightSide = skinValues(afterLow, width: width, height: height, region: { column, row in
+            skinRegion(column, row) && Double(column) > brightSideMin
+        })
+        if let darkMean = optionalMean(darkSide), let brightMean = optionalMean(brightSide),
+           let afterDarkMean = optionalMean(afterDarkSide), let afterBrightMean = optionalMean(afterBrightSide) {
+            XCTAssertLessThan(darkMean, brightMean,
+                              "fixture must have directional lighting to test against")
+            XCTAssertLessThan(afterDarkMean, afterBrightMean,
+                              "dodgeBurn must preserve the light-direction ordering (R2)")
+        }
 
         // structure: mid-frequency local contrast grows.
         let structure = try apply(PortraitRefinementSettings(structure: 1))
@@ -571,6 +611,52 @@ final class PortraitRetouchTests: XCTestCase {
         XCTAssertFalse(identity.report.applied)
         assertPixelsEqual(try render(identity.image), before,
                           message: "skinToneUnify = 0 must be a complete no-op")
+    }
+
+    /// R3 (2026-11-14): on a single-face photo the cross-face reference is the
+    /// face itself, so the old implementation produced gains of exactly 1 and
+    /// "肤色统一" did nothing. It must now even out the face's own blotchy
+    /// chroma while leaving the face's mean tone where it was.
+    func testSkinToneUnificationEvensSingleFaceChromaWithoutShiftingItsMean() throws {
+        let width = 200, height = 160
+        let skinRegion = { (column: Int, row: Int) in (20...179).contains(column) && (20...139).contains(row) }
+        let blotchRegion = { (column: Int, row: Int) in (70...129).contains(column) && (60...99).contains(row) }
+        let base: RGBA = (0.50, 0.32, 0.24, 1)
+        let blotchy: RGBA = (0.56, 0.26, 0.20, 1)
+        let source = makeImage(width: width, height: height) { column, row in
+            guard skinRegion(column, row) else { return (0.10, 0.10, 0.10, 1) }
+            return blotchRegion(column, row) ? blotchy : base
+        }
+        let mask = coverageMask(width: width, height: height) { column, row in
+            skinRegion(column, row) ? 1 : 0
+        }
+        let outsideSkin: (Int, Int) -> Bool = { column, row in !skinRegion(column, row) }
+        let before = try render(source)
+        let blotchBefore = meanLab(before, width: width, region: blotchRegion)
+        let skinBefore = meanLab(before, width: width, region: skinRegion)
+        XCTAssertGreaterThan(abs(blotchBefore.aStar - skinBefore.aStar), 2,
+                             "fixture needs a clearly blotchy red patch")
+
+        let unified = try PortraitRefinementEngine.apply(
+            source,
+            settings: PortraitRefinementSettings(skinToneUnify: 1, skinToneReference: .auto),
+            faceMasks: [faceSet(extent: source.extent, skin: mask)],
+            context: context)
+        let after = try render(unified.image)
+        let blotchAfter = meanLab(after, width: width, region: blotchRegion)
+        let skinAfter = meanLab(after, width: width, region: skinRegion)
+        let beforeGap = abs(blotchBefore.aStar - skinBefore.aStar)
+        let afterGap = abs(blotchAfter.aStar - skinAfter.aStar)
+        XCTAssertLessThan(afterGap, beforeGap * 0.75,
+                          "a single face's blotchy chroma must be evened out")
+        XCTAssertEqual(skinAfter.lightness, skinBefore.lightness, accuracy: 1.5,
+                       "the face's own mean lightness must not drift")
+        XCTAssertEqual(skinAfter.bStar, skinBefore.bStar, accuracy: 1.5,
+                       "the face's own mean warmth must not drift")
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: outsideSkin), 0.001,
+                          "chroma evening must stay inside the skin matte")
+        XCTAssertTrue(unified.report.appliedSteps.contains("skinTone"))
     }
 
     // MARK: - Validation and recipe version gate

@@ -54,6 +54,11 @@ public enum EyebrowReshapeEngine {
             col = mix(col, col * (1.0 - darkening), wb);
         }
 
+        // R3 (2026-11-14): pixels outside the brow guides pass through unchanged.
+        // The engine works in extended-linear-sRGB, where highlights above 1.0
+        // are legitimate; an unconditional clamp clipped the whole photograph's
+        // highlights whenever this pass was enabled.
+        if (hl <= 0.001 && sh <= 0.001 && wb <= 0.001) { return c; }
         return vec4(clamp(col, 0.0, 1.0), c.a);
     }
     """

@@ -23,31 +23,58 @@ public enum FacialBoneContourEngine {
         sampler src,
         sampler hlGuide,
         sampler shGuide,
-        vec4 hlParams,    // x: tZone, y: cZone, z: philtrum, w: warmth
-        vec4 shParams,    // x: cheekShadow, y: jawlineShadow, z: facialFolding, w: warmth
-        vec4 foldBoost    // x: centerBoostStrength, yzw: reserved
+        vec4 hlParams,      // x: tZone, y: cZone, z: philtrum, w: warmth
+        vec4 shParams,      // x: cheekShadow, y: jawlineShadow, z: facialFolding, w: warmth
+        vec4 foldBoost,     // x: centerBoostStrength, yzw: reserved
+        vec4 lightInfo,     // x: lightX (-1 left .. 1 right), y: lightY, z: midline X px, w: face width px
+        vec4 highlightTone, // rgb: the photo's own lit-skin colour
+        vec4 shadowTone     // rgb: the photo's own shadow-skin colour
     ) {
         vec4 c = sample(src, samplerCoord(src));
         vec4 hl = sample(hlGuide, samplerCoord(hlGuide));
         vec4 sh = sample(shGuide, samplerCoord(shGuide));
         vec3 col = c.rgb;
+        const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
+        // R3 (2026-11-14): this kernel used to *add white* to the T-zone and
+        // C-zone and multiply by a fixed darkness for the contour, on a fixed
+        // template, ignoring where the light in the photo actually comes from.
+        // On a portrait lit from the left the nasal bridge highlight still
+        // landed dead centre and the right C-zone was brightened even though it
+        // is the shaded side - the "贴纸/妆感" the P2 review found.
+        //
+        // Everything below now derives its colour from the photograph:
+        //   * highlights lift toward the hue of the photo's own lit skin,
+        //     scaled by how much headroom the pixel has (a bright forehead can
+        //     no longer be pushed to clipping);
+        //   * shadows darken through the hue of the photo's own shadowed skin,
+        //     so the burn stays skin-coloured instead of neutral grey;
+        //   * C-zone highlights and cheek-hollow shadows are attenuated on the
+        //     side of the face that the light is *not* coming from.
+        // The lit side / shadow side attenuation is baked into the guide masks
+        // (see `drawHighlightGuide` / `drawShadowGuide`), because the kernel
+        // language cannot read a pixel coordinate into a local variable.
         float tZone = hl.r * hlParams.x;
         float cZone = hl.g * hlParams.y;
         float philtrum = hl.b * hlParams.z;
         float warmth = hlParams.w;
 
-        // 1. Highlights: Pearlescent Specular Sheen
+        // 1. Highlights: lift toward the photo's own lit-skin tone.
         float totalHL = tZone * 0.16 + cZone * 0.14 + philtrum * 0.12;
         if (totalHL > 0.0005) {
-            vec3 hlTint = vec3(1.0);
+            float hlLum = max(0.05, dot(highlightTone.rgb, LUMA));
+            vec3 hlHue = highlightTone.rgb / hlLum;
+            // Warmth pushes the highlight's own hue warmer/cooler; the swings
+            // are large enough to survive an 8-bit output step.
             if (warmth > 0.001) {
-                hlTint = vec3(1.0 + 0.14 * warmth, 1.0 + 0.05 * warmth, 1.0 - 0.08 * warmth);
+                hlHue *= vec3(1.0 + 0.20 * warmth, 1.0 + 0.07 * warmth, 1.0 - 0.14 * warmth);
             } else if (warmth < -0.001) {
                 float wAbs = abs(warmth);
-                hlTint = vec3(1.0 - 0.06 * wAbs, 1.0, 1.0 + 0.08 * wAbs);
+                hlHue *= vec3(1.0 - 0.10 * wAbs, 1.0, 1.0 + 0.14 * wAbs);
             }
-            col += hlTint * totalHL;
+            float lum = dot(col, LUMA);
+            float headroom = clamp(1.0 - lum, 0.0, 1.0);
+            col += hlHue * totalHL * (0.35 + 0.65 * headroom);
         }
 
         // 2. Shadows & Lateral Folding Falloff
@@ -57,15 +84,19 @@ public enum FacialBoneContourEngine {
         float totalShadow = cheekSh * 0.16 + jawlineSh * 0.20 + foldLateralSh * 0.14;
 
         if (totalShadow > 0.0005) {
-            float shMult = max(0.40, 1.0 - totalShadow);
-            vec3 shTint = vec3(1.0);
+            float shMult = max(0.45, 1.0 - totalShadow);
+            // `shadowTone` is the photo's shadowed skin RELATIVE to its lit skin
+            // (a per-channel ratio, 1.0 where the two are the same colour), so
+            // the burn stays skin-coloured and is exactly neutral on a face
+            // without a colour cast.
+            vec3 shHue = mix(vec3(1.0), shadowTone.rgb, 0.85);
             if (warmth > 0.001) {
-                shTint = vec3(1.0 + 0.08 * warmth, 1.0 + 0.02 * warmth, 1.0 - 0.06 * warmth);
+                shHue *= vec3(1.0 + 0.12 * warmth, 1.0 + 0.03 * warmth, 1.0 - 0.10 * warmth);
             } else if (warmth < -0.001) {
                 float wAbs = abs(warmth);
-                shTint = vec3(1.0 - 0.04 * wAbs, 1.0, 1.0 + 0.06 * wAbs);
+                shHue *= vec3(1.0 - 0.08 * wAbs, 1.0, 1.0 + 0.10 * wAbs);
             }
-            col *= (shMult * shTint);
+            col *= (shMult * shHue);
         }
 
         // 3. Central Folding Axial Prominence Boost
@@ -74,6 +105,11 @@ public enum FacialBoneContourEngine {
             col += vec3(centerBoost * 0.07);
         }
 
+        // R3 (2026-11-14, second pass): pass untouched pixels straight through.
+        // The unconditional clamp used to clip every value above 1.0 in the
+        // extended-linear working space - i.e. every highlight in the photo,
+        // wherever it was - whenever a bone-contour slider was non-zero.
+        if (totalHL <= 0.0005 && totalShadow <= 0.0005 && centerBoost <= 0.0005) { return c; }
         return vec4(clamp(col, 0.0, 1.0), c.a);
     }
     """
@@ -105,7 +141,9 @@ public enum FacialBoneContourEngine {
         }
 
         var working = image
-        let (hlGuide, shGuide) = makeBoneContourGuideMasks(faces: usableFaces, extent: working.extent)
+        let lighting = lightResponse(for: working, faces: usableFaces)
+        let (hlGuide, shGuide) = makeBoneContourGuideMasks(
+            faces: usableFaces, extent: working.extent, lightX: Double(lighting.lightInfo.x))
 
         let hlParams = CIVector(
             x: CGFloat(settings.tZoneHighlight),
@@ -125,11 +163,11 @@ public enum FacialBoneContourEngine {
             z: 0,
             w: 0
         )
-
         if let shaded = kernel.apply(
             extent: working.extent,
             roiCallback: { _, rect in rect },
-            arguments: [working, hlGuide, shGuide, hlParams, shParams, foldBoost]
+            arguments: [working, hlGuide, shGuide, hlParams, shParams, foldBoost,
+                        lighting.lightInfo, lighting.highlightTone, lighting.shadowTone]
         ) {
             working = shaded.cropped(to: working.extent)
         }
@@ -167,7 +205,9 @@ public enum FacialBoneContourEngine {
         }
 
         let startTime = Date().timeIntervalSinceReferenceDate
-        let (hlGuide, shGuide) = makeBoneContourGuideMasks(faces: [face], extent: image.extent)
+        let lighting = lightResponse(for: image, faces: [face])
+        let (hlGuide, shGuide) = makeBoneContourGuideMasks(
+            faces: [face], extent: image.extent, lightX: Double(lighting.lightInfo.x))
         let hlParams = CIVector(
             x: CGFloat(settings.tZoneHighlight),
             y: CGFloat(settings.cZoneHighlight),
@@ -186,11 +226,11 @@ public enum FacialBoneContourEngine {
             z: 0,
             w: 0
         )
-
         guard let shaded = kernel.apply(
             extent: image.extent,
             roiCallback: { _, rect in rect },
-            arguments: [image, hlGuide, shGuide, hlParams, shParams, foldBoost]
+            arguments: [image, hlGuide, shGuide, hlParams, shParams, foldBoost,
+                        lighting.lightInfo, lighting.highlightTone, lighting.shadowTone]
         )?.cropped(to: image.extent) else {
             return (image, FacialBoneContourReport(applied: false, faceCount: 0, note: "着色器计算失败。"))
         }
@@ -222,6 +262,117 @@ public enum FacialBoneContourEngine {
         return (finalImage, report)
     }
 
+    // MARK: - Photo light response
+
+    /// What the photograph itself says about its own light: the direction it
+    /// comes from, and the colour of the lit and shadowed skin. The bone
+    /// contour pass must be *derived* from these, otherwise its highlights are
+    /// white paint and its shadows neutral grey, regardless of the photo.
+    struct LightResponse {
+        /// x: light direction (-1 left .. 1 right), y: vertical direction,
+        /// z: face midline in pixels, w: face width in pixels.
+        var lightInfo: CIVector
+        /// The photo's own lit-skin colour (rgb), already normalised.
+        var highlightTone: CIVector
+        /// The photo's shadowed-skin colour as a per-channel ratio to its lit
+        /// skin colour (rgb), `1` where they are identical.
+        var shadowTone: CIVector
+    }
+
+    static func lightResponse(for image: CIImage, faces: [FaceLandmarkSet]) -> LightResponse {
+        let extent = image.extent
+        let face = faces.max(by: {
+            $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height
+        })
+        let neutralTone = CIVector(x: 1, y: 1, z: 1, w: 1)
+        guard let face, face.hasUsableGeometry, extent.width > 4, extent.height > 4 else {
+            return LightResponse(lightInfo: CIVector(x: 0, y: 0, z: extent.midX, w: 0),
+                                 highlightTone: neutralTone, shadowTone: neutralTone)
+        }
+        let box = face.boundingBox
+        let context = CIContext(options: [.workingColorSpace: NSNull()])
+
+        /// Mean colour of a small patch, ignoring near-black pixels (eyes,
+        /// brows, nostrils) that would otherwise dominate a shadow sample.
+        func patch(_ normalized: CGPoint, radiusFraction: CGFloat) -> (r: Double, g: Double, b: Double)? {
+            let radius = max(1.0, box.width * extent.width * radiusFraction)
+            let center = CGPoint(x: normalized.x * extent.width, y: normalized.y * extent.height)
+            var rect = CGRect(x: center.x - radius, y: center.y - radius,
+                              width: radius * 2, height: radius * 2)
+            rect = rect.intersection(extent)
+            let width = Int(rect.width.rounded()), height = Int(rect.height.rounded())
+            guard width >= 1, height >= 1, width * height <= 1_000_000 else { return nil }
+            var buffer = [UInt8](repeating: 0, count: width * height * 4)
+            context.render(image, toBitmap: &buffer, rowBytes: width * 4, bounds: rect,
+                           format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            var sum = (r: 0.0, g: 0.0, b: 0.0)
+            var count = 0.0
+            for index in 0..<(width * height) {
+                let r = Double(buffer[index * 4]) / 255.0
+                let g = Double(buffer[index * 4 + 1]) / 255.0
+                let b = Double(buffer[index * 4 + 2]) / 255.0
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                guard lum > 0.06 else { continue }
+                sum.r += r; sum.g += g; sum.b += b; count += 1
+            }
+            guard count > 0 else { return nil }
+            return (sum.r / count, sum.g / count, sum.b / count)
+        }
+
+        func luminance(_ tone: (r: Double, g: Double, b: Double)) -> Double {
+            0.2126 * tone.r + 0.7152 * tone.g + 0.0722 * tone.b
+        }
+
+        // Sample five face landmarks that exist on every usable face.
+        let samples: [(name: String, point: CGPoint, radius: CGFloat)] = [
+            ("leftCheek", CGPoint(x: box.minX + box.width * 0.24, y: box.minY + box.height * 0.40), 0.05),
+            ("rightCheek", CGPoint(x: box.minX + box.width * 0.76, y: box.minY + box.height * 0.40), 0.05),
+            ("forehead", CGPoint(x: box.midX, y: box.minY + box.height * 0.92), 0.06),
+            ("chin", CGPoint(x: box.midX, y: box.minY + box.height * 0.12), 0.04),
+            ("noseBridge", CGPoint(x: box.midX, y: box.minY + box.height * 0.62), 0.03)
+        ]
+        var tones: [String: (r: Double, g: Double, b: Double)] = [:]
+        for sample in samples {
+            tones[sample.name] = patch(sample.point, radiusFraction: sample.radius)
+        }
+        let all = tones.values.sorted { luminance($0) < luminance($1) }
+        let highlight = all.last ?? (r: 1, g: 1, b: 1)
+        let shadow = all.first ?? highlight
+        // The shadow tone is handed to the kernel as a per-channel RATIO to the
+        // lit tone, so a face with no colour cast produces an exactly neutral
+        // burn, and a cool-shadow portrait keeps its cool shadow.
+        let shadowRatio = (
+            r: min(1.10, max(0.55, shadow.r / max(0.05, highlight.r))),
+            g: min(1.10, max(0.55, shadow.g / max(0.05, highlight.g))),
+            b: min(1.10, max(0.55, shadow.b / max(0.05, highlight.b)))
+        )
+
+        let leftLum = tones["leftCheek"].map(luminance)
+        let rightLum = tones["rightCheek"].map(luminance)
+        let topLum = tones["forehead"].map(luminance)
+        let bottomLum = tones["chin"].map(luminance)
+
+        var lightX = 0.0
+        var lightY = 0.0
+        if let leftLum, let rightLum, abs(rightLum - leftLum) > 0.015 {
+            lightX = max(-1, min(1, (rightLum - leftLum) / 0.06))
+        }
+        if let topLum, let bottomLum, abs(topLum - bottomLum) > 0.015 {
+            lightY = max(-1, min(1, (topLum - bottomLum) / 0.08))
+        }
+        let midX = box.midX * extent.width
+        let faceWidth = box.width * extent.width
+
+        return LightResponse(
+            lightInfo: CIVector(x: CGFloat(lightX), y: CGFloat(lightY),
+                                z: midX, w: faceWidth),
+            highlightTone: CIVector(x: CGFloat(highlight.r), y: CGFloat(highlight.g),
+                                    z: CGFloat(highlight.b), w: 1),
+            shadowTone: CIVector(x: CGFloat(shadowRatio.r), y: CGFloat(shadowRatio.g),
+                                 z: CGFloat(shadowRatio.b), w: 1)
+        )
+    }
+
     // MARK: - Guide Mask Generation
 
     /// Generates the highlight guide mask and shadow/folding guide mask.
@@ -238,7 +389,8 @@ public enum FacialBoneContourEngine {
     /// - Alpha: Central facial folding prominence boost
     public static func makeBoneContourGuideMasks(
         faces: [FaceLandmarkSet],
-        extent: CGRect
+        extent: CGRect,
+        lightX: Double = 0
     ) -> (hlGuide: CIImage, shGuide: CIImage) {
         let width = Int(max(16, extent.width))
         let height = Int(max(16, extent.height))
@@ -268,8 +420,8 @@ public enum FacialBoneContourEngine {
         for face in faces {
             guard let geometry = FacialBoneContourGeometry(face: face, extent: extent) else { continue }
             maxFaceWidth = max(maxFaceWidth, geometry.faceWidth)
-            drawHighlightGuide(geometry: geometry, ctx: hlCtx, extent: extent)
-            drawShadowGuide(geometry: geometry, ctx: shCtx, extent: extent)
+            drawHighlightGuide(geometry: geometry, ctx: hlCtx, extent: extent, lightX: lightX)
+            drawShadowGuide(geometry: geometry, ctx: shCtx, extent: extent, lightX: lightX)
         }
 
         guard let hlCG = hlCtx.makeImage(), let shCG = shCtx.makeImage() else {
@@ -288,10 +440,23 @@ public enum FacialBoneContourEngine {
         return (hlCI, shCI)
     }
 
+    /// R3 (2026-11-14): how strongly a structure at `x` should be drawn, given
+    /// the light direction. On the lit side it is drawn fully, on the shadow
+    /// side at a quarter strength - so a nose highlight and a C-zone sheen can
+    /// no longer both sit on a face that is lit from one side only.
+    private static func lightSideFactor(x: CGFloat, geometry: FacialBoneContourGeometry,
+                                        lightX: Double) -> CGFloat {
+        guard abs(lightX) > 0.12, geometry.faceWidth > 1 else { return 1 }
+        let rel = (x - geometry.glabella.x) / (geometry.faceWidth * 0.5)
+        let lit = rel * CGFloat(lightX > 0 ? 1 : -1)
+        return 0.25 + 0.75 * min(1, max(0, lit * 0.5 + 0.5))
+    }
+
     private static func drawHighlightGuide(
         geometry: FacialBoneContourGeometry,
         ctx: CGContext,
-        extent: CGRect
+        extent: CGRect,
+        lightX: Double = 0
     ) {
         let fw = geometry.faceWidth
         let fh = geometry.faceHeight
@@ -325,12 +490,16 @@ public enum FacialBoneContourEngine {
         ctx.setLineWidth(max(2.0, fw * 0.08))
         ctx.setLineCap(.round)
 
+        let leftCZAlpha = lightSideFactor(x: geometry.leftTemple.x, geometry: geometry, lightX: lightX)
+        ctx.setStrokeColor(red: 0, green: 1.0, blue: 0, alpha: 0.90 * leftCZAlpha)
         ctx.beginPath()
         ctx.move(to: geometry.leftTemple)
         ctx.addQuadCurve(to: geometry.leftUpperZygoma, control: geometry.leftLateralOrbit)
         ctx.strokePath()
 
         // Right C-Zone arc
+        let rightCZAlpha = lightSideFactor(x: geometry.rightTemple.x, geometry: geometry, lightX: lightX)
+        ctx.setStrokeColor(red: 0, green: 1.0, blue: 0, alpha: 0.90 * rightCZAlpha)
         ctx.beginPath()
         ctx.move(to: geometry.rightTemple)
         ctx.addQuadCurve(to: geometry.rightUpperZygoma, control: geometry.rightLateralOrbit)
@@ -363,7 +532,8 @@ public enum FacialBoneContourEngine {
     private static func drawShadowGuide(
         geometry: FacialBoneContourGeometry,
         ctx: CGContext,
-        extent: CGRect
+        extent: CGRect,
+        lightX: Double = 0
     ) {
         let fw = geometry.faceWidth
         let fh = geometry.faceHeight

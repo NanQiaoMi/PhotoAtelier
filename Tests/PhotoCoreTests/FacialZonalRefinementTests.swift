@@ -142,6 +142,74 @@ final class FacialZonalRefinementTests: XCTestCase {
         XCTAssertEqual(measureMaxDifference(a: original, b: resultZeros.image, extent: extent), 0.0)
     }
 
+    /// R3 (2026-11-14): the zonal kernel used to return
+    /// `clamp(current, 0.0, 1.0)` for every pixel of the photograph. The engine
+    /// works in extended-linear-sRGB, where a real specular highlight exceeds
+    /// 1.0, so enabling any zone silently clipped every highlight in the frame -
+    /// including background and hair far from the face. Pixels outside the zone
+    /// masks must pass through bit-identical, extended range included.
+    func testHighlightsOutsideZoneMasksAreNeverClipped() throws {
+        let width = 128, height = 128
+        let extent = CGRect(x: 0, y: 0, width: width, height: height)
+        // A flat face region plus a 1.4-linear highlight strip outside it.
+        var components = [Float]()
+        components.reserveCapacity(width * height * 4)
+        for row in 0..<height {
+            for column in 0..<width {
+                // Row 0 is the top row; keep the strip near the top edge, well
+                // outside the face box below it.
+                let bright = row < 8
+                let value: Float = bright ? 1.4 : 0.18
+                components.append(value)
+                components.append(value * (bright ? 1.35 : 0.62))
+                components.append(value * (bright ? 1.25 : 0.45))
+                components.append(1)
+            }
+        }
+        let data = components.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let source = CIImage(bitmapData: data,
+                             bytesPerRow: width * 4 * MemoryLayout<Float>.stride,
+                             size: CGSize(width: width, height: height),
+                             format: .RGBAf,
+                             colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!)
+
+        let face = FaceLandmarkSet(boundingBox: CGRect(x: 0.25, y: 0.15, width: 0.5, height: 0.5),
+                                   confidence: 0.95)
+        let settings = FacialZonalRefinementSettings(enabled: true, eyeBags: 1.0,
+                                                     nasolabialFolds: 1.0, antiShine: 1.0)
+        let result = try FacialZonalRefinementEngine.apply(
+            source, settings: settings, faceLandmarks: [face], context: context)
+        XCTAssertTrue(result.report.applied)
+
+        func render(_ image: CIImage) -> [Float] {
+            var buffer = [Float](repeating: 0, count: width * height * 4)
+            buffer.withUnsafeMutableBytes { pointer in
+                context.render(image, toBitmap: pointer.baseAddress!, rowBytes: width * 16,
+                               bounds: extent, format: .RGBAf,
+                               colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!)
+            }
+            return buffer
+        }
+        let before = render(source)
+        let after = render(result.image)
+        var maximumDifference: Float = 0
+        for row in 0..<8 {
+            for column in 0..<width {
+                let offset = (row * width + column) * 4
+                for channel in 0..<3 {
+                    maximumDifference = max(maximumDifference,
+                                            abs(before[offset + channel] - after[offset + channel]))
+                }
+            }
+        }
+        XCTAssertLessThan(maximumDifference, 1e-6,
+                          "extended-range highlights outside every zone mask must be untouched")
+        XCTAssertGreaterThan(after[(2 * width + 10) * 4], 1.3,
+                             "the highlight itself must still be above 1.0 (not clipped)")
+    }
+
     func testGracefulSkipWhenNoFaceDetected() throws {
         let extent = CGRect(x: 0, y: 0, width: 64, height: 64)
         let original = CIImage(color: CIColor(red: 0.7, green: 0.5, blue: 0.4)).cropped(to: extent)
@@ -245,7 +313,13 @@ final class FacialZonalRefinementTests: XCTestCase {
         let face = FaceLandmarkSet(boundingBox: faceBox, confidence: 0.95)
 
         let image = createRGBImage(width: width, height: height) { x, y in
-            let isSmileLine = (x >= 48 && x <= 54) && (y >= 44 && y <= 56)
+            // R3 (2026-11-14): the fixture row index is top-down (bitmap row 0
+            // is the top row), while the zone masks live in Core Image's
+            // bottom-up coordinates. The fold therefore has to be drawn in the
+            // rows the nasolabial mask actually covers (below the nose, above
+            // the mouth corner) — before R3 the assertion only passed because
+            // the engine blurred the whole frame.
+            let isSmileLine = (x >= 48 && x <= 54) && (y >= 68 && y <= 78)
             let dip = isSmileLine ? 0.25 : 0.0
             return (r: 0.75 - dip, g: 0.58 - dip, b: 0.48 - dip)
         }
@@ -263,7 +337,7 @@ final class FacialZonalRefinementTests: XCTestCase {
         XCTAssertTrue(result.report.applied)
         XCTAssertTrue(result.report.appliedSteps.contains("nasolabialFolds"))
 
-        let foldRect = CGRect(x: 44, y: 46, width: 16, height: 8)
+        let foldRect = CGRect(x: 44, y: 68, width: 16, height: 8)
         let bitmapBefore = renderBitmap(image, width: width, height: height)
         let bitmapAfter = renderBitmap(result.image, width: width, height: height)
 
@@ -283,7 +357,9 @@ final class FacialZonalRefinementTests: XCTestCase {
         let face = FaceLandmarkSet(boundingBox: faceBox, confidence: 0.95)
 
         let image = createRGBImage(width: width, height: height) { x, y in
-            let isWrinkle = (y >= 78 && y <= 82) && (x >= 35 && x <= 93)
+            // R3: the wrinkle has to sit in the rows the forehead zone covers
+            // (above the brow line), not at the chin.
+            let isWrinkle = (y >= 38 && y <= 42) && (x >= 35 && x <= 93)
             let dip = isWrinkle ? 0.25 : 0.0
             return (r: 0.75 - dip, g: 0.58 - dip, b: 0.48 - dip)
         }
@@ -301,7 +377,7 @@ final class FacialZonalRefinementTests: XCTestCase {
         XCTAssertTrue(result.report.applied)
         XCTAssertTrue(result.report.appliedSteps.contains("foreheadWrinkles"))
 
-        let foreheadRect = CGRect(x: 45, y: 74, width: 38, height: 12)
+        let foreheadRect = CGRect(x: 45, y: 34, width: 38, height: 12)
         let bitmapBefore = renderBitmap(image, width: width, height: height)
         let bitmapAfter = renderBitmap(result.image, width: width, height: height)
 
@@ -321,7 +397,9 @@ final class FacialZonalRefinementTests: XCTestCase {
         let face = FaceLandmarkSet(boundingBox: faceBox, confidence: 0.95)
 
         let image = createRGBImage(width: width, height: height) { x, y in
-            let isHotspot = (x >= 60 && x <= 68) && (y >= 80 && y <= 86)
+            // R3: the specular hotspot has to sit in the anti-shine (T-zone)
+            // mask, which covers the forehead and nose bridge.
+            let isHotspot = (x >= 60 && x <= 68) && (y >= 38 && y <= 44)
             if isHotspot {
                 return (r: 0.96, g: 0.95, b: 0.94)
             } else {
@@ -345,8 +423,8 @@ final class FacialZonalRefinementTests: XCTestCase {
         let bitmapBefore = renderBitmap(image, width: width, height: height)
         let bitmapAfter = renderBitmap(result.image, width: width, height: height)
 
-        let originalProbe = samplePixel(from: bitmapBefore, width: width, x: 64, y: 83)
-        let shineProbe = samplePixel(from: bitmapAfter, width: width, x: 64, y: 83)
+        let originalProbe = samplePixel(from: bitmapBefore, width: width, x: 64, y: 41)
+        let shineProbe = samplePixel(from: bitmapAfter, width: width, x: 64, y: 41)
 
         XCTAssertGreaterThan(originalProbe.r, 0.85, "Original probe must be bright specular")
         XCTAssertLessThan(shineProbe.r, originalProbe.r * 0.97,
@@ -361,7 +439,9 @@ final class FacialZonalRefinementTests: XCTestCase {
         let face = FaceLandmarkSet(boundingBox: faceBox, confidence: 0.95)
 
         let image = createRGBImage(width: width, height: height) { x, y in
-            let isSubmentalCrease = (y >= 21 && y <= 27) && (x >= 45 && x <= 83)
+            // R3: the submental crease belongs below the chin, which is where
+            // the jawline zone mask is.
+            let isSubmentalCrease = (y >= 99 && y <= 105) && (x >= 45 && x <= 83)
             let shadow = isSubmentalCrease ? 0.30 : 0.0
             return (r: 0.75 - shadow, g: 0.58 - shadow, b: 0.48 - shadow)
         }
@@ -379,7 +459,7 @@ final class FacialZonalRefinementTests: XCTestCase {
         XCTAssertTrue(result.report.applied)
         XCTAssertTrue(result.report.appliedSteps.contains("jawlineSculpting"))
 
-        let chinRect = CGRect(x: 50, y: 18, width: 28, height: 12)
+        let chinRect = CGRect(x: 50, y: 96, width: 28, height: 12)
         let bitmapBefore = renderBitmap(image, width: width, height: height)
         let bitmapAfter = renderBitmap(result.image, width: width, height: height)
 

@@ -152,6 +152,36 @@ final class EyeTeethRefinementTests: XCTestCase {
         XCTAssertThrowsError(try s.validated())
     }
 
+    /// R3 (2026-11-14): the catchlight is no longer a blind template. The
+    /// overlay is only drawn where the photo's own light direction is known,
+    /// so the fixture supplies an explicit analysis.
+    private func directedAnalysis(lightX: Double = 0.6, lightY: Double = 0.6,
+                                  existingLeft: CGPoint? = nil,
+                                  existingRight: CGPoint? = nil) -> EyeTeethRefinementEngine.CatchlightAnalysis {
+        EyeTeethRefinementEngine.CatchlightAnalysis(
+            leftEye: .init(existingHighlight: existingLeft, lightOffsetX: lightX,
+                           lightOffsetY: lightY, hasDirection: true),
+            rightEye: .init(existingHighlight: existingRight, lightOffsetX: lightX,
+                            lightOffsetY: lightY, hasDirection: true)
+        )
+    }
+
+    /// Peak alpha in a small window, so a test does not depend on exactly which
+    /// pixel of a 3-4 px highlight a single-point probe happens to hit.
+    private func overlayAlpha(_ overlay: CIImage, at center: CGPoint, radius: Int = 4) -> Float {
+        let side = radius * 2 + 1
+        let rect = CGRect(x: center.x - CGFloat(radius), y: center.y - CGFloat(radius),
+                          width: CGFloat(side), height: CGFloat(side))
+        var pixels = [Float](repeating: 0, count: side * side * 4)
+        context.render(overlay, toBitmap: &pixels, rowBytes: side * 16, bounds: rect,
+                       format: .RGBAf, colorSpace: linearColorSpace)
+        var peak: Float = 0
+        for index in 0..<(side * side) {
+            peak = max(peak, pixels[index * 4 + 3])
+        }
+        return peak
+    }
+
     func testCatchlightOverlayPatternGeneration() {
         let extent = CGRect(x: 0, y: 0, width: 200, height: 200)
         let face = makeFaceLandmarks()
@@ -165,17 +195,66 @@ final class EyeTeethRefinementTests: XCTestCase {
                 faces: [face],
                 pattern: pat,
                 scale: 1.0,
-                extent: extent
+                extent: extent,
+                analysis: [directedAnalysis()]
             )
             XCTAssertNotNil(overlay, "Pattern \(pat) should generate non-nil overlay")
 
-            // Verify pupil center has non-zero alpha
-            var pixel = [Float](repeating: 0, count: 4)
-            // Left pupil is around x: 66, y: 110 (with upper offset x: 64, y: 113)
-            let sampleRect = CGRect(x: 64, y: 112, width: 1, height: 1)
-            context.render(overlay!, toBitmap: &pixel, rowBytes: 16, bounds: sampleRect, format: .RGBAf, colorSpace: linearColorSpace)
-            XCTAssertGreaterThan(pixel[3], 0.0, "Pattern \(pat) must produce active catchlight pixels near pupil")
+            // Verify pupil center has non-zero alpha. The highlight is offset
+            // toward the light direction (upper-right here), so the probe sits
+            // inside the drawn shape rather than exactly at the pupil center.
+            let alpha = overlayAlpha(overlay!, at: CGPoint(x: 67, y: 112))
+            XCTAssertGreaterThan(alpha, 0.0, "Pattern \(pat) must produce active catchlight pixels near pupil")
         }
+    }
+
+    func testCatchlightIsNeverInventedWithoutLightEvidence() {
+        let extent = CGRect(x: 0, y: 0, width: 200, height: 200)
+        let face = makeFaceLandmarks()
+        let noEvidence = EyeTeethRefinementEngine.CatchlightAnalysis(
+            leftEye: .init(hasDirection: false),
+            rightEye: .init(hasDirection: false)
+        )
+        let overlay = EyeTeethRefinementEngine.makeCatchlightOverlay(
+            faces: [face], pattern: .naturalPoint, scale: 1.0,
+            extent: extent, analysis: [noEvidence]
+        )
+        XCTAssertNotNil(overlay)
+        XCTAssertEqual(overlayAlpha(overlay!, at: CGPoint(x: 66, y: 110), radius: 10), 0.0,
+                       "No light direction and no existing highlight must produce no catchlight at all")
+    }
+
+    func testCatchlightEnhancesExistingHighlightInPlace() {
+        let extent = CGRect(x: 0, y: 0, width: 200, height: 200)
+        let face = makeFaceLandmarks()
+        // The existing specular sits off the pupil center; the overlay must
+        // land there instead of adding a second highlight.
+        let existing = CGPoint(x: 70, y: 116)
+        let overlay = EyeTeethRefinementEngine.makeCatchlightOverlay(
+            faces: [face], pattern: .naturalPoint, scale: 1.0,
+            extent: extent, analysis: [directedAnalysis(existingLeft: existing)]
+        )
+        XCTAssertNotNil(overlay)
+        XCTAssertGreaterThan(overlayAlpha(overlay!, at: existing, radius: 3), 0.0,
+                             "Catchlight must land on the photo's existing specular")
+        XCTAssertEqual(overlayAlpha(overlay!, at: CGPoint(x: 58, y: 102), radius: 6), 0.0,
+                       "No second catchlight may be drawn away from the existing one")
+    }
+
+    func testCatchlightAnalysisDetectsExistingHighlightAndLightSide() {
+        // The fixture raster is drawn in 128-px coordinates, so the landmark
+        // set (normalized against that same box) is only aligned at 128.
+        let image = makeFaceImage()
+        let face = makeFaceLandmarks()
+        let analyses = EyeTeethRefinementEngine.analyzeCatchlight(
+            to: image, faces: [face], extent: image.extent, context: context
+        )
+        XCTAssertEqual(analyses.count, 1)
+        let analysis = analyses[0]
+        // The fixture's right iris carries an explicit white glare hotspot.
+        XCTAssertNotNil(analysis.rightEye?.existingHighlight,
+                        "A bright iris specular must be detected as an existing catchlight")
+        XCTAssertNotNil(analysis.leftEye, "Left eye analysis must be produced")
     }
 
     func testScleraBloodshotRemoval() {
@@ -231,6 +310,106 @@ final class EyeTeethRefinementTests: XCTestCase {
         // Luminance of harsh glare should be suppressed
         XCTAssertLessThan(procPixel[0], origPixel[0], "Specular glare flare brightness should be pulled down")
         XCTAssertLessThan(procPixel[1], origPixel[1])
+    }
+
+    /// R4 (2026-11-14): iris clarity must expand contrast **around the iris's
+    /// own luminance**, not around an absolute pivot.
+    ///
+    /// The kernel used to centre on `vec3(0.35)` in extended-linear space. Real
+    /// irises sit at 0.017-0.028 there (measured on three real portraits), so
+    /// every masked pixel was below the pivot and the pass only darkened the
+    /// eye: 96 of 96 masked pixels got darker, mean luma 0.0275 → 0.0085. The
+    /// control therefore did the opposite of what its name says.
+    func testIrisClarityExpandsContrastAroundTheIrisOwnLevel() throws {
+        // A dark-brown iris in extended-linear light — the range real irises
+        // actually occupy, well below the old absolute 0.35 pivot.
+        let extent = CGRect(x: 0, y: 0, width: 96, height: 96)
+        var pixels = [Float](repeating: 0, count: 96 * 96 * 4)
+        let skin: (Float, Float, Float) = (0.42, 0.26, 0.19)
+        let irisDark: (Float, Float, Float) = (0.012, 0.009, 0.007)
+        let irisLight: (Float, Float, Float) = (0.045, 0.030, 0.018)
+        for row in 0..<96 {
+            for column in 0..<96 {
+                let offset = (row * 96 + column) * 4
+                // Iris disc in the middle: radial fibres alternate dark/light so
+                // the matte has real structure to expand.
+                let dx = Double(column) - 48, dy = Double(row) - 48
+                let distance = (dx * dx + dy * dy).squareRoot()
+                let color: (Float, Float, Float)
+                if distance < 14 {
+                    // Two vertical halves, so the contrast probe has one dark
+                    // and one light fibre on either side of the iris centre.
+                    color = dx < 0 ? irisDark : irisLight
+                } else {
+                    color = skin
+                }
+                pixels[offset] = color.0
+                pixels[offset + 1] = color.1
+                pixels[offset + 2] = color.2
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let image = CIImage(bitmapData: data,
+                            bytesPerRow: 96 * 4 * MemoryLayout<Float>.stride,
+                            size: CGSize(width: 96, height: 96),
+                            format: .RGBAf,
+                            colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!)
+
+        // Iris matte covering the same disc.
+        let irisMask = CIFilter(name: "CIRadialGradient", parameters: [
+            "inputCenter": CIVector(x: 48, y: 48),
+            "inputRadius0": 12.0,
+            "inputRadius1": 15.0,
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1),
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0),
+        ])!.outputImage!.cropped(to: extent)
+        let emptyMask = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: extent)
+
+        let maskSet = FaceSemanticMaskSet(
+            extent: extent,
+            resolution: CGSize(width: 96, height: 96),
+            faceBounds: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+            confidence: 1, faceCount: 1,
+            skin: emptyMask, teeth: emptyMask, sclera: emptyMask,
+            iris: irisMask, lips: emptyMask, brows: emptyMask
+        )
+
+        var settings = EyeTeethRefinementSettings(enabled: true)
+        settings.irisClarity = 1.0
+        // The engine needs at least one face to run its passes; the matte is
+        // what actually confines the work, so the face is only a precondition.
+        let face = FaceLandmarkSet(boundingBox: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+                                   confidence: 1)
+        let result = EyeTeethRefinementEngine.apply(to: image, faces: [face], settings: settings,
+                                                    maskSet: maskSet)
+
+        func luminance(_ ci: CIImage, at point: CGPoint) -> Double {
+            var buffer = [Float](repeating: 0, count: 4)
+            context.render(ci, toBitmap: &buffer, rowBytes: 16,
+                           bounds: CGRect(x: point.x, y: point.y, width: 1, height: 1),
+                           format: .RGBAf,
+                           colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!)
+            return 0.2126 * Double(buffer[0]) + 0.7152 * Double(buffer[1]) + 0.0722 * Double(buffer[2])
+        }
+
+        // One point in each half of the iris, symmetric about its centre.
+        let darkPoint = CGPoint(x: 40, y: 48)
+        let lightPoint = CGPoint(x: 56, y: 48)
+        let beforeDark = luminance(image, at: darkPoint)
+        let beforeLight = luminance(image, at: lightPoint)
+        let afterDark = luminance(result.image, at: darkPoint)
+        let afterLight = luminance(result.image, at: lightPoint)
+
+        // Contrast must grow, and the brighter fibre must not be dragged down.
+        let beforeContrast = abs(beforeLight - beforeDark)
+        let afterContrast = abs(afterLight - afterDark)
+        XCTAssertGreaterThan(afterContrast, beforeContrast,
+                             "iris clarity must expand the iris's internal contrast")
+        XCTAssertGreaterThanOrEqual(afterLight, beforeLight,
+                                    "the brighter iris fibre must not be darkened")
     }
 
     func testTeethStainRemovalAndEnamelSheen() {

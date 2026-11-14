@@ -247,10 +247,19 @@ for (index, item) in itemsToProcess.enumerated() {
             break
 
         case "02_scene_adaptive":
-            settings.exposureEV = 0.20
-            settings.highlights = -0.15
-            settings.shadows = 0.15
-            settings.tonalCurve = TonalCurveSettings(blacksEV: 0, shadowsEV: 0.10, midtonesEV: 0.05, highlightsEV: -0.10, whitesEV: 0)
+            // R2-B（2026-11-12 评审：02 在逆光人像上把人脸强行提亮发灰）：
+            // 有人脸时只做白平衡中性保护级的轻影调，不做 +0.20EV 全局提亮——
+            // 人像的曝光应以人物为准，而全局提亮对逆光人脸是"灰化"。
+            if faces.isEmpty {
+                settings.exposureEV = 0.20
+                settings.highlights = -0.15
+                settings.shadows = 0.15
+                settings.tonalCurve = TonalCurveSettings(blacksEV: 0, shadowsEV: 0.10, midtonesEV: 0.05, highlightsEV: -0.10, whitesEV: 0)
+            } else {
+                settings.exposureEV = 0.05
+                settings.highlights = -0.08
+                settings.shadows = 0.05
+            }
 
         case "03_portrait_retouch":
             var portrait = PortraitRefinementSettings()
@@ -265,23 +274,16 @@ for (index, item) in itemsToProcess.enumerated() {
             settings.portrait = portrait
 
         case "04_makeup_sculpt":
+            // R1 自然档：唇/眉保留（语义掩膜+亮度保留染色），重度模板项
+            // （bbox 位置腮红/眼影/眼线/睫毛/合成眼神光/高光修容）全部归零
             var makeup = MakeupSettings()
-            makeup.lipIntensity = 0.55
-            makeup.lipColor = SRGBColor(red: 0.85, green: 0.28, blue: 0.36)
-            makeup.browDensity = 0.40
+            makeup.lipIntensity = 0.35
+            makeup.lipColor = SRGBColor(red: 0.82, green: 0.34, blue: 0.38)
+            makeup.browDensity = 0.25
             makeup.browColor = SRGBColor(red: 0.22, green: 0.19, blue: 0.17)
-            makeup.cheekIntensity = 0.45
-            makeup.cheekColor = SRGBColor(red: 0.91, green: 0.42, blue: 0.47)
-            makeup.eyeshadowIntensity = 0.40
-            makeup.eyeshadowColor = SRGBColor(red: 0.55, green: 0.37, blue: 0.35)
-            makeup.eyelinerIntensity = 0.50
-            makeup.eyelinerColor = SRGBColor(red: 0.10, green: 0.10, blue: 0.10)
-            makeup.eyelashIntensity = 0.55
-            makeup.irisIntensity = 0.45
-            makeup.irisColor = SRGBColor(red: 0.29, green: 0.21, blue: 0.15)
-            makeup.catchlightIntensity = 0.50
-            makeup.highlightIntensity = 0.40
-            makeup.contourIntensity = 0.35
+            makeup.catchlightIntensity = 0
+            makeup.highlightIntensity = 0
+            makeup.contourIntensity = 0
             settings.makeup = makeup
 
         case "05_film_style":
@@ -292,43 +294,24 @@ for (index, item) in itemsToProcess.enumerated() {
             settings.protectNeutrals = 0.60
 
         case "06_master_pipeline":
-            // Combined master pipeline
+            // R1 自然档：商业全流程去掉妆容模板，保留美肤 + 胶片色调
             settings.exposureEV = 0.15
             settings.highlights = -0.10
             settings.shadows = 0.10
 
             var portrait = PortraitRefinementSettings()
-            portrait.blemishStrength = 0.60
-            portrait.dodgeBurn = 0.50
+            portrait.blemishStrength = 0.55
+            portrait.dodgeBurn = 0.35
             portrait.structure = 0.20
-            portrait.texture = 0.75
-            portrait.gloss = 0.25
-            portrait.teethWhiten = 0.45
-            portrait.eyeBrighten = 0.45
-            portrait.skinToneUnify = 0.50
+            portrait.texture = 0.80
+            portrait.gloss = 0.20
+            portrait.teethWhiten = 0.40
+            portrait.eyeBrighten = 0.40
+            portrait.skinToneUnify = 0.40
             settings.portrait = portrait
 
-            var makeup = MakeupSettings()
-            makeup.lipIntensity = 0.45
-            makeup.lipColor = SRGBColor(red: 0.85, green: 0.28, blue: 0.36)
-            makeup.browDensity = 0.35
-            makeup.browColor = SRGBColor(red: 0.22, green: 0.19, blue: 0.17)
-            makeup.cheekIntensity = 0.35
-            makeup.cheekColor = SRGBColor(red: 0.91, green: 0.42, blue: 0.47)
-            makeup.eyeshadowIntensity = 0.30
-            makeup.eyeshadowColor = SRGBColor(red: 0.55, green: 0.37, blue: 0.35)
-            makeup.eyelinerIntensity = 0.40
-            makeup.eyelinerColor = SRGBColor(red: 0.10, green: 0.10, blue: 0.10)
-            makeup.eyelashIntensity = 0.45
-            makeup.irisIntensity = 0.40
-            makeup.irisColor = SRGBColor(red: 0.29, green: 0.21, blue: 0.15)
-            makeup.catchlightIntensity = 0.45
-            makeup.highlightIntensity = 0.35
-            makeup.contourIntensity = 0.30
-            settings.makeup = makeup
-
             lutToApply = classicChromeCube
-            settings.lutIntensity = 0.65
+            settings.lutIntensity = 0.60
             settings.preserveLuminance = 0.75
             settings.protectSkin = 0.85
             settings.protectNeutrals = 0.65
@@ -368,125 +351,117 @@ for (index, item) in itemsToProcess.enumerated() {
             settings.portrait = portrait
 
         case "08_p2_reshape_suite":
-            // P2 微雕回归：液化高颅顶 + 骨相光影 + 五官微雕 + 微笑唇形（保守量）
-            var liquify = FaceReshapeSettings(preset: .youthful)
-            liquify.strength = 0.55
-            liquify.parameters.cranialTop = 0.30
-            liquify.parameters.hairline = 0.15
-            liquify.parameters.temple = 0.20
+            // P2 微雕回归——R1 自然档（2026-11-12 差距分析结论：
+            // 涂色模板模块是架构性盲模板，任何强度都不自然，全部关闭；
+            // 只保留 landmark 驱动的几何微调，强度锁进专业 5-15% 纪律）
+            var liquify = FaceReshapeSettings(preset: .classic)
+            liquify.strength = 0.10
+            liquify.parameters.cranialTop = 0
+            liquify.parameters.hairline = 0
+            liquify.parameters.temple = 0
+            liquify.parameters.slimFace = 0.10
             settings.liquify = liquify
-
-            var bone = FacialBoneContourSettings(enabled: true)
-            bone.facialFolding = 0.40
-            bone.tZoneHighlight = 0.45
-            bone.cZoneHighlight = 0.40
-            bone.cheekContourShadow = 0.30
-            bone.jawlineShadow = 0.30
-            bone.philtrumHighlight = 0.25
-            settings.facialBoneContour = bone
 
             var eyeShape = EyeShapeSettings()
             eyeShape.enabled = true
-            eyeShape.eyeSymmetry = 0.35
-            eyeShape.eyeRoundness = 0.25
+            eyeShape.eyeSymmetry = 0.10
             settings.eyeShape = eyeShape
-
-            var nose = NoseReshapeSettings()
-            nose.enabled = true
-            nose.nose3DContour = 0.35
-            nose.noseTipSize = 0.25
-            settings.noseReshape = nose
 
             var jaw = JawChinReshapeSettings()
             jaw.enabled = true
-            jaw.jawlineTighten = 0.35
-            jaw.chinProjection = 0.25
+            jaw.jawlineTighten = 0.10
             settings.jawChinReshape = jaw
-
-            var brow = EyebrowReshapeSettings()
-            brow.enabled = true
-            brow.browSymmetry = 0.35
-            brow.wildBrowTexture = 0.40
-            settings.eyebrowReshape = brow
-
-            var contour = FacialContourSettings()
-            contour.enabled = true
-            contour.templePlump = 0.30
-            contour.contourSmoothness = 0.30
-            contour.appleCheekLift = 0.25
-            settings.facialContour = contour
 
             var expression = ExpressionSettings()
             expression.enabled = true
-            expression.smileDegree = 0.30
-            expression.lipSymmetry = 0.25
+            expression.lipSymmetry = 0.10
             settings.expression = expression
 
         case "09_p2_scene_suite":
-            // P2 场景回归：天空氛围 + 景深虚化 + 影棚背景 + 创意效果
-            var sky = SkyEnhancementSettings()
-            sky.enabled = true
-            sky.skyVibrance = 0.45
-            sky.cloudContrast = 0.35
-            settings.sky = sky
+            // R2-B（2026-11-12 评审：09 在人像上天空增强+背景平整+景深全开，
+            // 与人物语义冲突）——有人脸时只保留安全项：轻景深（人物由
+            // PersonMatting 保护）+ 轻颗粒；天空增强与背景平整停用（前者
+            // 在半身人像上误把湖面/亮墙当天空，后者把环境纹理磨掉）。
+            if faces.isEmpty {
+                var sky = SkyEnhancementSettings()
+                sky.enabled = true
+                sky.skyVibrance = 0.45
+                sky.cloudContrast = 0.35
+                settings.sky = sky
 
-            var bokeh = BokehBlurSettings()
-            bokeh.enabled = true
-            bokeh.apertureFocalSize = 0.35
-            bokeh.bokehShape = .circular
-            bokeh.specularHighlightBoost = 0.40
-            settings.bokehBlur = bokeh
+                var backdrop = BackdropRefinementSettings()
+                backdrop.enabled = true
+                backdrop.smoothing = 0.40
+                backdrop.uniformity = 0.35
+                settings.backdrop = backdrop
 
-            var backdrop = BackdropRefinementSettings()
-            backdrop.enabled = true
-            backdrop.smoothing = 0.40
-            backdrop.uniformity = 0.35
-            settings.backdrop = backdrop
+                var bokeh = BokehBlurSettings()
+                bokeh.enabled = true
+                bokeh.apertureFocalSize = 0.35
+                bokeh.bokehShape = .circular
+                bokeh.specularHighlightBoost = 0.40
+                settings.bokehBlur = bokeh
+            } else {
+                // 人像·环境：环境虚化保留但半径减半，高光增强关掉（人物边缘亮斑）
+                var bokeh = BokehBlurSettings()
+                bokeh.enabled = true
+                bokeh.apertureFocalSize = 0.18
+                bokeh.bokehShape = .creamy
+                bokeh.specularHighlightBoost = 0
+                settings.bokehBlur = bokeh
+            }
 
             var effects = CreativeEffectsSettings()
-            effects.halation = 0.30
-            effects.mist = 0.20
-            effects.grain = 0.25
+            effects.halation = 0.20
+            effects.mist = 0.10
+            effects.grain = 0.15
             settings.creativeEffects = effects
 
         case "10_p2_master_suite":
-            // P2 商业大师：美肤 + 微雕 + 眼神光美牙 + 景深 + 胶片色调全链路
+            // P2 商业大师——R1 自然档（2026-11-12 差距分析结论：
+            // 剔除涂色模板（骨相光影/妆容/合成眼神光/3D 高光），保留照片自适应链路：
+            // 祛瑕 + 频率分离美肤（纹理回注优先）+ 泪沟法令纹（照片实测）+ 测量型眼牙 + 景深 + 胶片色调）
             var portrait = PortraitRefinementSettings()
-            portrait.blemishStrength = 0.55
-            portrait.dodgeBurn = 0.50
+            portrait.blemishStrength = 0.50
+            portrait.dodgeBurn = 0.30
             portrait.structure = 0.20
-            portrait.texture = 0.70
-            portrait.gloss = 0.25
-            portrait.teethWhiten = 0.45
-            portrait.eyeBrighten = 0.45
-            portrait.skinToneUnify = 0.50
-            portrait.hairGloss = 0.40
-            portrait.hairSmoothing = 0.35
-            portrait.flyawayRemoval = 0.40
+            portrait.texture = 0.85
+            portrait.gloss = 0.15
+            portrait.teethWhiten = 0.35
+            portrait.eyeBrighten = 0.35
+            portrait.skinToneUnify = 0.35
+            portrait.hairGloss = 0.25
+            portrait.hairSmoothing = 0.20
+            portrait.flyawayRemoval = 0.30
             settings.portrait = portrait
 
             var zonal = FacialZonalRefinementSettings()
             zonal.enabled = true
-            zonal.darkCircles = 0.40
-            zonal.eyeBags = 0.35
-            zonal.antiShine = 0.45
-            zonal.nasolabialFolds = 0.35
+            zonal.darkCircles = 0.30
+            zonal.eyeBags = 0.25
+            zonal.nasolabialFolds = 0.30
+            zonal.antiShine = 0.30
             settings.facialZonal = zonal
-
-            var bone = FacialBoneContourSettings(enabled: true)
-            bone.facialFolding = 0.35
-            bone.tZoneHighlight = 0.40
-            bone.cZoneHighlight = 0.35
-            bone.jawlineShadow = 0.25
-            settings.facialBoneContour = bone
 
             var eyeTeeth = EyeTeethRefinementSettings()
             eyeTeeth.enabled = true
-            eyeTeeth.irisClarity = 0.40
-            eyeTeeth.scleraBloodshotRemoval = 0.40
-            eyeTeeth.catchlightPattern = .naturalPoint
-            eyeTeeth.catchlightStrength = 0.45
+            eyeTeeth.scleraBloodshotRemoval = 0.35
+            eyeTeeth.teethStainRemoval = 0.30
+            // catchlight 保持默认 .off——合成眼神光无中生有，架构性不自然
             settings.eyeTeeth = eyeTeeth
+
+            var liquify = FaceReshapeSettings(preset: .classic)
+            liquify.strength = 0.10
+            liquify.parameters.cranialTop = 0
+            liquify.parameters.hairline = 0
+            liquify.parameters.temple = 0
+            liquify.parameters.slimFace = 0.10
+            settings.liquify = liquify
+
+            var jaw = JawChinReshapeSettings()
+            jaw.enabled = true
+            jaw.jawlineTighten = 0.10
+            settings.jawChinReshape = jaw
 
             var bokeh = BokehBlurSettings()
             bokeh.enabled = true
@@ -495,18 +470,8 @@ for (index, item) in itemsToProcess.enumerated() {
             bokeh.specularHighlightBoost = 0.35
             settings.bokehBlur = bokeh
 
-            var makeup = MakeupSettings()
-            makeup.lipIntensity = 0.40
-            makeup.lipColor = SRGBColor(red: 0.85, green: 0.28, blue: 0.36)
-            makeup.cheekIntensity = 0.30
-            makeup.cheekColor = SRGBColor(red: 0.91, green: 0.42, blue: 0.47)
-            makeup.catchlightIntensity = 0.40
-            makeup.highlightIntensity = 0.30
-            makeup.contourIntensity = 0.25
-            settings.makeup = makeup
-
             lutToApply = classicChromeCube
-            settings.lutIntensity = 0.60
+            settings.lutIntensity = 0.55
             settings.preserveLuminance = 0.75
             settings.protectSkin = 0.85
             settings.protectNeutrals = 0.65

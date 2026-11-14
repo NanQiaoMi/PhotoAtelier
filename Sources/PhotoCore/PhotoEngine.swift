@@ -520,7 +520,7 @@ public final class PhotoEngine {
         let facialZonalActive = settings.facialZonal.map { !$0.isNeutral } ?? false
         let eyeTeethActive = settings.eyeTeeth.map { !$0.isNeutral } ?? false
         let eyelidAegyoSalActive = settings.eyelidAegyoSal.map { !$0.isNeutral } ?? false
-        let needsPortraitMasks = portraitActive || multiPersonActive
+        let needsPortraitMasks = portraitActive || multiPersonActive || eyeTeethActive
             || (referenceColorActive && referenceColor?.skinOnly == true)
         // Single source of truth for "which stages need the shared face
         // detection". Must list every consumer of `detectedFaces` below
@@ -820,8 +820,14 @@ public final class PhotoEngine {
                     report.eyeTeeth = EyeTeethRefinementReport(applied: false, faceCount: 0, note: note)
                     report.warnings.append(note)
                 } else {
+                    // P3-E1 follow-up: pass the shared semantic masks so the
+                    // color-gated sclera/teeth mattes are used instead of the
+                    // crude polygon fallbacks (parity with the multi-person
+                    // branch, which always passes perFaceMask).
                     let eyeTeethResult = EyeTeethRefinementEngine.apply(
-                        to: working, faces: faces, settings: eyeTeeth
+                        to: working, faces: faces,
+                        settings: eyeTeeth,
+                        maskSet: preparedFaceMasks.first
                     )
                     working = eyeTeethResult.image
                     report.eyeTeeth = eyeTeethResult.report

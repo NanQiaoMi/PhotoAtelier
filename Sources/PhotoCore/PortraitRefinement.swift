@@ -259,21 +259,25 @@ public enum PortraitRefinementEngine {
         try cancellation?.check()
 
         if settings.teethWhiten > 0 {
-            if let teethMask {
+            // R3 (2026-11-14): a mask image can exist and still cover nothing -
+            // the semantic layer only returns teeth pixels for an open mouth with
+            // bright, low-chroma enamel. Checking coverage (not just presence)
+            // stops the report from claiming "teeth" ran when it changed no pixel.
+            if let teethMask, hasCoverage(teethMask, extent: image.extent, context: context) {
                 current = try whitenTeeth(current, mask: teethMask,
                                           strength: settings.teethWhiten, context: context)
                 steps.append("teeth")
             } else {
-                notes.append("缺少牙齿蒙版（可能闭嘴或未检测到内唇），牙齿美白已跳过。")
+                notes.append("缺少牙齿蒙版（可能闭嘴、未露齿或牙齿偏暗），牙齿美白已跳过。")
             }
         }
         if settings.eyeBrighten > 0 {
-            if let scleraMask {
+            if let scleraMask, hasCoverage(scleraMask, extent: image.extent, context: context) {
                 current = try brightenSclera(current, mask: scleraMask,
                                              strength: settings.eyeBrighten, context: context)
                 steps.append("eye")
             } else {
-                notes.append("缺少眼白蒙版，眼白提亮已跳过。")
+                notes.append("缺少眼白蒙版（眼部过暗或低对比），眼白提亮已跳过。")
             }
         }
         try cancellation?.check()
@@ -289,7 +293,7 @@ public enum PortraitRefinementEngine {
                                             context: context)
                 steps.append("skinTone")
                 if perFaceSkin.count < 2 {
-                    notes.append("只检测到一张可用人脸，肤色统一按单脸统计执行。")
+                    notes.append("只检测到一张可用人脸，肤色统一按单脸色度平整执行。")
                 }
             }
         }
@@ -325,6 +329,20 @@ public enum PortraitRefinementEngine {
 
     static func unionMask(_ masks: [CIImage?]) -> CIImage? {
         PortraitRaster.union(masks)
+    }
+
+    /// True when `mask` actually covers something (its brightest pixel clears a
+    /// low floor). A matte can be non-nil and still be entirely empty, which used
+    /// to be reported as a successful step.
+    static func hasCoverage(_ mask: CIImage, extent: CGRect,
+                            context: CIContext) -> Bool {
+        guard let raster = PortraitRaster.render(image: mask, extent: extent,
+                                                 longestEdge: 256, masks: [],
+                                                 context: context) else { return false }
+        for index in 0..<raster.pixelCount where raster.red[index] > 0.05 {
+            return true
+        }
+        return false
     }
 
     // MARK: Tooth whitening
@@ -393,9 +411,11 @@ public enum PortraitRefinementEngine {
 
     // MARK: Skin-tone unification
 
-    /// Maps every face's skin pixels toward one shared reference tone. Gains are
-    /// limited to ±20% so identity and local texture survive; the mapping is a
-    /// v1 approximation (per-face mean in linear RGB), not a perceptual transfer.
+    /// Maps every face's skin pixels toward one shared reference tone, then evens
+    /// out each face's own low-frequency colour variation toward its median
+    /// chroma. Inter-face gains are limited to ±20% so identity and local texture
+    /// survive; the mapping is a v1 approximation (per-face mean in linear RGB),
+    /// not a perceptual transfer.
     static func unifySkinTone(_ image: CIImage, skinMasks: [CIImage],
                               reference: PortraitToneReference, strength: Double,
                               context: CIContext) throws -> CIImage {
@@ -403,24 +423,36 @@ public enum PortraitRefinementEngine {
                                                  longestEdge: 1024, masks: skinMasks,
                                                  context: context) else { return image }
         struct FaceTone {
+            let coverageIndex: Int
             let red: Double
             let green: Double
             let blue: Double
+            let aStar: Double
+            let bStar: Double
             let weight: Double
         }
         var tones: [FaceTone] = []
-        for coverage in raster.coverages {
+        for (coverageIndex, coverage) in raster.coverages.enumerated() {
             var red = 0.0, green = 0.0, blue = 0.0, weight = 0.0
+            var aStar = 0.0, bStar = 0.0
             for index in 0..<raster.pixelCount where coverage[index] > 0.25 {
                 let sampleWeight = Double(coverage[index])
                 red += Double(raster.red[index]) * sampleWeight
                 green += Double(raster.green[index]) * sampleWeight
                 blue += Double(raster.blue[index]) * sampleWeight
+                let lab = PortraitRaster.lab(red: raster.red[index],
+                                             green: raster.green[index],
+                                             blue: raster.blue[index])
+                aStar += lab.aStar * sampleWeight
+                bStar += lab.bStar * sampleWeight
                 weight += sampleWeight
             }
             guard weight >= 40 else { continue }
-            tones.append(FaceTone(red: red / weight, green: green / weight,
-                                  blue: blue / weight, weight: weight))
+            tones.append(FaceTone(coverageIndex: coverageIndex,
+                                  red: red / weight, green: green / weight,
+                                  blue: blue / weight,
+                                  aStar: aStar / weight, bStar: bStar / weight,
+                                  weight: weight))
         }
         guard tones.count >= 1 else { return image }
         let sortedByLightness = tones.sorted {
@@ -434,24 +466,77 @@ public enum PortraitRefinementEngine {
         case .brightest:
             referenceTone = sortedByLightness[sortedByLightness.count - 1]
         }
-        var redGain = [Float](repeating: 1, count: raster.coverages.count)
-        var greenGain = [Float](repeating: 1, count: raster.coverages.count)
-        var blueGain = [Float](repeating: 1, count: raster.coverages.count)
-        for (faceIndex, tone) in tones.enumerated() {
-            redGain[faceIndex] = Float(clamp(referenceTone.red / max(tone.red, 1e-4), 0.80, 1.20))
-            greenGain[faceIndex] = Float(clamp(referenceTone.green / max(tone.green, 1e-4), 0.80, 1.20))
-            blueGain[faceIndex] = Float(clamp(referenceTone.blue / max(tone.blue, 1e-4), 0.80, 1.20))
-        }
+        // R3 (2026-11-14): cross-face gains are identity on a single-face photo
+        // (the reference face *is* the face), so the control used to be a silent
+        // no-op exactly where it is used most. What "肤色统一" means in
+        // retouching is evening out the face's own blotchy colour - red patches
+        // on the cheeks, a yellow cast across one side. Each face's
+        // low-frequency a*/b* is therefore pulled toward that face's own mean
+        // chroma, which is a redistribution (the face mean is unchanged), so the
+        // identity tone and the cross-face matching both survive.
+        let chromaRadius = max(4, Int((0.055 * Double(min(raster.width, raster.height))).rounded()))
+
         var deltaRed = [Float](repeating: 0, count: raster.pixelCount)
         var deltaGreen = deltaRed
         var deltaBlue = deltaRed
-        for (faceIndex, coverage) in raster.coverages.enumerated() where faceIndex < tones.count {
-            let red = redGain[faceIndex], green = greenGain[faceIndex], blue = blueGain[faceIndex]
+        for tone in tones {
+            let coverage = raster.coverages[tone.coverageIndex]
+            let red = Float(clamp(referenceTone.red / max(tone.red, 1e-4), 0.80, 1.20))
+            let green = Float(clamp(referenceTone.green / max(tone.green, 1e-4), 0.80, 1.20))
+            let blue = Float(clamp(referenceTone.blue / max(tone.blue, 1e-4), 0.80, 1.20))
+
+            // Local low-frequency chroma for this face, skin-weighted so hair,
+            // background and mask fringes cannot drag the trend.
+            var maskedA = [Float](repeating: 0, count: raster.pixelCount)
+            var maskedB = [Float](repeating: 0, count: raster.pixelCount)
+            var maskedCoverage = [Float](repeating: 0, count: raster.pixelCount)
             for index in 0..<raster.pixelCount where coverage[index] > 0.02 {
-                let weight = Float(Double(coverage[index]) * strength * 0.85)
-                deltaRed[index] = clamp(raster.red[index] * (red - 1) * weight, -0.16, 0.16)
-                deltaGreen[index] = clamp(raster.green[index] * (green - 1) * weight, -0.16, 0.16)
-                deltaBlue[index] = clamp(raster.blue[index] * (blue - 1) * weight, -0.16, 0.16)
+                let sampleWeight = coverage[index]
+                let lab = PortraitRaster.lab(red: raster.red[index],
+                                             green: raster.green[index],
+                                             blue: raster.blue[index])
+                maskedA[index] = Float(lab.aStar) * sampleWeight
+                maskedB[index] = Float(lab.bStar) * sampleWeight
+                maskedCoverage[index] = sampleWeight
+            }
+            let trendA = PortraitRaster.boxBlur(maskedA, width: raster.width,
+                                                height: raster.height, radius: chromaRadius)
+            let trendB = PortraitRaster.boxBlur(maskedB, width: raster.width,
+                                                height: raster.height, radius: chromaRadius)
+            let trendCoverage = PortraitRaster.boxBlur(maskedCoverage, width: raster.width,
+                                                       height: raster.height, radius: chromaRadius)
+            let meanA = tone.aStar
+            let meanB = tone.bStar
+
+            for index in 0..<raster.pixelCount where coverage[index] > 0.02 {
+                let coverageWeight = Double(coverage[index]) * strength * 0.85
+                let denominator = Double(trendCoverage[index])
+                let localA = denominator > 0.02 ? Double(trendA[index]) / denominator : meanA
+                let localB = denominator > 0.02 ? Double(trendB[index]) / denominator : meanB
+
+                // Cross-face match: the per-channel RGB gain of the original
+                // implementation, unchanged, so two faces converge in lightness
+                // as well as hue.
+                let gainedRed = Float(Double(raster.red[index]) * Double(red))
+                let gainedGreen = Float(Double(raster.green[index]) * Double(green))
+                let gainedBlue = Float(Double(raster.blue[index]) * Double(blue))
+                let lab = PortraitRaster.lab(red: gainedRed, green: gainedGreen, blue: gainedBlue)
+
+                // Intra-face evenness: pull the local low-frequency chroma to
+                // the face mean, bounded at ±4 Lab units so natural warmth
+                // (cheeks redder than the forehead) is reduced, not erased.
+                let pullA = min(4.0, max(-4.0, (meanA - localA) * 0.55))
+                let pullB = min(4.0, max(-4.0, (meanB - localB) * 0.55))
+                let even = PortraitRaster.linearRGB(lightness: lab.lightness,
+                                                    aStar: lab.aStar + pullA,
+                                                    bStar: lab.bStar + pullB)
+
+                deltaRed[index] = clamp(Float((Double(even.0) - Double(raster.red[index]))
+                    * coverageWeight), -0.16, 0.16)
+                deltaGreen[index] = clamp(Float((Double(even.1) - Double(raster.green[index]))
+                    * coverageWeight), -0.16, 0.16)
+                deltaBlue[index] = clamp(Float((Double(even.2) - Double(raster.blue[index]))
+                    * coverageWeight), -0.16, 0.16)
             }
         }
         let delta = PortraitRaster.deltaImage(red: deltaRed, green: deltaGreen, blue: deltaBlue,
@@ -488,7 +573,11 @@ enum PortraitRaster {
         var pixelCount: Int { width * height }
     }
 
-    static let maximumWorkDimension = 1536
+    /// R2 (2026-11-12 naturalness rework): skin deltas are computed on a raster
+    /// up to 4096 px on the long edge and only downscaled, never upscaled, so a
+    /// 1440-px photo gets a 1:1 delta instead of a 1024→1440 stretch that turned
+    /// pore-level corrections into blotches ("细节粗糙" review finding).
+    static let maximumWorkDimension = 4096
 
     static func render(image: CIImage, extent: CGRect, longestEdge: Int,
                        masks: [CIImage?], context: CIContext) -> Raster? {

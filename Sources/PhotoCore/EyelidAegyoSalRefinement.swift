@@ -63,6 +63,12 @@ public enum EyelidAegyoSalRefinementEngine {
             col *= (1.0 - asShadow * 0.36);
         }
 
+        // R3 (2026-11-14, second pass): untouched pixels pass through unchanged;
+        // an unconditional clamp clipped every extended-range highlight in the
+        // photo whenever this pass was enabled.
+        float eyelidWeight = max(creaseShadow, max(creaseHighlight,
+                              max(tapeWeight, max(asLuma, asShadow))));
+        if (eyelidWeight <= 0.001) { return c; }
         return vec4(clamp(col, 0.0, 1.0), c.a);
     }
     """
