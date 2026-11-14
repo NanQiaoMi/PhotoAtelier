@@ -435,13 +435,32 @@ private struct FaceColorReference {
     /// Median chroma of the eye polygons. Sclera is the pale part of the eye;
     /// the iris and lashes sit well above it.
     let eyeChroma: Double
+    /// L* of the face oval's upper percentile — the level of the face's own
+    /// lit skin. Hair is dark *relative to the face it borders*, so this is the
+    /// reference the skin matte's darkness floor is measured against.
+    let skinLightnessP85: Double
 
     static let unavailable = FaceColorReference(lipRedness: 0, lipLightness: 0,
                                                 eyeLightnessP10: 0, eyeLightnessP90: 0,
-                                                eyeChroma: 0)
+                                                eyeChroma: 0, skinLightnessP85: 0)
 
     var hasLipReference: Bool { lipLightness > 1 }
     var hasEyeReference: Bool { eyeLightnessP90 > 1 }
+    var hasSkinReference: Bool { skinLightnessP85 > 1 }
+
+    /// Fraction of the face's own lit-skin lightness below which a pixel is
+    /// treated as hair rather than shadowed skin.
+    ///
+    /// Measured on three real portraits (extended-linear working space): hair
+    /// sits at L* 18–25 while the shadowed side of the same face bottoms out at
+    /// L* 28–45. A relative floor therefore separates them at every exposure,
+    /// where the old absolute floor (L* 8) admitted all of the hair. 0.55 keeps
+    /// the shadow side of a backlit face (its darkest skin measured at 0.60 of
+    /// the face's own lit level) and removes the hair.
+    static let skinDarknessRatio = 0.55
+
+    /// L* below which a pixel inside the face oval is hair rather than skin.
+    var skinDarknessFloor: Double { skinLightnessP85 * Self.skinDarknessRatio }
 
     /// Sclera must sit in the upper part of the eye's own brightness spread.
     /// The margin is a fraction of that spread, so a shadowed eye and a
@@ -1020,7 +1039,9 @@ private extension FaceSemanticAnalyzer {
     static func colorReference(for geometry: FaceGeometry,
                                lab: LabRaster) -> FaceColorReference {
         let width = lab.width, height = lab.height
-        var reference = FaceColorReference.unavailable
+        var lipRedness = 0.0, lipLightness = 0.0
+        var eyeP10 = 0.0, eyeP90 = 0.0, eyeChroma = 0.0
+        var skinP85 = 0.0
 
         // Lip ring: the outer lip minus the mouth opening. Median redness and
         // lightness of that ring describe the surrounding lip tissue.
@@ -1033,12 +1054,8 @@ private extension FaceSemanticAnalyzer {
             for index in ring.indices where ring[index] > 0 {
                 ring[index] = max(0, ring[index] - inner[index])
             }
-            let lipA = median(of: lab.aStar, over: ring)
-            let lipL = median(of: lab.lightness, over: ring)
-            reference = FaceColorReference(lipRedness: lipA, lipLightness: lipL,
-                                           eyeLightnessP10: reference.eyeLightnessP10,
-                                           eyeLightnessP90: reference.eyeLightnessP90,
-                                           eyeChroma: reference.eyeChroma)
+            lipRedness = median(of: lab.aStar, over: ring)
+            lipLightness = median(of: lab.lightness, over: ring)
         }
 
         // Eye polygon union: the sclera rule ranks pixels against the eye's own
@@ -1046,14 +1063,33 @@ private extension FaceSemanticAnalyzer {
         if !geometry.eyes.isEmpty {
             let eyes = fillPolygons(geometry.eyes, width: width, height: height)
             let eyeL = samples(of: lab.lightness, over: eyes)
-            let eyeC = median(of: lab.chroma, over: eyes)
-            reference = FaceColorReference(lipRedness: reference.lipRedness,
-                                           lipLightness: reference.lipLightness,
-                                           eyeLightnessP10: percentile(eyeL, 0.10),
-                                           eyeLightnessP90: percentile(eyeL, 0.90),
-                                           eyeChroma: eyeC)
+            eyeP10 = percentile(eyeL, 0.10)
+            eyeP90 = percentile(eyeL, 0.90)
+            eyeChroma = median(of: lab.chroma, over: eyes)
         }
-        return reference
+
+        // Skin: the face oval minus its eyes, brows and lips. The upper
+        // percentile (not the median) is what "this face's lit skin" means: hair
+        // and the shadow side both pull a median down, and on a backlit portrait
+        // the shadow side is most of the face.
+        if geometry.contour.count >= 3 {
+            let oval = fillPolygons([geometry.skinOval], width: width, height: height)
+            var region = oval
+            let excluded: [[Float]] = [
+                geometry.eyes.isEmpty ? nil : fillPolygons(geometry.eyes, width: width, height: height),
+                geometry.brows.isEmpty ? nil : fillPolygons(geometry.brows, width: width, height: height),
+                geometry.outerLips.count >= 3
+                    ? fillPolygons([geometry.outerLips], width: width, height: height) : nil
+            ].compactMap { $0 }
+            for mask in excluded {
+                for index in region.indices where mask[index] > 0 { region[index] = 0 }
+            }
+            skinP85 = percentile(samples(of: lab.lightness, over: region), 0.85)
+        }
+
+        return FaceColorReference(lipRedness: lipRedness, lipLightness: lipLightness,
+                                  eyeLightnessP10: eyeP10, eyeLightnessP90: eyeP90,
+                                  eyeChroma: eyeChroma, skinLightnessP85: skinP85)
     }
 
     static func colorWeights(lab: LabRaster, reference: FaceColorReference) -> FaceColorWeights {
@@ -1082,6 +1118,17 @@ private extension FaceSemanticAnalyzer {
             // enough to include shadowed skin; the geometric face oval plus the
             // eye/brow/lip exclusions keep hair and background out.
             let skinLightness = smoothstep(8, 16, lightness) * (1 - smoothstep(93, 98, lightness))
+                // R5 (2026-11-15): hair is dark *relative to the face it borders*,
+                // not absolutely dark. The old absolute floor (L* 8) admitted every
+                // hair pixel inside the face oval — on a small, backlit face with
+                // hair falling across the cheek that was 30% of the matte, and the
+                // repair stages then smoothed the strands. The floor is now a
+                // fraction of this face's own lit-skin level, so it moves with
+                // exposure and skin tone.
+                * (reference.hasSkinReference
+                    ? smoothstep(Float(reference.skinDarknessFloor * 0.85),
+                                 Float(reference.skinDarknessFloor * 1.15), lightness)
+                    : 1)
             let skinChroma = smoothstep(1.2, 4.5, chroma) * (1 - smoothstep(46, 58, chroma))
             let skinWarmth = smoothstep(-5, 2, bStar) * (1 - smoothstep(38, 48, bStar))
             let skinRed = 1 - smoothstep(34, 46, aStar)

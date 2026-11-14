@@ -487,6 +487,82 @@ final class FaceSemanticTests: XCTestCase {
                           "a closed mouth has no enamel; the teeth matte must stay empty")
     }
 
+    /// R5 (2026-11-15): hair that falls **inside** the face oval must not enter
+    /// the skin matte.
+    ///
+    /// On the third real portrait (a small, backlit face with hair across the
+    /// cheek) 30% of the skin matte was hair. The cause was the same class of bug
+    /// as the teeth/sclera gates: the skin rule's darkness floor was absolute
+    /// (`L* > 8..16`), and hair is never *absolutely* dark — it is dark relative
+    /// to the face it borders. The repair stages then smoothed hair strands.
+    ///
+    /// This fixture puts a dark brown hair band and a shadowed-skin band inside
+    /// the same face oval. The matte must keep the shadowed skin (that is a real
+    /// part of the face) and reject the hair.
+    func testHairInsideTheFaceOvalIsNotSkin() throws {
+        let size = 200
+        let linearColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+        let skin: (Float, Float, Float) = (0.55, 0.30, 0.20)
+        // Shadowed skin: the same hue at 0.40x the linear level, i.e. L* 44
+        // against the lit skin's L* 65 — a ratio of 0.67. That is the *hardest*
+        // case the real portraits measured on the shadow side of a backlit face
+        // (0.60–0.69 of the face's own lit level), so this band pins down the
+        // trade-off the floor makes: hair must go, and a shadow this deep must
+        // stay.
+        let shadowSkin: (Float, Float, Float) = (0.22, 0.12, 0.08)
+        // Dark brown hair — L* 23, chroma 14, i.e. it passes every one of the
+        // skin rule's absolute gates (lightness floor, chroma, warmth, redness).
+        let hair: (Float, Float, Float) = (0.06, 0.035, 0.018)
+
+        var pixels = [Float](repeating: 0, count: size * size * 4)
+        for row in 0..<size {
+            for column in 0..<size {
+                let offset = (row * size + column) * 4
+                var color = skin
+                // Hair band on the left of the face, shadowed skin on the right.
+                if (40...75).contains(column) { color = hair }
+                if (120...160).contains(column) { color = shadowSkin }
+                pixels[offset] = color.0
+                pixels[offset + 1] = color.1
+                pixels[offset + 2] = color.2
+                pixels[offset + 3] = 1
+            }
+        }
+        let data = pixels.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let image = CIImage(bitmapData: data, bytesPerRow: size * 16,
+                            size: CGSize(width: size, height: size),
+                            format: .RGBAf, colorSpace: linearColorSpace)
+
+        // Closed ellipse: the analyzer keeps it as-is instead of capping it.
+        let contour: [CGPoint] = (0..<32).map { index in
+            let angle = Double(index) / 32 * 2 * .pi
+            return CGPoint(x: (100 + 70 * cos(angle)) / 200, y: 1 - (100 + 85 * sin(angle)) / 200)
+        }
+        var face = FaceLandmarkSet(boundingBox: CGRect(x: 0.15, y: 0.075, width: 0.7, height: 0.85),
+                                   confidence: 1)
+        face.faceContour = contour
+
+        let result = FaceSemanticAnalyzer.masks(image: image, faceBounds: face.boundingBox,
+                                                landmarks: face)
+        let skinMask = try XCTUnwrap(sampled(result.skin))
+
+        func point(_ column: Int, _ row: Int) -> CGPoint {
+            CGPoint(x: (CGFloat(column) + 0.5) / CGFloat(size),
+                    y: 1 - (CGFloat(row) + 0.5) / CGFloat(size))
+        }
+
+        XCTAssertGreaterThan(skinMask.value(at: point(100, 100)), 0.9,
+                             "lit skin in the middle of the face is still skin")
+        XCTAssertGreaterThan(skinMask.value(at: point(140, 100)), 0.5,
+                             "the shadow side of the face is skin, not hair")
+        XCTAssertLessThan(skinMask.value(at: point(57, 100)), 0.1,
+                          "hair inside the face oval must not be retouched as skin")
+        XCTAssertLessThan(skinMask.value(at: point(57, 40)), 0.1,
+                          "the same holds near the hairline")
+    }
+
     func testMasksAreDeterministicSoftAndBounded() throws {
         let face = SyntheticFace(center: CGPoint(x: 0.5, y: 0.46), scale: 1)
         let image = syntheticImage(faces: [face])

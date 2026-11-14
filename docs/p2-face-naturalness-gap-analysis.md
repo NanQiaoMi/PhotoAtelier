@@ -136,6 +136,22 @@ R3 把「报告说谎」修好之后，note 里那句「缺少牙齿蒙版（可
 
 验收：`swift test` 全量 **810/810**；13 样片 × 10 管线重跑画廊（`artifacts/p3f-verify/full-review/index.html`）。新增单测：`testSmileDegreeRespectsExistingSmile`、`testCatchlightIsNeverInventedWithoutLightEvidence`、`testCatchlightEnhancesExistingHighlightInPlace`、`testCatchlightAnalysisDetectsExistingHighlightAndLightSide`、`testSkinToneUnificationEvensSingleFaceChromaWithoutShiftingItsMean`、`testHighlightsOutsideZoneMasksAreNeverClipped`、`testTeethAndScleraMattesSurviveUnderexposure`、`testClosedMouthWithLipstickProducesNoTeethMatte`、`testIrisClarityExpandsContrastAroundTheIrisOwnLevel`。
 
+### R5 补丁：脸型椭圆内的头发被当成皮肤（2026-11-15 画廊复审）
+
+R3/R4 修好之后逐张看画廊，第三张（环境半身、逆光、脸只占 98 px）仍有问题：**修复类模块在头发上动手**。叠加蒙版一看，皮肤椭圆里 30% 的像素是垂在脸颊上的头发。
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| 皮肤蒙版把头发圈进来，祛瑕/光影平整/纹理在发丝上生效 | 皮肤判据的**亮度下限是绝对值** `L* > 8..16`——和牙齿（`L* > 60`）、眼白（`L* > 64`）是同一个错法的第四例。头发从来不是**绝对**暗，它是**相对于它所挨着的那张脸**暗：实测三张实拍，头发 L\* 18–25，同一张脸最暗的阴影侧皮肤 L\* 28–45。绝对下限 8 把头发全部放进来了 | 下限改为**该脸自身受光肤色 P85 的 0.55**（`skinDarknessRatio`）。实测：小脸上头发像素占蒙版的比例从 30.3% 降到 9.5%，两张正常尺寸的脸从 0.0–1.9% 收到 0.0–0.1% |
+
+小脸是放大器：1024 栅格的皮肤椭圆在 98 px 的脸上只有 88×87 个栅格像素，羽化与蒙版采样都更粗，头发与脸的边界因此更容易被整块吞进来。
+
+阈值取舍是量出来的，不是拍的：`P85 × 0.50` 在三张实拍上分别误删阴影皮肤 0 / 98 / 0 像素，`P85 × 0.55` 起才开始吃掉真实阴影侧（sample-10 误删 190 px），`P85 × 0.60` 起误删量跳到 920 px。0.55 是"头发基本清掉、阴影皮肤还没伤到"的位置；被判为头发的像素仍走 `smoothstep` 软边，不做硬切。
+
+实测效果（`PortraitRefinement` 全开，三张实拍）：祛瑕这一级在头发上的改动像素 281 → **0**；三张脸的脸部纹理高频在修复后反而略升（2.26→2.47、2.47→2.72、2.42→2.79），说明蒙版收紧没有把皮肤纹理一起削掉。新增单测 `testHairInsideTheFaceOvalIsNotSkin`（同一张脸里放一条深棕头发带和一条 0.6 倍亮度的阴影皮肤带：阴影皮肤必须保留、头发必须排除；**去掉修复即失败**：头发处蒙版值为 1.0）。
+
+剩余已知问题（未修）：小脸上仍有 421 个贴着头发的深色像素留在蒙版里（多为 0.2–0.5 的软边），光影平整/纹理仍会碰到它们，但幅度已降到平均 |Δluma| 0.0055（约 1.4 个色阶）、其中只有 31 个超过 0.01，肉眼看不出。sample-11 嘴角的蜡感来自磨皮强度档位，属于参数而非架构。
+
 ---
 
 ## 四、本报告的证据索引
