@@ -659,6 +659,205 @@ final class PortraitRetouchTests: XCTestCase {
         XCTAssertTrue(unified.report.appliedSteps.contains("skinTone"))
     }
 
+    // MARK: - Skin smoothing (R6)
+
+    /// R6 (2026-11-15): the portrait pass had no stage that *removes* skin
+    /// texture. Every existing control adds detail (`structure` boosts mid
+    /// contrast, `texture` amplifies the high band), and measured on three real
+    /// portraits the whole pass raised skin high-frequency energy by 11% — a
+    /// basic retouching app's most elementary operation was not expressible.
+    ///
+    /// This fixture is a flat skin field carrying a fine periodic texture plus
+    /// one strong dark edge. Smoothing must flatten the texture, keep the edge,
+    /// leave non-skin pixels alone, and leave protected features untouched.
+    func testSkinSmoothingRemovesTextureKeepsEdgesAndStaysInSkin() throws {
+        let width = 240, height = 180
+        let skinColumns = 20...219
+        let skinRows = 16...163
+        let feature = (columns: 150...175, rows: 40...70)
+        let edgeColumn = 110
+
+        func isFeature(_ column: Int, _ row: Int) -> Bool {
+            feature.columns.contains(column) && feature.rows.contains(row)
+        }
+        // Fine texture: a 1-pixel checkerboard at ±0.012 linear — pore scale.
+        // The hard edge at `edgeColumn` is 0.30 linear, i.e. 25x the texture,
+        // which is the ratio a nostril or lip line has against pores.
+        let source = makeImage(width: width, height: height) { column, row in
+            let insideSkin = skinColumns.contains(column) && skinRows.contains(row)
+            guard insideSkin else { return (0.08, 0.08, 0.08, 1) }
+            if isFeature(column, row) { return (0.05, 0.03, 0.02, 1) }
+            let texture: Float = ((column + row) % 2 == 0) ? 0.012 : -0.012
+            let edge: Float = column >= edgeColumn ? -0.15 : 0
+            let base: Float = 0.55
+            return (base + texture + edge, 0.30 + texture * 0.5 + edge,
+                    0.20 + texture * 0.3 + edge, 1)
+        }
+        let skinMask = coverageMask(width: width, height: height) { column, row in
+            skinColumns.contains(column) && skinRows.contains(row) ? 1 : 0
+        }
+        let featureMask = coverageMask(width: width, height: height) { column, row in
+            isFeature(column, row) ? 1 : 0
+        }
+        let extent = source.extent
+
+        let before = try render(source)
+        let smoothed = try PortraitRefinementEngine.apply(
+            source,
+            settings: PortraitRefinementSettings(skinSmoothing: 1),
+            faceMasks: [faceSet(extent: extent, skin: skinMask, brows: featureMask)],
+            context: context)
+        XCTAssertTrue(smoothed.report.appliedSteps.contains("smooth"),
+                      "the smoothing stage must report itself")
+        let after = try render(smoothed.image)
+
+        // 1. Texture amplitude collapses. Measure the deviation from a 3x3 mean
+        //    on clean skin away from the edge and the feature.
+        func textureAmplitude(_ pixels: [Float]) -> Float {
+            var sum: Float = 0
+            var count: Float = 0
+            for row in 30...120 {
+                for column in 30...(edgeColumn - 6) {
+                    let center = luminance(pixels, width: width, column: column, row: row)
+                    var neighbourhood: Float = 0
+                    for dy in -1...1 {
+                        for dx in -1...1 where !(dx == 0 && dy == 0) {
+                            neighbourhood += luminance(pixels, width: width,
+                                                       column: column + dx, row: row + dy)
+                        }
+                    }
+                    sum += abs(center - neighbourhood / 8)
+                    count += 1
+                }
+            }
+            return count > 0 ? sum / count : 0
+        }
+        let amplitudeBefore = textureAmplitude(before)
+        let amplitudeAfter = textureAmplitude(after)
+        XCTAssertGreaterThan(amplitudeBefore, 0.004, "fixture must actually carry texture")
+        XCTAssertLessThan(amplitudeAfter, amplitudeBefore * 0.35,
+                          "smoothing at 1.0 must remove most of the pore-scale texture")
+
+        // 2. The strong edge survives. A smoothing pass that blurs everything
+        //    would halve the step across it; the edge guard keeps it.
+        func edgeStep(_ pixels: [Float]) -> Float {
+            let left = luminance(pixels, width: width, column: edgeColumn - 1, row: 90)
+            let right = luminance(pixels, width: width, column: edgeColumn + 1, row: 90)
+            return abs(right - left)
+        }
+        let stepBefore = edgeStep(before)
+        let stepAfter = edgeStep(after)
+        XCTAssertGreaterThan(stepBefore, 0.10, "fixture edge must be a strong one")
+        XCTAssertGreaterThan(stepAfter, stepBefore * 0.90,
+                             "a strong edge must survive smoothing, not be blurred away")
+
+        // 3. Nothing outside the skin matte moves.
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: { column, row in
+                                                       !skinColumns.contains(column)
+                                                           || !skinRows.contains(row)
+                                                   }), 0.001,
+                          "non-skin pixels must stay unchanged")
+
+        // 4. Brows/lips/teeth/sclera/iris are excluded even where the colour
+        //    classifier put them inside the matte.
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: isFeature), 0.02,
+                          "protected features may only change slightly")
+
+        // 5. Monotone and bounded: stronger settings remove more, never less.
+        var previousAmplitude = Float.greatestFiniteMagnitude
+        for amount in [0.25, 0.5, 0.75, 1.0] {
+            let image = try PortraitRefinementEngine.apply(
+                source,
+                settings: PortraitRefinementSettings(skinSmoothing: amount),
+                faceMasks: [faceSet(extent: extent, skin: skinMask, brows: featureMask)],
+                context: context).image
+            let amplitude = textureAmplitude(try render(image))
+            XCTAssertLessThan(amplitude, previousAmplitude,
+                              "smoothing \(amount) must remove more texture than the step before")
+            previousAmplitude = amplitude
+        }
+    }
+
+    /// R6: smoothing and `texture` act on the same band from opposite directions,
+    /// so the pipeline order decides what the user gets. Smoothing runs first, so
+    /// "磨皮 + 纹理" means "smooth, then put back as much grain as asked for".
+    func testSmoothingRunsBeforeTheTextureStageSoReinjectionCanUndoIt() throws {
+        let width = 200, height = 160
+        let source = makeImage(width: width, height: height) { column, row in
+            let texture: Float = ((column + row) % 2 == 0) ? 0.012 : -0.012
+            return (0.55 + texture, 0.30 + texture, 0.20 + texture, 1)
+        }
+        let skinMask = coverageMask(width: width, height: height) { _, _ in 1 }
+        let extent = source.extent
+        let masks = [faceSet(extent: extent, skin: skinMask)]
+
+        let smoothOnly = try PortraitRefinementEngine.apply(
+            source, settings: PortraitRefinementSettings(skinSmoothing: 1),
+            faceMasks: masks, context: context)
+        let both = try PortraitRefinementEngine.apply(
+            source, settings: PortraitRefinementSettings(skinSmoothing: 1, texture: 1),
+            faceMasks: masks, context: context)
+
+        XCTAssertEqual(smoothOnly.report.appliedSteps, ["smooth"])
+        XCTAssertEqual(both.report.appliedSteps, ["smooth", "texture"],
+                       "smoothing must be listed before texture")
+
+        func amplitude(_ image: CIImage) throws -> Float {
+            let pixels = try render(image)
+            var sum: Float = 0
+            var count: Float = 0
+            for row in 20..<140 {
+                for column in 20..<180 {
+                    let center = luminance(pixels, width: width, column: column, row: row)
+                    var neighbourhood: Float = 0
+                    for dy in -1...1 {
+                        for dx in -1...1 where !(dx == 0 && dy == 0) {
+                            neighbourhood += luminance(pixels, width: width,
+                                                       column: column + dx, row: row + dy)
+                        }
+                    }
+                    sum += abs(center - neighbourhood / 8)
+                    count += 1
+                }
+            }
+            return count > 0 ? sum / count : 0
+        }
+        let smoothed = try amplitude(smoothOnly.image)
+        let retextured = try amplitude(both.image)
+        XCTAssertGreaterThan(retextured, smoothed,
+                             "the texture stage must be able to put grain back after smoothing")
+    }
+
+    /// R6: the new field must decode as 0 from every recipe written before it
+    /// existed, and must be rejected outside 0...1.
+    func testSkinSmoothingDecodesLegacyRecipesAsNeutralAndValidatesRange() throws {
+        var settings = PortraitRefinementSettings()
+        settings.skinSmoothing = 0.6
+        let encoded = try JSONEncoder().encode(settings)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "skinSmoothing")
+        let legacy = try JSONDecoder().decode(
+            PortraitRefinementSettings.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(legacy.skinSmoothing, 0, "a recipe written before R6 must decode as neutral")
+        XCTAssertTrue(legacy.isNeutral, "an absent smoothing field must not make settings non-neutral")
+
+        var invalid = PortraitRefinementSettings()
+        invalid.skinSmoothing = 1.4
+        XCTAssertThrowsError(try PortraitRefinementEngine.validate(invalid))
+        invalid.skinSmoothing = -0.1
+        XCTAssertThrowsError(try PortraitRefinementEngine.validate(invalid))
+
+        var nonNeutral = AdjustmentSettings()
+        nonNeutral.portrait = PortraitRefinementSettings(skinSmoothing: 0.5)
+        var recipe = Recipe(adjustments: nonNeutral)
+        recipe.version = 9
+        XCTAssertThrowsError(try recipe.validateVersion(),
+                             "smoothing alone is a v10 feature and cannot be saved as v9")
+    }
+
     // MARK: - Validation and recipe version gate
 
     func testPortraitValidationAndRecipeVersionGate() throws {

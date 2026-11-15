@@ -264,6 +264,7 @@ for (index, item) in itemsToProcess.enumerated() {
         case "03_portrait_retouch":
             var portrait = PortraitRefinementSettings()
             portrait.blemishStrength = 0.65
+            portrait.skinSmoothing = 0.60
             portrait.dodgeBurn = 0.55
             portrait.structure = 0.20
             portrait.texture = 0.70
@@ -301,6 +302,7 @@ for (index, item) in itemsToProcess.enumerated() {
 
             var portrait = PortraitRefinementSettings()
             portrait.blemishStrength = 0.55
+            portrait.skinSmoothing = 0.55
             portrait.dodgeBurn = 0.35
             portrait.structure = 0.20
             portrait.texture = 0.80
@@ -423,6 +425,9 @@ for (index, item) in itemsToProcess.enumerated() {
             // 祛瑕 + 频率分离美肤（纹理回注优先）+ 泪沟法令纹（照片实测）+ 测量型眼牙 + 景深 + 胶片色调）
             var portrait = PortraitRefinementSettings()
             portrait.blemishStrength = 0.50
+            // R6: 磨皮是整条链路唯一"减少"皮肤细节的步骤；没有它，texture 0.85
+            // 只会把毛孔放大（实测皮肤高频 +11%）。
+            portrait.skinSmoothing = 0.55
             portrait.dodgeBurn = 0.30
             portrait.structure = 0.20
             portrait.texture = 0.85

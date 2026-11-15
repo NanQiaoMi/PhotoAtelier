@@ -169,7 +169,8 @@ public enum PortraitModuleType: String, CaseIterable, Identifiable {
         switch self {
         case .skinRetouch:
             guard let p = settings.portrait else { return false }
-            return p.blemishStrength > 0 || p.dodgeBurn > 0 || p.structure > 0 || p.texture > 0 || p.gloss > 0
+            return p.blemishStrength > 0 || p.skinSmoothing > 0
+                || p.dodgeBurn > 0 || p.structure > 0 || p.texture > 0 || p.gloss > 0
         case .facialZonal:
             return settings.facialZonal?.isNeutral == false
         case .skinToneUnify:

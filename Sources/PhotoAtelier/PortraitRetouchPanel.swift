@@ -179,6 +179,7 @@ struct PortraitRetouchPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             PortraitCard(module: .skinRetouch, model: model) {
                 VStack(alignment: .leading, spacing: 0) {
+                    portraitSlider("磨皮", \.skinSmoothing)
                     portraitSlider("祛瑕疵", \.blemishStrength)
                     Toggle("保留痣 / 斑", isOn: keepSpotsBinding)
                         .toggleStyle(.switch).controlSize(.mini)

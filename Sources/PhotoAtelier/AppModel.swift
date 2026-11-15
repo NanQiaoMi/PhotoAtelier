@@ -3942,7 +3942,8 @@ final class AppModel: ObservableObject {
             return
         }
         adjustments.portrait = PortraitRefinementSettings(
-            blemishStrength: 0.25, dodgeBurn: 0.30, structure: 0.15, texture: 0.15,
+            blemishStrength: 0.25, skinSmoothing: 0.45,
+            dodgeBurn: 0.30, structure: 0.15, texture: 0.15,
             gloss: 0.15, teethWhiten: 0.20, eyeBrighten: 0.20, skinToneUnify: 0.20)
         status = "已应用轻度人像精修起点；请逐张预览确认，算法不保证真实照片效果。"
     }
@@ -4218,6 +4219,7 @@ extension AppModel {
     private func scalePortraitIntensity(_ settings: inout AdjustmentSettings, factor: Double) {
         if var p = settings.portrait {
             p.blemishStrength = clamp(p.blemishStrength * factor, 0, 1)
+            p.skinSmoothing = clamp(p.skinSmoothing * factor, 0, 1)
             p.dodgeBurn = clamp(p.dodgeBurn * factor, 0, 1)
             p.structure = clamp(p.structure * factor, 0, 1)
             p.texture = clamp(p.texture * factor, 0, 1)
@@ -4390,6 +4392,7 @@ extension AppModel {
         if portraitBypassedModules.contains(.skinRetouch) {
             if var p = settings.portrait {
                 p.blemishStrength = 0
+                p.skinSmoothing = 0
                 p.dodgeBurn = 0
                 p.structure = 0
                 p.texture = 0
@@ -4501,6 +4504,7 @@ extension AppModel {
             case .skinRetouch:
                 if var p = adjustments.portrait {
                     p.blemishStrength = 0
+                    p.skinSmoothing = 0
                     p.dodgeBurn = 0
                     p.structure = 0
                     p.texture = 0
@@ -4651,6 +4655,7 @@ extension AppModel {
             case "studio_clarity":
                 var p = adjustments.portrait ?? PortraitRefinementSettings()
                 p.blemishStrength = 0.35
+                p.skinSmoothing = 0.55
                 p.dodgeBurn = 0.40
                 p.structure = 0.20
                 p.texture = 0.20
@@ -4686,6 +4691,10 @@ extension AppModel {
 
                 var p = adjustments.portrait ?? PortraitRefinementSettings()
                 p.blemishStrength = 0.25
+                // Masculine preset: half the smoothing of the studio look — the
+                // whole point of this preset is to keep beard shadow and skin
+                // character while cleaning up the rest.
+                p.skinSmoothing = 0.30
                 p.dodgeBurn = 0.35
                 p.structure = 0.30
                 p.keepSpots = true

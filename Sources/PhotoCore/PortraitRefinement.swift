@@ -35,6 +35,8 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     public var blemishStrength: Double = 0
     /// Preserve very dark, compact spots (moles/freckles) instead of repairing.
     public var keepSpots: Bool = false
+    /// Skin smoothing strength — removes pore-scale texture while keeping edges.
+    public var skinSmoothing: Double = 0
     /// Evening out broad light/shadow variation on the skin.
     public var dodgeBurn: Double = 0
     /// Local mid-frequency contrast ("stereoscopic" structure).
@@ -63,6 +65,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     public var flyawayRemoval: Double = 0
 
     public init(blemishStrength: Double = 0, keepSpots: Bool = false,
+                skinSmoothing: Double = 0,
                 dodgeBurn: Double = 0, structure: Double = 0, texture: Double = 0,
                 gloss: Double = 0, teethWhiten: Double = 0, eyeBrighten: Double = 0,
                 skinToneUnify: Double = 0, skinToneReference: PortraitToneReference = .auto,
@@ -70,6 +73,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
                 hairSmoothing: Double = 0, flyawayRemoval: Double = 0) {
         self.blemishStrength = blemishStrength
         self.keepSpots = keepSpots
+        self.skinSmoothing = skinSmoothing
         self.dodgeBurn = dodgeBurn
         self.structure = structure
         self.texture = texture
@@ -86,7 +90,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case blemishStrength, keepSpots, dodgeBurn, structure, texture, gloss
+        case blemishStrength, keepSpots, skinSmoothing, dodgeBurn, structure, texture, gloss
         case teethWhiten, eyeBrighten, skinToneUnify, skinToneReference
         case hairGapFilling, hairGloss, hairDarkening
         case hairSmoothing, flyawayRemoval
@@ -96,6 +100,7 @@ public struct PortraitRefinementSettings: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         blemishStrength = try container.decodeIfPresent(Double.self, forKey: .blemishStrength) ?? 0
         keepSpots = try container.decodeIfPresent(Bool.self, forKey: .keepSpots) ?? false
+        skinSmoothing = try container.decodeIfPresent(Double.self, forKey: .skinSmoothing) ?? 0
         dodgeBurn = try container.decodeIfPresent(Double.self, forKey: .dodgeBurn) ?? 0
         structure = try container.decodeIfPresent(Double.self, forKey: .structure) ?? 0
         texture = try container.decodeIfPresent(Double.self, forKey: .texture) ?? 0
@@ -114,7 +119,8 @@ public struct PortraitRefinementSettings: Codable, Equatable {
     /// True when every masked control is at its neutral value. The tone reference
     /// enum is ignored because it has no effect while `skinToneUnify == 0`.
     public var isNeutral: Bool {
-        blemishStrength == 0 && dodgeBurn == 0 && structure == 0 && texture == 0
+        blemishStrength == 0 && skinSmoothing == 0
+            && dodgeBurn == 0 && structure == 0 && texture == 0
             && gloss == 0 && teethWhiten == 0 && eyeBrighten == 0 && skinToneUnify == 0
             && hairGapFilling == 0 && hairGloss == 0 && hairDarkening == 0
             && hairSmoothing == 0 && flyawayRemoval == 0
@@ -187,6 +193,7 @@ public enum PortraitRefinementEngine {
             }
         }
         try require(settings.blemishStrength, named: "祛瑕疵强度")
+        try require(settings.skinSmoothing, named: "磨皮强度")
         try require(settings.dodgeBurn, named: "光影平整")
         try require(settings.structure, named: "立体感")
         try require(settings.texture, named: "纹理")
@@ -231,11 +238,12 @@ public enum PortraitRefinementEngine {
         var notes: [String] = []
         try cancellation?.check()
 
-        let skinStrengths = [settings.blemishStrength, settings.dodgeBurn,
-                             settings.structure, settings.texture, settings.gloss]
+        let skinStrengths = [settings.blemishStrength, settings.skinSmoothing,
+                             settings.dodgeBurn, settings.structure,
+                             settings.texture, settings.gloss]
         if skinStrengths.contains(where: { $0 > 0 }) {
             guard let skinMask else {
-                notes.append("缺少皮肤蒙版，祛瑕疵与光影/纹理步骤已跳过。")
+                notes.append("缺少皮肤蒙版，祛瑕疵、磨皮与光影/纹理步骤已跳过。")
                 return finish(image, faceCount: faceCount, steps: steps, notes: notes)
             }
             if settings.blemishStrength > 0 {
@@ -244,6 +252,20 @@ public enum PortraitRefinementEngine {
                     skinMask: skinMask, protectionMask: protectionMask,
                     context: context, cancellation: cancellation)
                 steps.append("blemish")
+            }
+            // R6 (2026-11-15): smoothing runs before the frequency stage. The
+            // two touch the same band from opposite directions — smoothing
+            // removes high-frequency texture, `texture` re-injects it — so
+            // running smoothing last would let the re-injection undo it. This
+            // order makes "磨皮 + 纹理" mean "smooth, then put back exactly as
+            // much grain as asked for", which is how the two controls read in
+            // the panel.
+            if settings.skinSmoothing > 0 {
+                current = try SkinSmoothingEngine.apply(current,
+                    amount: settings.skinSmoothing, skinMask: skinMask,
+                    protectionMask: protectionMask,
+                    context: context, cancellation: cancellation)
+                steps.append("smooth")
             }
             if settings.dodgeBurn > 0 || settings.structure > 0
                 || settings.texture > 0 || settings.gloss > 0 {
