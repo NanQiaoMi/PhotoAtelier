@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1010" viewBox="0 0 1560 1010">
+<rect width="1560" height="1010" fill="#0d1419"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8a98a0"/></marker></defs>
+<text x="48" y="54" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="26" fill="#e8ecee" font-weight="600" text-anchor="start">Photo Atelier 处理管线</text>
+<text x="48" y="84" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="14" fill="#8a98a0" font-weight="400" text-anchor="start">Sources/PhotoCore/PhotoEngine.swift · process() 的实际阶段顺序</text>
+<text x="48" y="132" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#66757e" font-weight="600" text-anchor="start" letter-spacing="1">输入</text>
+<rect x="48" y="146" width="300" height="96" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="176" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">解码</text>
+<text x="64" y="200" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">ImageIO / CIRAWFilter</text>
+<text x="64" y="220" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">方向已烘焙 · 归一化 EXIF</text>
+<rect x="48" y="258" width="300" height="96" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="288" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">色彩管理</text>
+<text x="64" y="312" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">嵌入 ICC → extended linear sRGB</text>
+<text x="64" y="332" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">浮点工作空间 RGBAf</text>
+<rect x="48" y="370" width="300" height="118" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="400" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">分析（只读）</text>
+<text x="64" y="424" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">最长边 384 px 线性采样</text>
+<text x="64" y="444" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">P05/P50/P95/P99 · 中性色偏差</text>
+<text x="64" y="464" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">Vision 人脸框与内容标签</text>
+<rect x="48" y="504" width="300" height="118" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="534" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">场景判定</text>
+<text x="64" y="558" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">题材证据 → 三套方案</text>
+<text x="64" y="578" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">自动增量经原尺寸渲染复核</text>
+<text x="64" y="598" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">超限一起减弱，不静默越界</text>
+<text x="48" y="660" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#66757e" font-weight="600" text-anchor="start" letter-spacing="1">配方</text>
+<rect x="48" y="674" width="300" height="96" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="704" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">AdjustmentSettings</text>
+<text x="64" y="728" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">版本 1–33 · 非破坏性</text>
+<text x="64" y="748" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">中性字段走旧像素路径</text>
+<rect x="48" y="786" width="300" height="96" rx="8" fill="#111b22" stroke="#24333d" stroke-width="1"/>
+<text x="64" y="816" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">批量配方</text>
+<text x="64" y="840" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">整文件夹一份配方</text>
+<text x="64" y="860" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">逐图重算场景与保护测量</text>
+<text x="412" y="132" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#66757e" font-weight="600" text-anchor="start" letter-spacing="1">处理（逐张串行，取消以整张为边界）</text>
+<rect x="412" y="146" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="166" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">01</text>
+<text x="460" y="166" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">基础影调</text>
+<text x="460" y="183" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">曝光 · 白平衡 · 对比/饱和 · 五区 EV 曲线</text>
+<rect x="412" y="201" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="221" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">02</text>
+<text x="460" y="221" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">几何</text>
+<text x="460" y="238" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">自动水平 · 透视 · Lensfun 镜头配置</text>
+<path d="M 692.0 193 L 692.0 200" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="256" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="276" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">03</text>
+<text x="460" y="276" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">液化 / 美型</text>
+<text x="460" y="293" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">人脸网格形变场 · 全局位移硬顶 3%</text>
+<path d="M 692.0 248 L 692.0 255" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="311" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="331" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">04</text>
+<text x="460" y="331" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">调色工具</text>
+<text x="460" y="348" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">RGB/亮度曲线 · HSL 8 色相 · 三色轮分级</text>
+<path d="M 692.0 303 L 692.0 310" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="366" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="386" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">05</text>
+<text x="460" y="386" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">镜头效果</text>
+<text x="460" y="403" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">暗角 · 横向色差</text>
+<path d="M 692.0 358 L 692.0 365" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="421" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="441" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">06</text>
+<text x="460" y="441" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">修复 / 仿制画笔</text>
+<text x="460" y="458" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">邻近纹理启发式填充 · 按来源偏移复制</text>
+<path d="M 692.0 413 L 692.0 420" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="476" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="496" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">07</text>
+<text x="460" y="496" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">人像精修</text>
+<text x="460" y="513" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">多人独立：磨皮 · 五区祛皱 · 眼牙 · 妆容 · 发色 · 五官微雕</text>
+<path d="M 692.0 468 L 692.0 475" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="531" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="551" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">08</text>
+<text x="460" y="551" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">追色</text>
+<text x="460" y="568" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">OKLab 分位数匹配 · 可仅作用于皮肤</text>
+<path d="M 692.0 523 L 692.0 530" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="586" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="606" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">09</text>
+<text x="460" y="606" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">局部蒙版（LUT 前）</text>
+<text x="460" y="623" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">径向/渐变/画笔/亮度范围/颜色范围 · 逐图细节适配</text>
+<path d="M 692.0 578 L 692.0 585" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="641" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="661" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">10</text>
+<text x="460" y="661" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">LUT</text>
+<text x="460" y="678" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">显式色彩空间与 DOMAIN · 三线性插值 · 皮肤/中性/亮度保护</text>
+<path d="M 692.0 633 L 692.0 640" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="696" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="716" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">11</text>
+<text x="460" y="716" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">局部蒙版（LUT 后）</text>
+<text x="460" y="733" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">收尾调整，与 LUT 前蒙版共享固定参考</text>
+<path d="M 692.0 688 L 692.0 695" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="751" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="771" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">12</text>
+<text x="460" y="771" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">质感滤镜</text>
+<text x="460" y="788" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">辉光 · 暗角 · 颗粒 · 红晕 · 薄雾 · 褪色 · 留银</text>
+<path d="M 692.0 743 L 692.0 750" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="412" y="806" width="560" height="46" rx="7" fill="#141f27" stroke="#24333d"/>
+<text x="426" y="826" font-family="SF Mono, Menlo, monospace" font-size="12" fill="#66757e" font-weight="500" text-anchor="start">13</text>
+<text x="460" y="826" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="15" fill="#e8ecee" font-weight="600" text-anchor="start">颜色协调与色域</text>
+<text x="460" y="843" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="12" fill="#8a98a0" font-weight="400" text-anchor="start">新增强色度/中性染色限制 → 目标色域收敛</text>
+<path d="M 692.0 798 L 692.0 805" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="1016" y="132" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#66757e" font-weight="600" text-anchor="start" letter-spacing="1">输出</text>
+<rect x="1016" y="146" width="300" height="96" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="1032" y="176" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">编码</text>
+<text x="1032" y="200" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">JPEG · 16 位 PNG/TIFF · HEIC</text>
+<text x="1032" y="220" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">sRGB / Display P3</text>
+<rect x="1016" y="258" width="300" height="118" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="1032" y="288" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">原子落盘</text>
+<text x="1032" y="312" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">排他安装，同名递增</text>
+<text x="1032" y="332" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">绝不覆盖原片或已有导出</text>
+<rect x="1016" y="392" width="300" height="118" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="1032" y="422" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">报告</text>
+<text x="1032" y="446" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">batch-&lt;UUID&gt;.json</text>
+<text x="1032" y="466" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">逐张结果 · 警告 · 保护前后变化</text>
+<rect x="1016" y="526" width="300" height="96" rx="8" fill="#141f27" stroke="#24333d" stroke-width="1"/>
+<text x="1032" y="556" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">隐私</text>
+<text x="1032" y="580" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">默认移除 GPS 与相机标识</text>
+<text x="1032" y="600" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">可选保留拍摄参数</text>
+<text x="1016" y="660" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#66757e" font-weight="600" text-anchor="start" letter-spacing="1">只读承诺</text>
+<rect x="1016" y="674" width="300" height="208" rx="8" fill="#111b22" stroke="#24333d" stroke-width="1"/>
+<text x="1032" y="704" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="16" fill="#e8ecee" font-weight="600" text-anchor="start">原片永不修改</text>
+<text x="1032" y="728" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">· 输入/输出目录不得相同或互相包含</text>
+<text x="1032" y="748" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">· 扫描不追随符号链接</text>
+<text x="1032" y="768" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">· 单张失败写入报告并继续</text>
+<text x="1032" y="788" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">· 评级与废片存于应用支持目录</text>
+<text x="1032" y="808" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">· 无出站请求；局域网预览需显式开启</text>
+<path d="M 348 194 L 412 169" stroke="#8a98a0" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M 348 563 L 412 169" stroke="#7fb6d6" stroke-width="1.6" fill="none" marker-end="url(#arrow)" stroke-dasharray="4 3"/>
+<path d="M 348 429 L 412 499" stroke="#7fb6d6" stroke-width="1.6" fill="none" marker-end="url(#arrow)" stroke-dasharray="4 3"/>
+<path d="M 394 169 L 394 829" stroke="#7fb6d6" stroke-width="1.4" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 169 L 409 169" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 224 L 409 224" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 279 L 409 279" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 334 L 409 334" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 389 L 409 389" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 444 L 409 444" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 499 L 409 499" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 554 L 409 554" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 609 L 409 609" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 664 L 409 664" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 719 L 409 719" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 774 L 409 774" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 394 829 L 409 829" stroke="#7fb6d6" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+<path d="M 348 722 L 394 722 L 394 829" stroke="#7fb6d6" stroke-width="1.4" stroke-dasharray="4 3" fill="none"/>
+<path d="M 972 829 L 1016 194" stroke="#e0b071" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M 972 829 L 1016 451" stroke="#e0b071" stroke-width="1.6" fill="none" marker-end="url(#arrow)" stroke-dasharray="4 3"/>
+<rect x="48" y="944" width="22" height="2" fill="#7fb6d6"/>
+<text x="80" y="950" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">分析证据流入（只读，不改变像素）</text>
+<rect x="352" y="944" width="22" height="2" fill="#e0b071"/>
+<text x="384" y="950" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">像素流</text>
+<rect x="470" y="944" width="22" height="2" fill="#8a98a0" stroke-dasharray="4 3"/>
+<text x="502" y="950" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">阶段顺序（与代码一致）</text>
+<rect x="700" y="944" width="22" height="2" fill="#7fb6d6" stroke-dasharray="4 3"/>
+<text x="732" y="950" font-family="PingFang SC, Helvetica Neue, sans-serif" font-size="13" fill="#8a98a0" font-weight="400" text-anchor="start">配方与批量参数驱动全部阶段</text>
+</svg>
