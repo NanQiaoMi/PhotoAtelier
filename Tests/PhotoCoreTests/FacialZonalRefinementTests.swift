@@ -4,10 +4,11 @@ import CoreImage
 
 final class FacialZonalRefinementTests: XCTestCase {
 
-    private let context = CIContext(options: [
+    private static let sharedContext = CIContext(options: [
         .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
         .outputColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
     ])
+    private var context: CIContext { Self.sharedContext }
 
     func testFacialZonalSettingsDefaultsAndValidation() throws {
         var settings = FacialZonalRefinementSettings()

@@ -4,7 +4,8 @@ import CoreImage
 
 final class PetEnhancementTests: XCTestCase {
 
-    private let context = CIContext(options: [.workingColorSpace: NSNull()])
+    private static let sharedContext = CIContext(options: [.workingColorSpace: NSNull()])
+    private var context: CIContext { Self.sharedContext }
 
     func testPetEnhancementSettingsDefaultsAndValidation() throws {
         var settings = PetEnhancementSettings()
