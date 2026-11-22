@@ -43,10 +43,10 @@ jobs:
           key: lensfun-${{ runner.os }}-x86_64-${{ hashFiles('Scripts/prepare_lensfun.py') }}
 
       - name: Prepare and verify Lensfun dependency
-        run: arch -x86_64 python3 Scripts/prepare_lensfun.py
+        run: arch -x86_64 /usr/bin/python3 Scripts/prepare_lensfun.py
 
       - name: Build project
-        run: arch -x86_64 swift build -j 2
+        run: arch -x86_64 /usr/bin/swift build -j 2
 
       - name: Run full test suite
-        run: arch -x86_64 swift test -j 2
+        run: arch -x86_64 /usr/bin/swift test -j 2
