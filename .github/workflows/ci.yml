@@ -17,16 +17,22 @@ concurrency:
 jobs:
   build-and-test:
     name: macOS Build & Test
-    runs-on: macos-15-intel
+    runs-on: macos-14
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Rosetta is available
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+
       - name: Print runner environment
         run: |
-          uname -m
+          arch -x86_64 uname -m
           sw_vers
           swift --version
 
@@ -34,13 +40,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .dependencies/lensfun
-          key: lensfun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Scripts/prepare_lensfun.py') }}
+          key: lensfun-${{ runner.os }}-x86_64-${{ hashFiles('Scripts/prepare_lensfun.py') }}
 
       - name: Prepare and verify Lensfun dependency
-        run: python3 Scripts/prepare_lensfun.py
+        run: arch -x86_64 python3 Scripts/prepare_lensfun.py
 
       - name: Build project
-        run: swift build -j 2
+        run: arch -x86_64 swift build -j 2
 
       - name: Run full test suite
-        run: swift test -j 2
+        run: arch -x86_64 swift test -j 2
