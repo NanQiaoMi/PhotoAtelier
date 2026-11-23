@@ -126,10 +126,23 @@ public enum BlemishRemovalEngine {
         try cancellation?.check()
 
         var mediumMaskFloat = [Float](repeating: 0, count: pixelCount)
+        var hasMediumSpots = false
         for index in 0..<pixelCount where mediumResult.mask[index] {
             mediumMaskFloat[index] = 1
+            hasMediumSpots = true
         }
         let softMedium = PortraitRaster.boxBlur(mediumMaskFloat, width: width, height: height, radius: 2)
+        let cleanMediumLow: [Float]
+        if hasMediumSpots {
+            var cleanWeight = weight
+            for index in 0..<pixelCount where mediumResult.mask[index] {
+                cleanWeight[index] = 0
+            }
+            cleanMediumLow = normalizedSkinLowPass(lightness: lightness, weight: cleanWeight,
+                                                   width: width, height: height, radius: mediumConfig.radius)
+        } else {
+            cleanMediumLow = mediumResult.low
+        }
 
         var deltaRed = [Float](repeating: 0, count: pixelCount)
         var deltaGreen = deltaRed
@@ -142,7 +155,7 @@ public enum BlemishRemovalEngine {
             let target: Float
             if medWeight > 0.01 {
                 maskFactor = max(isFine ? 1 : 0, medWeight)
-                target = mediumResult.low[index] + mediumResult.median
+                target = cleanMediumLow[index] + mediumResult.median
             } else if isFine {
                 maskFactor = 1
                 target = fineResult.low[index] + fineResult.median
@@ -218,7 +231,7 @@ public enum BlemishRemovalEngine {
         let threshold = max(config.thresholdFloor, config.madMultiplier * 1.4826 * mad)
         try cancellation?.check()
 
-        var candidates = [Bool](repeating: false, count: pixelCount)
+        var candidateSign = [Int8](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
             guard skin[index] > 0.5, protection[index] < 0.05 else { continue }
             let deviation = residual[index] - median
@@ -230,21 +243,22 @@ public enum BlemishRemovalEngine {
                     if broadDev < -0.60 * max(darkGuardLow[index], 0.05) { continue }
                 }
             }
-            candidates[index] = true
+            candidateSign[index] = deviation < 0 ? -1 : 1
         }
 
         var repairMask = [Bool](repeating: false, count: pixelCount)
         var visited = [Bool](repeating: false, count: pixelCount)
         var component: [Int] = []
         var queue: [Int] = []
-        func enqueue(_ index: Int) {
-            guard !visited[index], candidates[index] else { return }
+        func enqueue(_ index: Int, sign: Int8) {
+            guard !visited[index], candidateSign[index] == sign else { return }
             visited[index] = true
             queue.append(index)
         }
 
-        for start in 0..<pixelCount where candidates[start] && !visited[start] {
+        for start in 0..<pixelCount where candidateSign[start] != 0 && !visited[start] {
             try cancellation?.check()
+            let sign = candidateSign[start]
             component.removeAll(keepingCapacity: true)
             queue.removeAll(keepingCapacity: true)
             queue.append(start)
@@ -256,10 +270,10 @@ public enum BlemishRemovalEngine {
                 component.append(index)
                 let column = index % width
                 let row = index / width
-                if column > 0 { enqueue(index - 1) }
-                if column + 1 < width { enqueue(index + 1) }
-                if row > 0 { enqueue(index - width) }
-                if row + 1 < height { enqueue(index + width) }
+                if column > 0 { enqueue(index - 1, sign: sign) }
+                if column + 1 < width { enqueue(index + 1, sign: sign) }
+                if row > 0 { enqueue(index - width, sign: sign) }
+                if row + 1 < height { enqueue(index + width, sign: sign) }
             }
             guard component.count >= config.minArea,
                   component.count <= config.maxArea else { continue }
