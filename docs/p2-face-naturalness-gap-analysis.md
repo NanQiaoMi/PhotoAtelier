@@ -187,6 +187,16 @@ R5 之后按"能不能达到基础修图软件的效果"这个标准实测，发
 
 **仍未修**：祛瑕对大斑点（半径 ≥5 px）无效这一条 R6 没有动——那是 `BlemishRemoval` 的检测尺寸上限，需要单独一轮（扩大低通半径 + 重新标定连通域面积上限），否则会开始吃掉泪沟、法令纹这类真实结构。
 
+### R7 补丁：双尺度大斑点祛瑕与折痕形状门控（2026-11-23）
+
+- **根因**：`BlemishRemovalEngine` 原采用单尺度盒式低通（半径 `max(4, 0.4% 长边)` ≈ 5 px）与紧缩面积上限（`pixelCount / 500`），半径 ≥ 5 px 的真实痘印/色斑被低通基线部分吞没并超出面积上限，消除率仅 0–9%；简单放大半径与面积又会沿皮肤边缘画光晕，且误伤泪沟、法令纹与皱纹。
+- **修复**（`Sources/PhotoCore/BlemishRemoval.swift`）：
+  1. **双尺度皮肤权重归一化低通**：保留精细尺度（`0.4%` 长边，最小 4 px）处理小粉刺/闭口，新增中等尺度（`1.8%` 长边，最小 14 px）覆盖 5–20 px 痘印/色斑；两个尺度均采用与 R6 磨皮同源的归一化模糊（`boxBlur(L·w) / boxBlur(w)`），确保背景、发丝与保护区不渗入基线、皮肤边界无光晕。
+  2. **旋转不变二阶中心矩细长度门控**：中等尺度连通域除面积（`25...min(pixelCount/80, π·r²·1.35)`）、包围盒跨度（`<= 2.6·r`）与填充度（`>= 0.38`）外，计算像素分布二阶中心矩特征值比 `sqrt(λ1 / λ2) <= 2.3`，从而在任意角度（水平、垂直、45° 斜向）稳定拦截泪沟、法令纹等细长折痕，仅放行圆/椭圆状斑点。
+  3. **软边融合与跨尺度护痣**：中等尺度修补掩码经 2 px 羽化后融合（并严格限制在 `skin > 0.5 && protection < 0.05` 内）；`keepSpots` 在精细尺度同步参照中等尺度基线，避免大号深暗痣边缘残留环状伪影。
+- **兼容性**：配方字段、滑杆控件与版本号（v33）零改动，旧配方行为与皮肤外/保护区逐位不变契约保持不变。
+- **新增单测（3 项）**：`testBlemishRepairRemovesLargerSpotsWithSoftEdgesAndNoBoundaryHalo`、`testBlemishRepairPreservesDiagonalCreasesLikeTearTroughsAndNasolabialFolds`、`testBlemishRepairKeepSpotsStillProtectsLargeDarkMoles`（待远端 CI 全量实测结果补充）。
+
 ---
 
 ## 四、本报告的证据索引

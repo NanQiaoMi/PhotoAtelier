@@ -366,6 +366,229 @@ final class PortraitRetouchTests: XCTestCase {
         return ring - centerLuminance
     }
 
+    private func ringContrast(_ pixels: [Float], width: Int,
+                              center: (column: Int, row: Int),
+                              innerRadius: Int, outerRadius: Int) -> Float {
+        let centerLuminance = luminance(pixels, width: width, column: center.column, row: center.row)
+        let innerSquared = innerRadius * innerRadius
+        let outerSquared = outerRadius * outerRadius
+        let height = pixels.count / (width * 4)
+        var ringSum: Float = 0
+        var ringCount: Float = 0
+        for dy in -outerRadius...outerRadius {
+            for dx in -outerRadius...outerRadius {
+                let distanceSquared = dx * dx + dy * dy
+                guard distanceSquared >= innerSquared, distanceSquared <= outerSquared else { continue }
+                let column = center.column + dx
+                let row = center.row + dy
+                guard column >= 0, column < width, row >= 0, row < height else { continue }
+                ringSum += luminance(pixels, width: width, column: column, row: row)
+                ringCount += 1
+            }
+        }
+        let ring = ringCount > 0 ? ringSum / ringCount : centerLuminance
+        return ring - centerLuminance
+    }
+
+    func testBlemishRepairRemovesLargerSpotsWithSoftEdgesAndNoBoundaryHalo() throws {
+        let width = 512, height = 384
+        let spots: [(column: Int, row: Int, radius: Int)] = [
+            (150, 160, 7),
+            (280, 210, 11),
+            (52, 180, 7)
+        ]
+        let protection = (columns: 400...440, rows: 50...80)
+        let skinColumns = 40...471
+        let skinRows = 32...351
+
+        func isSpot(_ column: Int, _ row: Int) -> Bool {
+            spots.contains { spot in
+                let dx = column - spot.column, dy = row - spot.row
+                return dx * dx + dy * dy <= spot.radius * spot.radius
+            }
+        }
+
+        let source = makeImage(width: width, height: height) { column, row in
+            guard skinColumns.contains(column) && skinRows.contains(row) else {
+                return (0.10, 0.10, 0.10, 1)
+            }
+            if protection.columns.contains(column), protection.rows.contains(row) {
+                return (0.05, 0.03, 0.02, 1)
+            }
+            if isSpot(column, row) { return (0.22, 0.14, 0.10, 1) }
+            let texture = Float(0.004 * sin(Double(column) * 0.9) * cos(Double(row) * 0.7))
+            return (0.55 + texture, 0.30 + texture, 0.20 + texture, 1)
+        }
+        let skinMask = coverageMask(width: width, height: height) { column, row in
+            skinColumns.contains(column) && skinRows.contains(row) ? 1 : 0
+        }
+        let protectionMask = coverageMask(width: width, height: height) { column, row in
+            protection.columns.contains(column) && protection.rows.contains(row) ? 1 : 0
+        }
+        let extent = source.extent
+
+        let before = render(source)
+        let repaired = try PortraitRefinementEngine.apply(
+            source,
+            settings: PortraitRefinementSettings(blemishStrength: 1),
+            faceMasks: [faceSet(extent: extent, skin: skinMask, brows: protectionMask)],
+            context: context
+        ).image
+        let after = render(repaired)
+
+        for spot in spots {
+            let center = (spot.column, spot.row)
+            let contrastBefore = ringContrast(before, width: width, center: center,
+                                              innerRadius: spot.radius + 3, outerRadius: spot.radius + 7)
+            let contrastAfter = ringContrast(after, width: width, center: center,
+                                             innerRadius: spot.radius + 3, outerRadius: spot.radius + 7)
+            XCTAssertLessThan(contrastAfter, contrastBefore * 0.50,
+                              "R7 dual-scale blemish repair must reduce 7-11px spot contrast by >50%")
+        }
+
+        let outsideSkin: (Int, Int) -> Bool = { column, row in
+            !(skinColumns.contains(column) && skinRows.contains(row))
+        }
+        let protectionRegion: (Int, Int) -> Bool = { column, row in
+            protection.columns.contains(column) && protection.rows.contains(row)
+        }
+        let cleanSkinAndBoundary: (Int, Int) -> Bool = { column, row in
+            skinColumns.contains(column) && skinRows.contains(row)
+                && !spots.contains(where: {
+                    abs(column - $0.column) <= $0.radius + 5 && abs(row - $0.row) <= $0.radius + 5
+                })
+                && !(protection.columns.contains(column) && protection.rows.contains(row))
+        }
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: outsideSkin), 0.001,
+                          "non-skin pixels must stay unchanged")
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: protectionRegion), 0.001,
+                          "protection regions must stay unchanged")
+        XCTAssertLessThan(maximumAbsoluteDifference(before, after, width: width, height: height,
+                                                   region: cleanSkinAndBoundary), 0.02,
+                          "normalised low-pass must not create boundary halos or alter clean skin")
+    }
+
+    func testBlemishRepairPreservesDiagonalCreasesLikeTearTroughsAndNasolabialFolds() throws {
+        let width = 512, height = 384
+        let skinColumns = 40...471
+        let skinRows = 32...351
+        let roundSpot = (column: 150, row: 190, radius: 8)
+        let horizontalCrease = (column: 310, row: 120)
+        let diagonalCrease = (column: 310, row: 260)
+
+        func isRoundSpot(_ column: Int, _ row: Int) -> Bool {
+            let dx = column - roundSpot.column, dy = row - roundSpot.row
+            return dx * dx + dy * dy <= roundSpot.radius * roundSpot.radius
+        }
+        func isHorizontalCrease(_ column: Int, _ row: Int) -> Bool {
+            abs(column - horizontalCrease.column) <= 24 && abs(row - horizontalCrease.row) <= 2
+        }
+        func isDiagonalCrease(_ column: Int, _ row: Int) -> Bool {
+            let dx = Double(column - diagonalCrease.column)
+            let dy = Double(row - diagonalCrease.row)
+            let along = abs(dx + dy) / sqrt(2.0)
+            let across = abs(dx - dy) / sqrt(2.0)
+            return along <= 24.0 && across <= 2.5
+        }
+
+        let source = makeImage(width: width, height: height) { column, row in
+            guard skinColumns.contains(column) && skinRows.contains(row) else {
+                return (0.10, 0.10, 0.10, 1)
+            }
+            if isRoundSpot(column, row) { return (0.22, 0.14, 0.10, 1) }
+            if isHorizontalCrease(column, row) || isDiagonalCrease(column, row) {
+                return (0.24, 0.15, 0.11, 1)
+            }
+            let texture = Float(0.004 * sin(Double(column) * 0.9) * cos(Double(row) * 0.7))
+            return (0.55 + texture, 0.30 + texture, 0.20 + texture, 1)
+        }
+        let skinMask = coverageMask(width: width, height: height) { column, row in
+            skinColumns.contains(column) && skinRows.contains(row) ? 1 : 0
+        }
+        let extent = source.extent
+
+        let before = render(source)
+        let repaired = try PortraitRefinementEngine.apply(
+            source,
+            settings: PortraitRefinementSettings(blemishStrength: 1),
+            faceMasks: [faceSet(extent: extent, skin: skinMask)],
+            context: context
+        ).image
+        let after = render(repaired)
+
+        let spotCenter = (roundSpot.column, roundSpot.row)
+        let spotBefore = ringContrast(before, width: width, center: spotCenter,
+                                      innerRadius: roundSpot.radius + 3, outerRadius: roundSpot.radius + 7)
+        let spotAfter = ringContrast(after, width: width, center: spotCenter,
+                                     innerRadius: roundSpot.radius + 3, outerRadius: roundSpot.radius + 7)
+        XCTAssertLessThan(spotAfter, spotBefore * 0.50,
+                          "round 8px blemish must still be removed")
+
+        let horizBefore = luminance(before, width: width, column: horizontalCrease.column, row: horizontalCrease.row + 10)
+            - luminance(before, width: width, column: horizontalCrease.column, row: horizontalCrease.row)
+        let horizAfter = luminance(after, width: width, column: horizontalCrease.column, row: horizontalCrease.row + 10)
+            - luminance(after, width: width, column: horizontalCrease.column, row: horizontalCrease.row)
+        XCTAssertGreaterThan(horizAfter, horizBefore * 0.85,
+                             "horizontal elongated crease must be preserved")
+
+        let diagBefore = luminance(before, width: width, column: diagonalCrease.column - 10, row: diagonalCrease.row + 10)
+            - luminance(before, width: width, column: diagonalCrease.column, row: diagonalCrease.row)
+        let diagAfter = luminance(after, width: width, column: diagonalCrease.column - 10, row: diagonalCrease.row + 10)
+            - luminance(after, width: width, column: diagonalCrease.column, row: diagonalCrease.row)
+        XCTAssertGreaterThan(diagAfter, diagBefore * 0.85,
+                             "45-degree diagonal crease (nasolabial/tear-trough proxy) must be preserved")
+    }
+
+    func testBlemishRepairKeepSpotsStillProtectsLargeDarkMoles() throws {
+        let width = 512, height = 384
+        let skinColumns = 40...471
+        let skinRows = 32...351
+        let mole = (column: 160, row: 180, radius: 6)
+        let spot = (column: 300, row: 180, radius: 6)
+
+        func inside(_ column: Int, _ row: Int, _ target: (column: Int, row: Int, radius: Int)) -> Bool {
+            let dx = column - target.column, dy = row - target.row
+            return dx * dx + dy * dy <= target.radius * target.radius
+        }
+
+        let source = makeImage(width: width, height: height) { column, row in
+            guard skinColumns.contains(column) && skinRows.contains(row) else {
+                return (0.10, 0.10, 0.10, 1)
+            }
+            if inside(column, row, mole) { return (0.05, 0.035, 0.028, 1) }
+            if inside(column, row, spot) { return (0.22, 0.14, 0.10, 1) }
+            let texture = Float(0.004 * sin(Double(column) * 0.9) * cos(Double(row) * 0.7))
+            return (0.55 + texture, 0.30 + texture, 0.20 + texture, 1)
+        }
+        let skinMask = coverageMask(width: width, height: height) { column, row in
+            skinColumns.contains(column) && skinRows.contains(row) ? 1 : 0
+        }
+        let extent = source.extent
+
+        let before = render(source)
+        let repaired = try PortraitRefinementEngine.apply(
+            source,
+            settings: PortraitRefinementSettings(blemishStrength: 1, keepSpots: true),
+            faceMasks: [faceSet(extent: extent, skin: skinMask)],
+            context: context
+        ).image
+        let after = render(repaired)
+
+        let moleDelta = abs(luminance(after, width: width, column: mole.column, row: mole.row)
+            - luminance(before, width: width, column: mole.column, row: mole.row))
+        XCTAssertLessThan(moleDelta, 0.01, "keepSpots must protect 6px dark moles across both scales")
+
+        let spotCenter = (spot.column, spot.row)
+        let spotBefore = ringContrast(before, width: width, center: spotCenter,
+                                      innerRadius: spot.radius + 3, outerRadius: spot.radius + 7)
+        let spotAfter = ringContrast(after, width: width, center: spotCenter,
+                                     innerRadius: spot.radius + 3, outerRadius: spot.radius + 7)
+        XCTAssertLessThan(spotAfter, spotBefore * 0.50,
+                          "regular 6px blemish must still be removed while keepSpots is on")
+    }
+
     // MARK: - Frequency separation
 
     func testFrequencySeparationControlsAreIndependentBoundedAndSkinOnly() throws {
