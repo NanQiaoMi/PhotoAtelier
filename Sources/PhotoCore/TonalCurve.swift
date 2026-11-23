@@ -102,7 +102,9 @@ internal enum TonalCurveEngine {
                                       slope4567.z, slope4567.w);
         } else {
             // Constant endpoint exposure gain above the extended-white knot.
-            mappedLuminance = x * (output4567.w / x7);
+            // Multiply by 1/16 (exact in IEEE 754) to avoid the software JIT's
+            // approximate reciprocal on division by x7 (16.0).
+            mappedLuminance = x * (output4567.w * 0.0625);
         }
 
         if (!(mappedLuminance >= -3.402823e+38) || !(mappedLuminance <= 3.402823e+38)) {

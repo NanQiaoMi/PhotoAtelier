@@ -22,12 +22,13 @@ import XCTest
 final class FaceDetectionGatingTests: XCTestCase {
 
     private let linearColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
-    private let context = CIContext(options: [
+    private static let sharedContext = CIContext(options: [
         .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
         .outputColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
         .workingFormat: CIFormat.RGBAf,
         .cacheIntermediates: false
     ])
+    private var context: CIContext { Self.sharedContext }
 
     // MARK: - Fixtures
 

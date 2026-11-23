@@ -5,7 +5,8 @@ import XCTest
 @testable import PhotoCore
 
 final class StyleWorkflowTests: XCTestCase {
-    private let engine = PhotoEngine()
+    private static let sharedEngine = PhotoEngine()
+    private var engine: PhotoEngine { Self.sharedEngine }
     private let linear = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
 
     func testLegacySettingsAndNeutralEffectsKeepTheirPixels() throws {

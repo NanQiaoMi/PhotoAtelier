@@ -5,7 +5,8 @@ import CoreGraphics
 
 final class EyeTeethRefinementTests: XCTestCase {
 
-    private let context = CIContext(options: [.workingColorSpace: NSNull()])
+    private static let sharedContext = CIContext(options: [.workingColorSpace: NSNull()])
+    private var context: CIContext { Self.sharedContext }
     private let linearColorSpace = CGColorSpace(name: CGColorSpace.linearSRGB)!
 
     // MARK: - Test Fixture Builders
