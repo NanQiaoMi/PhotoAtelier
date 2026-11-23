@@ -2,17 +2,25 @@ import CoreGraphics
 import CoreImage
 import Foundation
 
-/// Repairs small blemishes inside a soft skin matte.
+/// Repairs small and medium blemishes inside a soft skin matte.
 ///
-/// v1 algorithm (deterministic, heuristic):
+/// R7 dual-scale algorithm (deterministic, heuristic):
 /// 1. rasterize the image and masks to a bounded working raster in linear sRGB;
-/// 2. band-pass the luminance with a box low-pass, then take the residual;
-/// 3. estimate the residual median/MAD on skin pixels and flag residual outliers
-///    (`3.2 * 1.4826 * MAD`, with an absolute floor);
-/// 4. group outliers into 4-connected components and keep only small components
-///    (a partial blemish, not a lighting edge or texture region);
-/// 5. replace the high-frequency defect with the local low-frequency baseline,
-///    blended by `strength x skin coverage`, ratio-capped so colour is preserved.
+/// 2. compute skin-weighted normalised box low-pass baselines at two scales:
+///    - fine scale (`~0.4%` of long edge, min 4 px) for pores/small spots;
+///    - medium scale (`~1.8%` of long edge, min 14 px) for 5-20 px blemishes;
+///    normalised blurring (`boxBlur(L*w)/boxBlur(w)`) prevents background, hair,
+///    or protected features from bleeding into the skin baseline as halos;
+/// 3. estimate each scale's residual median/MAD on skin pixels and flag
+///    outliers (`3.2/3.0 * 1.4826 * MAD`, with per-scale floors);
+/// 4. group outliers into 4-connected components and filter by area, bounding
+///    span, fill factor, and rotation-invariant second-moment elongation
+///    (`sqrt(lambda1 / lambda2) <= 2.3` on medium scale) so circular/oval
+///    blemishes pass while horizontal or diagonal creases (tear troughs,
+///    nasolabial folds, wrinkles) are preserved;
+/// 5. soften the medium mask with a 2 px feather and replace defects toward the
+///    corresponding low-frequency baseline, blended by `strength x skin`,
+///    ratio-capped so colour is preserved.
 ///
 /// Protection: pixels under `protectionMask` (brows/lips/teeth/eyes) are never
 /// sampled or repaired. `keepSpots` preserves very dark compact outliers (moles).
@@ -22,6 +30,23 @@ public enum BlemishRemovalEngine {
     /// Longest edge of the working raster. Blemishes need more detail than the
     /// 512px semantic matte, so this stage works at up to 1280 pixels.
     public static let maximumWorkDimension = 1280
+
+    private struct ScaleConfig {
+        let radius: Int
+        let thresholdFloor: Float
+        let madMultiplier: Float
+        let minArea: Int
+        let maxArea: Int
+        let maxSpan: Int
+        let minFill: Double
+        let maxElongation: Double
+    }
+
+    private struct ScaleResult {
+        let low: [Float]
+        let median: Float
+        let mask: [Bool]
+    }
 
     public static func apply(_ image: CIImage,
                              strength: Double,
@@ -44,20 +69,140 @@ public enum BlemishRemovalEngine {
         let protection = raster.coverages.count > 1
             ? raster.coverages[1] : [Float](repeating: 0, count: pixelCount)
 
+        var weight = [Float](repeating: 0, count: pixelCount)
         var lightness = [Float](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
+            let w = max(0, min(1, skin[index])) * (1 - max(0, min(1, protection[index])))
+            weight[index] = w
             lightness[index] = PortraitRaster.luminance(raster.red[index],
                                                         raster.green[index],
                                                         raster.blue[index])
         }
-        let blurRadius = max(4, Int((0.004 * Double(max(width, height))).rounded()))
-        let low = PortraitRaster.boxBlur(lightness, width: width, height: height, radius: blurRadius)
+
+        let longEdge = Double(max(width, height))
+        let fineConfig = ScaleConfig(
+            radius: max(4, Int((0.004 * longEdge).rounded())),
+            thresholdFloor: 0.0025,
+            madMultiplier: 3.2,
+            minArea: 3,
+            maxArea: max(200, pixelCount / 500),
+            maxSpan: Int.max,
+            minFill: 0.35,
+            maxElongation: .infinity
+        )
+
+        let maxBlobRadius = max(12.0, 0.018 * longEdge)
+        let mediumConfig = ScaleConfig(
+            radius: max(14, Int((0.018 * longEdge).rounded())),
+            thresholdFloor: 0.004,
+            madMultiplier: 3.0,
+            minArea: 25,
+            maxArea: min(pixelCount / 80,
+                         Int((Double.pi * maxBlobRadius * maxBlobRadius * 1.35).rounded())),
+            maxSpan: Int((maxBlobRadius * 2.6).rounded()),
+            minFill: 0.38,
+            maxElongation: 2.3
+        )
+
+        guard let mediumResult = try detectScale(
+            lightness: lightness, weight: weight, skin: skin, protection: protection,
+            width: width, height: height, config: mediumConfig,
+            keepSpots: keepSpots, darkGuardLow: nil, darkGuardMedian: 0,
+            cancellation: cancellation
+        ) else {
+            return image
+        }
+        try cancellation?.check()
+
+        guard let fineResult = try detectScale(
+            lightness: lightness, weight: weight, skin: skin, protection: protection,
+            width: width, height: height, config: fineConfig,
+            keepSpots: keepSpots,
+            darkGuardLow: mediumResult.low, darkGuardMedian: mediumResult.median,
+            cancellation: cancellation
+        ) else {
+            return image
+        }
+        try cancellation?.check()
+
+        var mediumMaskFloat = [Float](repeating: 0, count: pixelCount)
+        for index in 0..<pixelCount where mediumResult.mask[index] {
+            mediumMaskFloat[index] = 1
+        }
+        let softMedium = PortraitRaster.boxBlur(mediumMaskFloat, width: width, height: height, radius: 2)
+
+        var deltaRed = [Float](repeating: 0, count: pixelCount)
+        var deltaGreen = deltaRed
+        var deltaBlue = deltaRed
+        for index in 0..<pixelCount {
+            guard skin[index] > 0.5, protection[index] < 0.05 else { continue }
+            let medWeight = softMedium[index]
+            let isFine = fineResult.mask[index]
+            let maskFactor: Float
+            let target: Float
+            if medWeight > 0.01 {
+                maskFactor = max(isFine ? 1 : 0, medWeight)
+                target = mediumResult.low[index] + mediumResult.median
+            } else if isFine {
+                maskFactor = 1
+                target = fineResult.low[index] + fineResult.median
+            } else {
+                continue
+            }
+
+            let current = lightness[index]
+            guard current > 0.002 else { continue }
+            let ratio = Double(min(2.5, max(0.60, target / current)))
+            let blend = Double(strength) * Double(min(1, skin[index])) * Double(maskFactor)
+            deltaRed[index] = Float(min(0.20, max(-0.20, Double(raster.red[index]) * (ratio - 1) * blend)))
+            deltaGreen[index] = Float(min(0.20, max(-0.20, Double(raster.green[index]) * (ratio - 1) * blend)))
+            deltaBlue[index] = Float(min(0.20, max(-0.20, Double(raster.blue[index]) * (ratio - 1) * blend)))
+        }
+
+        let delta = PortraitRaster.deltaImage(red: deltaRed, green: deltaGreen, blue: deltaBlue,
+                                              width: width, height: height, extent: extent)
+        return PortraitRaster.add(delta: delta, to: image)
+    }
+
+    private static func normalizedSkinLowPass(lightness: [Float],
+                                              weight: [Float],
+                                              width: Int,
+                                              height: Int,
+                                              radius: Int) -> [Float] {
+        let pixelCount = lightness.count
+        var weighted = [Float](repeating: 0, count: pixelCount)
+        for index in 0..<pixelCount {
+            weighted[index] = lightness[index] * weight[index]
+        }
+        let numerator = PortraitRaster.boxBlur(weighted, width: width, height: height, radius: radius)
+        let denominator = PortraitRaster.boxBlur(weight, width: width, height: height, radius: radius)
+        var result = [Float](repeating: 0, count: pixelCount)
+        for index in 0..<pixelCount {
+            let coverage = denominator[index]
+            result[index] = coverage > 0.02 ? (numerator[index] / coverage) : lightness[index]
+        }
+        return result
+    }
+
+    private static func detectScale(lightness: [Float],
+                                    weight: [Float],
+                                    skin: [Float],
+                                    protection: [Float],
+                                    width: Int,
+                                    height: Int,
+                                    config: ScaleConfig,
+                                    keepSpots: Bool,
+                                    darkGuardLow: [Float]?,
+                                    darkGuardMedian: Float,
+                                    cancellation: CancellationToken?) throws -> ScaleResult? {
+        let pixelCount = lightness.count
+        let low = normalizedSkinLowPass(lightness: lightness, weight: weight,
+                                        width: width, height: height, radius: config.radius)
         var residual = [Float](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
             residual[index] = lightness[index] - low[index]
         }
 
-        // Robust residual statistics sampled on skin pixels only.
         let sampleStride = max(1, pixelCount / 20000)
         var samples: [Float] = []
         samples.reserveCapacity(min(pixelCount, 20000))
@@ -65,12 +210,12 @@ public enum BlemishRemovalEngine {
         where skin[index] > 0.5 && protection[index] < 0.05 {
             samples.append(residual[index])
         }
-        guard samples.count >= 64 else { return image }
+        guard samples.count >= 64 else { return nil }
         samples.sort()
         let median = samples[samples.count / 2]
         let deviations = samples.map { abs($0 - median) }.sorted()
         let mad = deviations[deviations.count / 2]
-        let threshold = max(Float(0.0025), 3.2 * 1.4826 * mad)
+        let threshold = max(config.thresholdFloor, config.madMultiplier * 1.4826 * mad)
         try cancellation?.check()
 
         var candidates = [Bool](repeating: false, count: pixelCount)
@@ -78,9 +223,13 @@ public enum BlemishRemovalEngine {
             guard skin[index] > 0.5, protection[index] < 0.05 else { continue }
             let deviation = residual[index] - median
             guard abs(deviation) > threshold else { continue }
-            // keepSpots: preserve spots more than ~45% darker than the local
-            // skin baseline (moles/freckles rather than small blemishes).
-            if keepSpots && deviation < -0.60 * max(low[index], 0.05) { continue }
+            if keepSpots {
+                if deviation < -0.60 * max(low[index], 0.05) { continue }
+                if let darkGuardLow {
+                    let broadDev = lightness[index] - darkGuardLow[index] - darkGuardMedian
+                    if broadDev < -0.60 * max(darkGuardLow[index], 0.05) { continue }
+                }
+            }
             candidates[index] = true
         }
 
@@ -88,14 +237,12 @@ public enum BlemishRemovalEngine {
         var visited = [Bool](repeating: false, count: pixelCount)
         var component: [Int] = []
         var queue: [Int] = []
-        // A blemish plus its low-pass halo is larger than the raw defect; lighting
-        // gradients and texture regions exceed this relative area and are rejected.
-        let maximumArea = max(200, pixelCount / 500)
         func enqueue(_ index: Int) {
             guard !visited[index], candidates[index] else { return }
             visited[index] = true
             queue.append(index)
         }
+
         for start in 0..<pixelCount where candidates[start] && !visited[start] {
             try cancellation?.check()
             component.removeAll(keepingCapacity: true)
@@ -114,12 +261,12 @@ public enum BlemishRemovalEngine {
                 if row > 0 { enqueue(index - width) }
                 if row + 1 < height { enqueue(index + width) }
             }
-            guard component.count >= 3, component.count <= maximumArea else { continue }
-            // Reject line/ring-like structures (boundaries between protection
-            // regions or between skin and background): real blemishes are
-            // blob-shaped, so require a compact bounding-box fill.
+            guard component.count >= config.minArea,
+                  component.count <= config.maxArea else { continue }
+
             var minimumColumn = width, maximumColumn = 0
             var minimumRow = height, maximumRow = 0
+            var sumX = 0.0, sumY = 0.0
             for index in component {
                 let column = index % width
                 let row = index / width
@@ -127,28 +274,43 @@ public enum BlemishRemovalEngine {
                 maximumColumn = max(maximumColumn, column)
                 minimumRow = min(minimumRow, row)
                 maximumRow = max(maximumRow, row)
+                sumX += Double(column)
+                sumY += Double(row)
             }
-            let boxArea = (maximumColumn - minimumColumn + 1) * (maximumRow - minimumRow + 1)
+            let boxWidth = maximumColumn - minimumColumn + 1
+            let boxHeight = maximumRow - minimumRow + 1
+            guard boxWidth <= config.maxSpan, boxHeight <= config.maxSpan else { continue }
+            let boxArea = boxWidth * boxHeight
             let fill = Double(component.count) / Double(max(1, boxArea))
-            guard fill >= 0.35 else { continue }
+            guard fill >= config.minFill else { continue }
+
+            if config.maxElongation.isFinite {
+                let count = Double(component.count)
+                let meanX = sumX / count
+                let meanY = sumY / count
+                var sumXX = 0.0, sumYY = 0.0, sumXY = 0.0
+                for index in component {
+                    let dx = Double(index % width) - meanX
+                    let dy = Double(index / width) - meanY
+                    sumXX += dx * dx
+                    sumYY += dy * dy
+                    sumXY += dx * dy
+                }
+                let mu20 = sumXX / count + (1.0 / 12.0)
+                let mu02 = sumYY / count + (1.0 / 12.0)
+                let mu11 = sumXY / count
+                let traceHalf = 0.5 * (mu20 + mu02)
+                let diffHalf = 0.5 * (mu20 - mu02)
+                let root = sqrt(diffHalf * diffHalf + mu11 * mu11)
+                let lambda1 = traceHalf + root
+                let lambda2 = max(1e-6, traceHalf - root)
+                let elongation = sqrt(lambda1 / lambda2)
+                guard elongation <= config.maxElongation else { continue }
+            }
+
             for index in component { repairMask[index] = true }
         }
 
-        var deltaRed = [Float](repeating: 0, count: pixelCount)
-        var deltaGreen = deltaRed
-        var deltaBlue = deltaRed
-        for index in 0..<pixelCount where repairMask[index] {
-            let current = lightness[index]
-            guard current > 0.002 else { continue }
-            let target = low[index] + median
-            let ratio = Double(min(2.5, max(0.60, target / current)))
-            let weight = Float(Double(strength) * Double(min(1, skin[index])))
-            deltaRed[index] = Float(min(0.20, max(-0.20, Double(raster.red[index]) * (ratio - 1) * Double(weight))))
-            deltaGreen[index] = Float(min(0.20, max(-0.20, Double(raster.green[index]) * (ratio - 1) * Double(weight))))
-            deltaBlue[index] = Float(min(0.20, max(-0.20, Double(raster.blue[index]) * (ratio - 1) * Double(weight))))
-        }
-        let delta = PortraitRaster.deltaImage(red: deltaRed, green: deltaGreen, blue: deltaBlue,
-                                              width: width, height: height, extent: extent)
-        return PortraitRaster.add(delta: delta, to: image)
+        return ScaleResult(low: low, median: median, mask: repairMask)
     }
 }
