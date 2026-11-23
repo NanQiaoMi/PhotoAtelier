@@ -88,7 +88,7 @@ public enum BlemishRemovalEngine {
             maxArea: max(200, pixelCount / 500),
             maxSpan: Int.max,
             minFill: 0.35,
-            maxElongation: .infinity
+            maxElongation: 2.3
         )
 
         let maxBlobRadius = max(12.0, 0.018 * longEdge)
@@ -298,7 +298,7 @@ public enum BlemishRemovalEngine {
             let fill = Double(component.count) / Double(max(1, boxArea))
             guard fill >= config.minFill else { continue }
 
-            if config.maxElongation.isFinite {
+            if config.maxElongation.isFinite && component.count >= 12 {
                 let count = Double(component.count)
                 let meanX = sumX / count
                 let meanY = sumY / count
