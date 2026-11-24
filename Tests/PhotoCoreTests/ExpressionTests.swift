@@ -495,8 +495,9 @@ final class ExpressionTests: XCTestCase {
             for row in 0..<height {
                 for col in 0..<width {
                     let i = (row * width + col) * 4
-                    // Place an HDR highlight pixel outside the face (bottom-left corner in CI coords).
-                    if col < 40 && row < 40 {
+                    // Place an HDR highlight pixel outside the face (bottom-left corner in CI coords;
+                    // bitmap row 0 is the top of the image).
+                    if col < 40 && row >= height - 40 {
                         data[i] = 1.40; data[i + 1] = 1.40; data[i + 2] = 1.40; data[i + 3] = 1.0
                     } else {
                         data[i] = lipRGB.0; data[i + 1] = lipRGB.1; data[i + 2] = lipRGB.2; data[i + 3] = 1.0
