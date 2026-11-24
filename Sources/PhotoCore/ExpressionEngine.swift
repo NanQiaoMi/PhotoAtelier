@@ -39,9 +39,9 @@ public enum ExpressionEngine {
         float hl = g.r * params.x;
         float sh = g.g * params.y;
 
-        // Specular highlight: gentle pearlescent luminance boost
+        // Specular highlight: headroom-attenuated pearlescent luminance boost
         if (hl > 0.001) {
-            col += vec3(hl * 0.16);
+            col += (vec3(1.0) - min(col, vec3(1.0))) * (hl * 0.16);
         }
         // Micro-shadow: subtle deepening of labiomental groove
         if (sh > 0.001) {
@@ -156,9 +156,21 @@ public enum ExpressionEngine {
 
         for face in faces {
             guard let geometry = ExpressionGeometry(face: face) else { continue }
-            addFaceExpression(to: &field, geometry: geometry, settings: settings)
+            var faceField = WarpField(columns: resolution, rows: resolution)
+            addFaceExpression(to: &faceField, geometry: geometry, settings: settings)
+            // Background protection around each face so multi-person fields preserve
+            // every face while clamping displacements outside the face to zero.
+            let protectedRect = geometry.boundingBox.insetBy(
+                dx: -geometry.boundingBox.width * 0.15,
+                dy: -geometry.boundingBox.height * 0.15
+            )
+            let feather = max(Double(geometry.boundingBox.width),
+                              Double(geometry.boundingBox.height)) * 0.20
+            faceField.attenuateOutside(rect: protectedRect, feather: feather)
+            field.add(faceField)
         }
 
+        field.smooth(passes: 2)
         field.clampMagnitude(WarpField.maximumDisplacement)
         return field
     }
@@ -170,6 +182,9 @@ public enum ExpressionEngine {
     ) {
         let mw = geometry.mouthWidth
         let mh = geometry.mouthHeight
+        func localVector(_ right: Double, _ up: Double) -> SIMD2<Double> {
+            right * geometry.rightAxis + up * geometry.upAxis
+        }
 
         // 1. 微笑嘴角与嘴角上扬 (Smile Degree)
         // R3: a smile that is already in the photo must not be pushed further.
@@ -184,21 +199,21 @@ public enum ExpressionEngine {
             let cornerRadiusX = mw * 0.35
             let cornerRadiusY = mh * 0.65
 
-            // Left commissure: upward (+Y) and outward (-X)
+            // Left commissure: upward (+upAxis) and outward (-rightAxis)
             field.addGaussian(
                 center: geometry.leftCorner,
                 radiusX: cornerRadiusX,
                 radiusY: cornerRadiusY,
-                displacement: SIMD2<Double>(-outAmount, upAmount),
+                displacement: localVector(-outAmount, upAmount),
                 falloff: .gaussian
             )
 
-            // Right commissure: upward (+Y) and outward (+X)
+            // Right commissure: upward (+upAxis) and outward (+rightAxis)
             field.addGaussian(
                 center: geometry.rightCorner,
                 radiusX: cornerRadiusX,
                 radiusY: cornerRadiusY,
-                displacement: SIMD2<Double>(outAmount, upAmount),
+                displacement: localVector(outAmount, upAmount),
                 falloff: .gaussian
             )
 
@@ -211,14 +226,14 @@ public enum ExpressionEngine {
                 center: leftMid,
                 radiusX: mw * 0.25,
                 radiusY: mh * 0.40,
-                displacement: SIMD2<Double>(-outAmount * 0.30, upAmount * 0.35),
+                displacement: localVector(-outAmount * 0.30, upAmount * 0.35),
                 falloff: .gaussian
             )
             field.addGaussian(
                 center: rightMid,
                 radiusX: mw * 0.25,
                 radiusY: mh * 0.40,
-                displacement: SIMD2<Double>(outAmount * 0.30, upAmount * 0.35),
+                displacement: localVector(outAmount * 0.30, upAmount * 0.35),
                 falloff: .gaussian
             )
         }
@@ -233,30 +248,33 @@ public enum ExpressionEngine {
                 center: geometry.leftCorner,
                 radiusX: cornerRadiusX,
                 radiusY: cornerRadiusY,
-                displacement: SIMD2<Double>(-widthDelta, 0),
+                displacement: localVector(-widthDelta, 0),
                 falloff: .gaussian
             )
             field.addGaussian(
                 center: geometry.rightCorner,
                 radiusX: cornerRadiusX,
                 radiusY: cornerRadiusY,
-                displacement: SIMD2<Double>(widthDelta, 0),
+                displacement: localVector(widthDelta, 0),
                 falloff: .gaussian
             )
         }
 
         // 3. 唇角对称性校准 (Lip Corner Symmetry)
         if settings.lipSymmetry > 0.0001 {
-            let targetY = (geometry.leftCorner.y + geometry.rightCorner.y) * 0.5
-            let leftDy = (targetY - geometry.leftCorner.y) * settings.lipSymmetry
-            let rightDy = (targetY - geometry.rightCorner.y) * settings.lipSymmetry
+            let up = geometry.upAxis
+            let leftProj = Double(geometry.leftCorner.x) * up.x + Double(geometry.leftCorner.y) * up.y
+            let rightProj = Double(geometry.rightCorner.x) * up.x + Double(geometry.rightCorner.y) * up.y
+            let targetProj = (leftProj + rightProj) * 0.5
+            let leftDy = (targetProj - leftProj) * settings.lipSymmetry
+            let rightDy = (targetProj - rightProj) * settings.lipSymmetry
 
             if abs(leftDy) > 0.00005 {
                 field.addGaussian(
                     center: geometry.leftCorner,
                     radiusX: mw * 0.30,
                     radiusY: mh * 0.55,
-                    displacement: SIMD2<Double>(0, leftDy),
+                    displacement: localVector(0, leftDy),
                     falloff: .gaussian
                 )
             }
@@ -265,7 +283,7 @@ public enum ExpressionEngine {
                     center: geometry.rightCorner,
                     radiusX: mw * 0.30,
                     radiusY: mh * 0.55,
-                    displacement: SIMD2<Double>(0, rightDy),
+                    displacement: localVector(0, rightDy),
                     falloff: .gaussian
                 )
             }
@@ -273,15 +291,22 @@ public enum ExpressionEngine {
 
         // 4. 幼态人中缩短 (Philtrum Shortening)
         if settings.philtrumShortening > 0.0001 {
-            let subnasaleY = geometry.subnasale?.y ?? (geometry.cupidBow.y + mh * 0.8)
-            let philtrumLength = max(0.008, subnasaleY - geometry.cupidBow.y)
+            let up = geometry.upAxis
+            let philtrumLength: Double
+            if let subnasale = geometry.subnasale {
+                let subU = Double(subnasale.x) * up.x + Double(subnasale.y) * up.y
+                let bowU = Double(geometry.cupidBow.x) * up.x + Double(geometry.cupidBow.y) * up.y
+                philtrumLength = max(0.008, subU - bowU)
+            } else {
+                philtrumLength = mh * 0.8
+            }
             let lift = philtrumLength * 0.28 * settings.philtrumShortening
 
             field.addGaussian(
                 center: geometry.cupidBow,
                 radiusX: mw * 0.35,
                 radiusY: philtrumLength * 0.75,
-                displacement: SIMD2<Double>(0, lift),
+                displacement: localVector(0, lift),
                 falloff: .gaussian
             )
         }
@@ -293,7 +318,7 @@ public enum ExpressionEngine {
                 center: geometry.upperVermilionCenter,
                 radiusX: mw * 0.40,
                 radiusY: mh * 0.45,
-                displacement: SIMD2<Double>(0, upperLift),
+                displacement: localVector(0, upperLift),
                 falloff: .gaussian
             )
         }
@@ -305,7 +330,7 @@ public enum ExpressionEngine {
                 center: geometry.lowerVermilionCenter,
                 radiusX: mw * 0.45,
                 radiusY: mh * 0.50,
-                displacement: SIMD2<Double>(0, lowerDrop),
+                displacement: localVector(0, lowerDrop),
                 falloff: .gaussian
             )
         }
@@ -415,6 +440,11 @@ public struct ExpressionGeometry {
     public let lowerVermilionCenter: CGPoint
     public let lowerVermilionBottom: CGPoint
     public let labiomentalGroove: CGPoint
+    /// Local head-aligned basis vectors (`rightAxis` points left-to-right eye,
+    /// `upAxis` is orthogonal toward the forehead). Falls back to image axes
+    /// when eye landmarks are absent.
+    public let rightAxis: SIMD2<Double>
+    public let upAxis: SIMD2<Double>
     /// R3 (2026-11-14): how much the mouth is *already* smiling, measured from
     /// the photo's own lip contour - the corner height above the lip centre.
     /// `smileDegree` is a request to lift the corners; on a mouth that is
@@ -427,54 +457,98 @@ public struct ExpressionGeometry {
         let pts = face.outerLips.filter { $0.x.isFinite && $0.y.isFinite }
         guard pts.count >= 3 else { return nil }
 
-        guard let minXPt = pts.min(by: { $0.x < $1.x }),
-              let maxXPt = pts.max(by: { $0.x < $1.x }) else {
+        let leftEyePts = face.leftEye.filter { $0.x.isFinite && $0.y.isFinite }
+        let rightEyePts = face.rightEye.filter { $0.x.isFinite && $0.y.isFinite }
+        let rAxis: SIMD2<Double>
+        let uAxis: SIMD2<Double>
+        if !leftEyePts.isEmpty, !rightEyePts.isEmpty {
+            let leftCenter = CGPoint(
+                x: leftEyePts.map(\.x).reduce(0, +) / CGFloat(leftEyePts.count),
+                y: leftEyePts.map(\.y).reduce(0, +) / CGFloat(leftEyePts.count)
+            )
+            let rightCenter = CGPoint(
+                x: rightEyePts.map(\.x).reduce(0, +) / CGFloat(rightEyePts.count),
+                y: rightEyePts.map(\.y).reduce(0, +) / CGFloat(rightEyePts.count)
+            )
+            var dx = Double(rightCenter.x - leftCenter.x)
+            var dy = Double(rightCenter.y - leftCenter.y)
+            let len = (dx * dx + dy * dy).squareRoot()
+            if len > 0.005 {
+                if dx < 0 {
+                    dx = -dx
+                    dy = -dy
+                }
+                rAxis = SIMD2<Double>(dx / len, dy / len)
+                uAxis = SIMD2<Double>(-rAxis.y, rAxis.x)
+            } else {
+                rAxis = SIMD2<Double>(1, 0)
+                uAxis = SIMD2<Double>(0, 1)
+            }
+        } else {
+            rAxis = SIMD2<Double>(1, 0)
+            uAxis = SIMD2<Double>(0, 1)
+        }
+        self.rightAxis = rAxis
+        self.upAxis = uAxis
+
+        let projR: (CGPoint) -> Double = { Double($0.x) * rAxis.x + Double($0.y) * rAxis.y }
+        let projU: (CGPoint) -> Double = { Double($0.x) * uAxis.x + Double($0.y) * uAxis.y }
+
+        guard let minRPt = pts.min(by: { projR($0) < projR($1) }),
+              let maxRPt = pts.max(by: { projR($0) < projR($1) }) else {
             return nil
         }
 
-        self.leftCorner = minXPt
-        self.rightCorner = maxXPt
+        self.leftCorner = minRPt
+        self.rightCorner = maxRPt
         self.boundingBox = face.boundingBox
 
-        let center = CGPoint(x: (minXPt.x + maxXPt.x) * 0.5,
-                             y: (minXPt.y + maxXPt.y) * 0.5)
+        let center = CGPoint(x: (minRPt.x + maxRPt.x) * 0.5,
+                             y: (minRPt.y + maxRPt.y) * 0.5)
         self.mouthCenter = center
 
-        let w = max(0.005, Double(maxXPt.x - minXPt.x))
-        let allY = pts.map(\.y)
-        let minY = allY.min() ?? (center.y - 0.01)
-        let maxY = allY.max() ?? (center.y + 0.01)
-        let h = max(0.003, Double(maxY - minY))
+        let w = max(0.005, projR(maxRPt) - projR(minRPt))
+        let allU = pts.map(projU)
+        let centerU = projU(center)
+        let minU = allU.min() ?? (centerU - 0.01)
+        let maxU = allU.max() ?? (centerU + 0.01)
+        let h = max(0.003, maxU - minU)
 
         self.mouthWidth = w
         self.mouthHeight = h
 
-        // Cupid's bow: highest point near horizontal center
-        let centralPoints = pts.filter { abs($0.x - center.x) <= CGFloat(w * 0.30) }
-        let cBow = centralPoints.max(by: { $0.y < $1.y }) ?? pts.max(by: { $0.y < $1.y })!
+        // Cupid's bow: highest point along head upAxis near horizontal center
+        let centerR = projR(center)
+        let centralPoints = pts.filter { abs(projR($0) - centerR) <= w * 0.30 }
+        let cBow = centralPoints.max(by: { projU($0) < projU($1) }) ?? pts.max(by: { projU($0) < projU($1) })!
         self.cupidBow = cBow
 
-        // Subnasale: lowest point on nose outline
+        // Subnasale: lowest point on nose outline along head upAxis
         let nosePts = face.nose.filter { $0.x.isFinite && $0.y.isFinite }
-        if let lowestNose = nosePts.min(by: { $0.y < $1.y }) {
+        if let lowestNose = nosePts.min(by: { projU($0) < projU($1) }) {
             self.subnasale = lowestNose
         } else {
             self.subnasale = nil
         }
 
-        // Lower vermilion bottom: lowest point near horizontal center
-        let lBottom = centralPoints.min(by: { $0.y < $1.y }) ?? pts.min(by: { $0.y < $1.y })!
+        // Lower vermilion bottom: lowest point along head upAxis near horizontal center
+        let lBottom = centralPoints.min(by: { projU($0) < projU($1) }) ?? pts.min(by: { projU($0) < projU($1) })!
         self.lowerVermilionBottom = lBottom
 
         self.upperVermilionCenter = CGPoint(x: center.x, y: (cBow.y + center.y) * 0.5)
         self.lowerVermilionCenter = CGPoint(x: center.x, y: (lBottom.y + center.y) * 0.5)
-        self.labiomentalGroove = CGPoint(x: center.x, y: max(0.0, lBottom.y - CGFloat(h * 0.35)))
+        self.labiomentalGroove = CGPoint(
+            x: max(0.0, Double(lBottom.x) - uAxis.x * h * 0.35),
+            y: max(0.0, Double(lBottom.y) - uAxis.y * h * 0.35)
+        )
 
-        // Corner height above the lip centre: positive when the commissures
-        // sit above the middle of the mouth, which is exactly what a smile is.
-        let lipCenterY = Double((cBow.y + lBottom.y) * 0.5)
-        let cornerMeanY = Double((minXPt.y + maxXPt.y) * 0.5)
-        self.existingSmileArc = max(0.0, cornerMeanY - lipCenterY)
+        // Corner height above the lip centre along head upAxis: positive when the
+        // commissures sit above the middle of the mouth, which is what a smile is.
+        let lipMid = CGPoint(x: (cBow.x + lBottom.x) * 0.5,
+                             y: (cBow.y + lBottom.y) * 0.5)
+        let cornerMid = CGPoint(x: (minRPt.x + maxRPt.x) * 0.5,
+                                y: (minRPt.y + maxRPt.y) * 0.5)
+        self.existingSmileArc = max(0.0, projU(cornerMid) - projU(lipMid))
     }
 
     /// R3: the share of a requested smile uplift that is still appropriate,

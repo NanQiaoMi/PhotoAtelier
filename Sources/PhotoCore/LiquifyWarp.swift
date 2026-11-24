@@ -283,6 +283,18 @@ public struct WarpField: Equatable {
         }
     }
 
+    /// Accumulates displacement vectors from another warp field with matching grid dimensions.
+    public mutating func add(_ other: WarpField) {
+        guard columns == other.columns,
+              rows == other.rows,
+              offsets.count == other.offsets.count else {
+            return
+        }
+        for index in offsets.indices {
+            offsets[index] += other.offsets[index]
+        }
+    }
+
     // MARK: Field shaping
 
     /// Separable 1-2-1 smoothing; each pass halves high-frequency ripples and

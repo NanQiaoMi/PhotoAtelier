@@ -197,6 +197,15 @@ R5 之后按"能不能达到基础修图软件的效果"这个标准实测，发
 - **兼容性**：配方字段、滑杆控件与版本号（v33）零改动，旧配方行为与皮肤外/保护区逐位不变契约保持不变。
 - **新增单测（3 项）**：`testBlemishRepairRemovesLargerSpotsWithSoftEdgesAndNoBoundaryHalo`、`testBlemishRepairPreservesDiagonalCreasesLikeTearTroughsAndNasolabialFolds`、`testBlemishRepairKeepSpotsStillProtectsLargeDarkMoles`（待远端 CI 全量实测结果补充）。
 
+### R8 补丁：表情引擎背景保护、场平滑与歪头局部坐标系（2026-11-25）
+
+- **根因**：`ExpressionEngine` 原直接将嘴角/人中/丰唇高斯形变叠加到全局 `WarpField`，缺少像 `EyeShapeEngine` / `NoseReshapeEngine` 那样的 `attenuateOutside` 背景锚定保护与 `smooth(passes: 2)` 场平滑，强微笑时易拉动人脸框外背景；同时位移向量与对称性检测写死图像坐标系 `(±X, ±Y)`，歪头时不仅微笑方向偏斜，`lipSymmetry` 还会把本来对称的倾斜嘴角误当高低唇角拉歪；此外 `lip3DKernelSource` 高光采用无余量硬加白 `col += vec3(hl * 0.16)`。
+- **修复**（`Sources/PhotoCore/ExpressionEngine.swift`、`Sources/PhotoCore/LiquifyWarp.swift`）：
+  1. **头部局部正交基**：`ExpressionGeometry` 基于双眼中心连线构建 `rightAxis` / `upAxis`（缺眼点时回退图像轴 `(1,0)` / `(0,1)`），嘴角左右、人中、唇弓、`existingSmileArc` 与全部分量形变及 `lipSymmetry` 投影均改在局部正交基下计算。
+  2. **逐脸背景锚定与场平滑**：为 `WarpField` 新增 `add(_ other: WarpField)`，对每张脸独立执行 `attenuateOutside(rect:feather:)` 保护背景后累加，并在总场执行 `smooth(passes: 2)` 与 `clampMagnitude`。
+  3. **3D 唇部高光余量衰减**：`lip3DKernelSource` 改用 `(vec3(1.0) - min(col, vec3(1.0))) * (hl * 0.16)`，防止亮唇过曝并继续保护外部 HDR 高光不被削顶。
+- **新增单测（3 项）**：`testExpressionWarpProtectsBackgroundOutsideFace`、`testTiltedHeadAlignsSmileAndSymmetryToEyeAxis`、`testLip3DHighlightUsesHeadroomWithoutClippingBrightRegions`。
+
 ---
 
 ## 四、本报告的证据索引

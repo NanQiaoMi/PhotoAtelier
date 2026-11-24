@@ -5,6 +5,14 @@ import CoreGraphics
 
 final class ExpressionTests: XCTestCase {
 
+    private static let sharedContext = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .workingFormat: CIFormat.RGBAf,
+        .cacheIntermediates: false
+    ])
+    private var context: CIContext { Self.sharedContext }
+
     // MARK: - Helper Methods
 
     /// Creates a synthetic test image with a mock face and lips.
@@ -358,5 +366,177 @@ final class ExpressionTests: XCTestCase {
         invalid = valid
         invalid.upperLipPlump = -0.9
         XCTAssertThrowsError(try invalid.validated())
+    }
+
+    // MARK: - 10. R8 Background Protection, Head-Roll Alignment & Lip Highlight Headroom
+
+    func testExpressionWarpProtectsBackgroundOutsideFace() {
+        func shiftedFace(dx: CGFloat) -> FaceLandmarkSet {
+            let (_, baseFace) = makeTestFaceImage()
+            func shift(_ pts: [CGPoint]) -> [CGPoint] {
+                pts.map { CGPoint(x: $0.x + dx, y: $0.y) }
+            }
+            return FaceLandmarkSet(
+                boundingBox: baseFace.boundingBox.offsetBy(dx: dx, dy: 0),
+                confidence: baseFace.confidence,
+                faceContour: shift(baseFace.faceContour),
+                nose: shift(baseFace.nose),
+                outerLips: shift(baseFace.outerLips),
+                innerLips: shift(baseFace.innerLips)
+            )
+        }
+
+        let leftFace = shiftedFace(dx: -0.22)
+        let rightFace = shiftedFace(dx: 0.22)
+        let settings = ExpressionSettings(enabled: true, smileDegree: 1.0, smileWidth: 0.5)
+        let field = ExpressionEngine.generateWarpField(
+            faces: [leftFace, rightFace],
+            settings: settings,
+            imageSize: CGSize(width: 800, height: 600)
+        )
+
+        for corner in [CGPoint(x: 0.02, y: 0.02),
+                       CGPoint(x: 0.98, y: 0.98),
+                       CGPoint(x: 0.02, y: 0.98),
+                       CGPoint(x: 0.98, y: 0.02)] {
+            let d = field.displacement(at: corner)
+            let mag = (d.x * d.x + d.y * d.y).squareRoot()
+            XCTAssertLessThan(mag, 1e-6, "Background outside face bounding boxes must stay anchored")
+        }
+
+        let leftCornerDisp = field.displacement(at: leftFace.outerLips[0])
+        let rightCornerDisp = field.displacement(at: rightFace.outerLips[6])
+        XCTAssertGreaterThan((leftCornerDisp.x * leftCornerDisp.x + leftCornerDisp.y * leftCornerDisp.y).squareRoot(), 0.001,
+                             "First face must retain expression warp in multi-person scene")
+        XCTAssertGreaterThan((rightCornerDisp.x * rightCornerDisp.x + rightCornerDisp.y * rightCornerDisp.y).squareRoot(), 0.001,
+                             "Second face must retain expression warp in multi-person scene")
+    }
+
+    func testTiltedHeadAlignsSmileAndSymmetryToEyeAxis() throws {
+        let (_, baseFace) = makeTestFaceImage()
+        let pivot = CGPoint(x: 0.50, y: 0.50)
+        let angle = -25.0 * Double.pi / 180.0
+        let cosA = cos(angle)
+        let sinA = sin(angle)
+
+        func rotate(_ p: CGPoint) -> CGPoint {
+            let dx = Double(p.x - pivot.x)
+            let dy = Double(p.y - pivot.y)
+            return CGPoint(
+                x: pivot.x + CGFloat(dx * cosA - dy * sinA),
+                y: pivot.y + CGFloat(dx * sinA + dy * cosA)
+            )
+        }
+
+        let leftEye = [CGPoint(x: 0.40, y: 0.62), CGPoint(x: 0.44, y: 0.62)]
+        let rightEye = [CGPoint(x: 0.56, y: 0.62), CGPoint(x: 0.60, y: 0.62)]
+        let symmetricNeutralLips: [CGPoint] = [
+            CGPoint(x: 0.40, y: 0.35),
+            CGPoint(x: 0.43, y: 0.37),
+            CGPoint(x: 0.47, y: 0.38),
+            CGPoint(x: 0.50, y: 0.375),
+            CGPoint(x: 0.53, y: 0.38),
+            CGPoint(x: 0.57, y: 0.37),
+            CGPoint(x: 0.60, y: 0.35),
+            CGPoint(x: 0.57, y: 0.33),
+            CGPoint(x: 0.50, y: 0.32),
+            CGPoint(x: 0.43, y: 0.33)
+        ]
+
+        let tiltedFace = FaceLandmarkSet(
+            boundingBox: baseFace.boundingBox,
+            confidence: 0.98,
+            faceContour: baseFace.faceContour.map(rotate),
+            leftEye: leftEye.map(rotate),
+            rightEye: rightEye.map(rotate),
+            nose: baseFace.nose.map(rotate),
+            outerLips: symmetricNeutralLips.map(rotate),
+            innerLips: baseFace.innerLips.map(rotate)
+        )
+
+        let geometry = try XCTUnwrap(ExpressionGeometry(face: tiltedFace))
+        XCTAssertEqual(geometry.rightAxis.x, cosA, accuracy: 0.02)
+        XCTAssertEqual(geometry.rightAxis.y, sinA, accuracy: 0.02)
+        XCTAssertEqual(geometry.upAxis.x, -sinA, accuracy: 0.02)
+        XCTAssertEqual(geometry.upAxis.y, cosA, accuracy: 0.02)
+
+        let symField = ExpressionEngine.generateWarpField(
+            faces: [tiltedFace],
+            settings: ExpressionSettings(enabled: true, lipSymmetry: 1.0),
+            imageSize: CGSize(width: 400, height: 400)
+        )
+        XCTAssertLessThan(symField.maximumMagnitude, 1e-4,
+                          "A symmetric smile on a tilted head must not be skewed by lipSymmetry")
+
+        let smileField = ExpressionEngine.generateWarpField(
+            faces: [tiltedFace],
+            settings: ExpressionSettings(enabled: true, smileDegree: 0.8),
+            imageSize: CGSize(width: 400, height: 400)
+        )
+        let leftDisp = smileField.displacement(at: geometry.leftCorner)
+        let rightDisp = smileField.displacement(at: geometry.rightCorner)
+        let leftUp = leftDisp.x * geometry.upAxis.x + leftDisp.y * geometry.upAxis.y
+        let rightUp = rightDisp.x * geometry.upAxis.x + rightDisp.y * geometry.upAxis.y
+        let leftRight = leftDisp.x * geometry.rightAxis.x + leftDisp.y * geometry.rightAxis.y
+        let rightRight = rightDisp.x * geometry.rightAxis.x + rightDisp.y * geometry.rightAxis.y
+        XCTAssertGreaterThan(leftUp, 0.001, "Left corner must lift along head upAxis")
+        XCTAssertGreaterThan(rightUp, 0.001, "Right corner must lift along head upAxis")
+        XCTAssertLessThan(leftRight, 0, "Left corner must move outward along -rightAxis")
+        XCTAssertGreaterThan(rightRight, 0, "Right corner must move outward along +rightAxis")
+    }
+
+    func testLip3DHighlightUsesHeadroomWithoutClippingBrightRegions() {
+        let (_, face) = makeTestFaceImage()
+        let width = 400, height = 400
+        let linear = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+
+        func makeLipImage(lipRGB: (Float, Float, Float)) -> CIImage {
+            var data = [Float](repeating: 0, count: width * height * 4)
+            for row in 0..<height {
+                for col in 0..<width {
+                    let i = (row * width + col) * 4
+                    // Place an HDR highlight pixel outside the face (bottom-left corner in CI coords;
+                    // bitmap row 0 is the top of the image).
+                    if col < 40 && row >= height - 40 {
+                        data[i] = 1.40; data[i + 1] = 1.40; data[i + 2] = 1.40; data[i + 3] = 1.0
+                    } else {
+                        data[i] = lipRGB.0; data[i + 1] = lipRGB.1; data[i + 2] = lipRGB.2; data[i + 3] = 1.0
+                    }
+                }
+            }
+            return CIImage(
+                bitmapData: Data(bytes: &data, count: data.count * MemoryLayout<Float>.stride),
+                bytesPerRow: width * 16,
+                size: CGSize(width: width, height: height),
+                format: .RGBAf,
+                colorSpace: linear
+            )
+        }
+
+        func samplePixel(_ image: CIImage, x: Int, y: Int) -> Float {
+            var px = [Float](repeating: 0, count: 4)
+            context.render(image, toBitmap: &px, rowBytes: 16,
+                           bounds: CGRect(x: x, y: y, width: 1, height: 1),
+                           format: .RGBAf, colorSpace: linear)
+            return px[0]
+        }
+
+        let settings = ExpressionSettings(enabled: true, lip3DHighlight: 1.0)
+        let darkInput = makeLipImage(lipRGB: (0.15, 0.08, 0.08))
+        let brightInput = makeLipImage(lipRGB: (0.85, 0.70, 0.68))
+
+        let darkOut = ExpressionEngine.apply(to: darkInput, faces: [face], settings: settings).image
+        let brightOut = ExpressionEngine.apply(to: brightInput, faces: [face], settings: settings).image
+
+        // Upper lip tubercle sits near normalized (0.50, 0.365) -> pixel (200, 146)
+        let darkDelta = samplePixel(darkOut, x: 200, y: 146) - 0.15
+        let brightDelta = samplePixel(brightOut, x: 200, y: 146) - 0.85
+        XCTAssertGreaterThan(darkDelta, 0.02, "Dark lip should receive visible pearlescent lift")
+        XCTAssertLessThan(brightDelta, darkDelta * 0.5,
+                          "Bright lip highlight must attenuate by headroom instead of clipping")
+
+        let hdrOut = samplePixel(darkOut, x: 20, y: 20)
+        XCTAssertEqual(hdrOut, 1.40, accuracy: 0.01,
+                       "HDR pixels outside lip guide must pass through unclipped")
     }
 }
